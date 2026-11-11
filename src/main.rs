@@ -1,14 +1,24 @@
-use bevy::prelude::*;
-use bevy_atmosphere::*;
+use bevy::{
+    camera::Exposure,
+    core_pipeline::tonemapping::Tonemapping,
+    light::{
+        AtmosphereEnvironmentMapLight, light_consts::lux,
+        atmosphere::{Atmosphere, ScatteringMedium},
+    },
+    pbr::AtmosphereSettings,
+    post_process::bloom::Bloom,
+    prelude::*,
+};
 
 mod ai;
+mod dev;
 mod hud;
 mod plane;
 mod utils;
 
 const INITIAL_PLANE_SPEED: f32 = 40.0;
 
-#[derive(Component)]
+#[derive(Resource)]
 pub struct Controls {
     pitch: f32,
     yaw: f32,
@@ -45,6 +55,7 @@ impl Default for Player {
 }
 
 #[derive(Component)]
+#[allow(dead_code)]
 pub struct AI {
     health: f32,
     velocity: Vec3,
@@ -67,61 +78,60 @@ pub struct Ally;
 #[derive(Component)]
 pub struct Enemy;
 
+/// Marker for the main 3D camera that follows the player.
 #[derive(Component)]
-pub struct Camera3d;
+pub struct MainCamera;
 
 fn main() {
     App::new()
-        .insert_resource(WindowDescriptor {
-            title: "Flight Sim".to_string(),
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Flight Sim".to_string(),
+                ..default()
+            }),
             ..default()
-        })
-        .insert_resource(Msaa { samples: 4 })
-        .insert_resource(AtmosphereMat {
-            sun_position: Vec3::new(4.0, 10.0, 10.0),
-            ..default()
-        })
+        }))
         .insert_resource(Controls::default())
-        .insert_resource(AmbientLight {
-            color: Color::WHITE,
-            brightness: 1.0 / 5.0,
-        })
-        .add_plugins(DefaultPlugins)
-        .add_plugin(AtmospherePlugin {
-            dynamic: false,
-            sky_radius: 1000000.0,
-        })
-        .add_plugin(hud::HUDPlugin)
-        .add_plugin(plane::PlanePlugin)
-        .add_plugin(ai::AIPlugin)
-        .add_startup_system(setup)
+        .add_plugins((hud::HUDPlugin, plane::PlanePlugin, ai::AIPlugin, dev::DevPlugin))
+        .add_systems(Startup, setup)
         .run();
 }
 
 /// set up the background
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let cityscape = asset_server.load("models/cityscape/scene.gltf#Scene0");
+fn setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
+) {
+    let cityscape = asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/cityscape/scene.gltf"));
 
-    commands
-        .spawn_bundle((
-            Transform::from_scale(Vec3::new(10.0, 10.0, 10.0)),
-            GlobalTransform::identity(),
-        ))
-        .with_children(|parent| {
-            parent.spawn_scene(cityscape);
-        });
+    commands.spawn((
+        WorldAssetRoot(cityscape),
+        Transform::from_scale(Vec3::splat(10.0)),
+    ));
 
-    // light
-    commands.spawn_bundle(DirectionalLightBundle {
-        transform: Transform::from_xyz(4.0, 10.0, 10.0),
-        directional_light: DirectionalLight {
-            shadows_enabled: true,
+    // sun
+    commands.spawn((
+        DirectionalLight {
+            shadow_maps_enabled: true,
+            illuminance: lux::RAW_SUNLIGHT,
             ..default()
         },
-        ..default()
-    });
+        Transform::from_xyz(4.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
 
-    commands
-        .spawn_bundle(PerspectiveCameraBundle::default())
-        .insert(Camera3d);
+    // the planet's atmosphere (centered below the origin by default)
+    commands.spawn(Atmosphere::earth(
+        scattering_mediums.add(ScatteringMedium::default()),
+    ));
+
+    commands.spawn((
+        Camera3d::default(),
+        MainCamera,
+        AtmosphereSettings::default(),
+        AtmosphereEnvironmentMapLight::default(),
+        Exposure::SUNLIGHT,
+        Tonemapping::AcesFitted,
+        Bloom::NATURAL,
+    ));
 }

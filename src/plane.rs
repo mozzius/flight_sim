@@ -1,7 +1,7 @@
-use bevy::{core::FixedTimestep, prelude::*};
+use bevy::prelude::*;
 
 use super::utils;
-use super::{Ally, Camera3d, Controls, Player};
+use super::{Ally, Controls, MainCamera, Player};
 
 const TIME_STEP: f32 = 1.0 / 60.0;
 const INITIAL_PLANE_ALTITUDE: f32 = 1000.0;
@@ -20,67 +20,60 @@ pub struct PlanePlugin;
 
 impl Plugin for PlanePlugin {
     fn build(&self, app: &mut App) {
-        app.add_startup_system(setup).add_system_set(
-            SystemSet::new()
-                .with_run_criteria(FixedTimestep::step(TIME_STEP as f64))
-                .with_system(controls_system)
-                .with_system(plane_system.after(controls_system)),
-        );
+        app.insert_resource(Time::<Fixed>::from_seconds(TIME_STEP as f64))
+            .add_systems(Startup, setup)
+            .add_systems(FixedUpdate, (controls_system, plane_system).chain());
     }
 }
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let f22_raptor = asset_server.load("models/f22-raptor/scene.gltf#Scene0");
+    let f22_raptor = asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/f22-raptor/scene.gltf"));
 
     commands
-        .spawn_bundle((
+        .spawn((
             Transform::from_translation(Vec3::new(0.0, INITIAL_PLANE_ALTITUDE, 0.0)),
-            GlobalTransform::identity(),
+            Visibility::default(),
+            Player::default(),
+            Ally,
         ))
-        .insert(Player::default())
-        .insert(Ally)
         .with_children(|parent| {
             // center of the plane is not at 0,0 so offset slightly
-            parent
-                .spawn_bundle((
-                    Transform::from_translation(Vec3::new(0.0, -5.0, 0.0))
-                        .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
-                    GlobalTransform::identity(),
-                ))
-                .with_children(|parent| {
-                    parent.spawn_scene(f22_raptor);
-                });
+            parent.spawn((
+                WorldAssetRoot(f22_raptor),
+                Transform::from_translation(Vec3::new(0.0, -5.0, 0.0))
+                    .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
+            ));
         });
 }
 
-fn controls_system(keyboard_input: Res<Input<KeyCode>>, mut controls: ResMut<Controls>) {
+fn controls_system(keyboard_input: Res<ButtonInput<KeyCode>>, mut controls: ResMut<Controls>) {
     let mut pitch = 0.0;
     let mut roll = 0.0;
     let mut yaw = 0.0;
     let mut thrust = 0.0;
 
-    if keyboard_input.pressed(KeyCode::Left) || keyboard_input.pressed(KeyCode::A) {
+    if keyboard_input.pressed(KeyCode::ArrowLeft) || keyboard_input.pressed(KeyCode::KeyA) {
         roll += 1.0;
     }
-    if keyboard_input.pressed(KeyCode::Right) || keyboard_input.pressed(KeyCode::D) {
+    if keyboard_input.pressed(KeyCode::ArrowRight) || keyboard_input.pressed(KeyCode::KeyD) {
         roll -= 1.0;
     }
-    if keyboard_input.pressed(KeyCode::Up) || keyboard_input.pressed(KeyCode::W) {
+    if keyboard_input.pressed(KeyCode::ArrowUp) || keyboard_input.pressed(KeyCode::KeyW) {
         pitch -= 1.0;
     }
-    if keyboard_input.pressed(KeyCode::Down) || keyboard_input.pressed(KeyCode::S) {
+    if keyboard_input.pressed(KeyCode::ArrowDown) || keyboard_input.pressed(KeyCode::KeyS) {
         pitch += 1.0;
     }
-    if keyboard_input.pressed(KeyCode::Q) {
+    if keyboard_input.pressed(KeyCode::KeyQ) {
         yaw += 1.0;
     }
-    if keyboard_input.pressed(KeyCode::E) {
+    if keyboard_input.pressed(KeyCode::KeyE) {
         yaw -= 1.0
     }
-    if keyboard_input.pressed(KeyCode::LShift) || keyboard_input.pressed(KeyCode::RShift) {
+    if keyboard_input.pressed(KeyCode::ShiftLeft) || keyboard_input.pressed(KeyCode::ShiftRight) {
         thrust += 1.0;
     }
-    if keyboard_input.pressed(KeyCode::LControl) || keyboard_input.pressed(KeyCode::RControl) {
+    if keyboard_input.pressed(KeyCode::ControlLeft) || keyboard_input.pressed(KeyCode::ControlRight) {
         thrust -= 1.0;
     }
 
@@ -99,12 +92,16 @@ fn controls_system(keyboard_input: Res<Input<KeyCode>>, mut controls: ResMut<Con
 fn plane_system(
     controls: Res<Controls>,
     mut query: Query<(&mut Transform, &mut Player), With<Player>>,
-    mut camera_query: Query<&mut Transform, (With<Camera3d>, Without<Player>)>,
+    mut camera_query: Query<&mut Transform, (With<MainCamera>, Without<Player>)>,
 ) {
-    let mut camera = camera_query.single_mut();
-    let (mut player_transform, mut player) = query.single_mut();
+    let Ok(mut camera) = camera_query.single_mut() else {
+        return;
+    };
+    let Ok((mut player_transform, mut player)) = query.single_mut() else {
+        return;
+    };
 
-    let forwards = player_transform.forward();
+    let forwards = player_transform.forward().as_vec3();
 
     let axis_deviance = Vec3::normalize_or_zero(player.velocity)
         .dot(Vec3::normalize_or_zero(forwards))
@@ -116,9 +113,9 @@ fn plane_system(
     let roll = controls.roll * 0.05 * axis_deviance;
 
     // many thanks to rchar
-    let player_x = player_transform.local_x();
-    let player_y = player_transform.local_y();
-    let player_z = player_transform.local_z();
+    let player_x = player_transform.local_x().as_vec3();
+    let player_y = player_transform.local_y().as_vec3();
+    let player_z = player_transform.local_z().as_vec3();
     let rot = Quat::from_axis_angle(player_x, pitch)
         * Quat::from_axis_angle(player_y, yaw)
         * Quat::from_axis_angle(player_z, roll);
@@ -142,7 +139,7 @@ fn plane_system(
 
     // nudge velocity vector towards the forwards vector
     player.velocity = player.velocity.lerp(
-        player_transform.forward() * player.velocity.length(),
+        forwards * player.velocity.length(),
         utils::clamp(axis_deviance, 0.1, 1.0) * 0.05,
     );
 

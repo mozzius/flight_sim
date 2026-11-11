@@ -1,9 +1,9 @@
 use bevy::{
-    diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
 };
 
-use super::{Camera3d, Controls, Enemy, Player};
+use super::{Controls, Enemy, MainCamera, Player};
 
 #[derive(Component)]
 struct FpsText;
@@ -15,207 +15,157 @@ struct StallWarningText;
 struct SpeedText;
 
 #[derive(Component)]
+#[allow(dead_code)]
 struct Reticule(Entity);
 
 pub struct HUDPlugin;
 
 impl Plugin for HUDPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugin(FrameTimeDiagnosticsPlugin::default())
-            .add_startup_system(setup)
-            .add_system(stall_warning_system)
-            .add_system(speed_system)
-            // .add_system(reticule_system)
-            .add_system(fps_system);
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+            .add_systems(Startup, setup)
+            .add_systems(
+                Update,
+                (
+                    stall_warning_system,
+                    speed_system,
+                    // reticule_system,
+                    fps_system,
+                ),
+            );
     }
 }
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.spawn_bundle(UiCameraBundle::default());
-
     let font = asset_server.load("fonts/RobotoMono/RobotoMono-Regular.ttf");
 
+    // fps counter, top right
     commands
-        .spawn_bundle(NodeBundle {
-            style: Style {
-                align_self: AlignSelf::FlexEnd,
+        .spawn((
+            Node {
                 position_type: PositionType::Absolute,
-                position: Rect {
-                    top: Val::Px(5.0),
-                    right: Val::Px(5.0),
-                    ..default()
-                },
+                top: px(5.0),
+                right: px(5.0),
                 ..default()
             },
-            color: Color::BLACK.into(),
-            ..default()
-        })
-        .with_children(|parent| {
-            parent
-                .spawn_bundle(TextBundle {
-                    style: Style {
-                        margin: Rect {
-                            left: Val::Px(3.0),
-                            right: Val::Px(3.0),
-                            ..default()
-                        },
-                        ..default()
-                    },
-                    text: Text::with_section(
-                        "",
-                        TextStyle {
-                            font: font.clone(),
-                            font_size: 18.0,
-                            color: Color::WHITE,
-                        },
-                        TextAlignment {
-                            horizontal: HorizontalAlign::Right,
-                            ..default()
-                        },
-                    ),
-                    ..default()
-                })
-                .insert(FpsText);
-        });
-
-    commands
-        .spawn_bundle(NodeBundle {
-            style: Style {
-                align_self: AlignSelf::FlexEnd,
-                position_type: PositionType::Absolute,
-                position: Rect {
-                    bottom: Val::Percent(10.0),
-                    left: Val::Percent(20.0),
-                    ..default()
-                },
+            BackgroundColor(Color::BLACK),
+        ))
+        .with_child((
+            Text::new(""),
+            TextFont {
+                font: font.clone().into(),
+                font_size: FontSize::Px(18.0),
                 ..default()
             },
-            color: Color::NONE.into(),
-            ..default()
-        })
-        .with_children(|parent| {
-            parent
-                .spawn_bundle(TextBundle {
-                    text: Text {
-                        sections: vec![
-                            TextSection {
-                                value: "Throttle: ".to_string(),
-                                style: TextStyle {
-                                    font: font.clone(),
-                                    font_size: 30.0,
-                                    color: Color::WHITE,
-                                },
-                            },
-                            TextSection {
-                                value: "".to_string(),
-                                style: TextStyle {
-                                    font: font.clone(),
-                                    font_size: 30.0,
-                                    color: Color::WHITE,
-                                },
-                            },
-                        ],
-                        ..default()
-                    },
-                    ..default()
-                })
-                .insert(SpeedText);
-        });
-
-    commands
-        .spawn_bundle(NodeBundle {
-            style: Style {
-                size: Size::new(Val::Percent(100.0), Val::Percent(60.0)),
-                position_type: PositionType::Absolute,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::FlexEnd,
-                position: Rect {
-                    bottom: Val::Px(0.0),
-                    ..default()
-                },
+            TextColor(Color::WHITE),
+            TextLayout::justify(Justify::Right),
+            Node {
+                margin: UiRect::horizontal(px(3.0)),
                 ..default()
             },
-            color: Color::NONE.into(),
+            FpsText,
+        ));
+
+    // throttle readout, bottom left
+    let throttle_font = TextFont {
+        font: font.clone().into(),
+        font_size: FontSize::Px(30.0),
+        ..default()
+    };
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            bottom: percent(10.0),
+            left: percent(20.0),
             ..default()
         })
-        .with_children(|parent| {
-            parent
-                .spawn_bundle(TextBundle {
-                    style: Style {
-                        align_self: AlignSelf::Center,
-                        ..default()
-                    },
-                    text: Text::with_section(
-                        "!! STALL WARNING !!",
-                        TextStyle {
-                            font: font.clone(),
-                            font_size: 40.0,
-                            color: Color::RED,
-                        },
-                        TextAlignment {
-                            vertical: VerticalAlign::Center,
-                            horizontal: HorizontalAlign::Center,
-                        },
-                    ),
+        .with_child((
+            Text::new("Throttle: "),
+            throttle_font.clone(),
+            TextColor(Color::WHITE),
+            children![(TextSpan::default(), throttle_font, TextColor(Color::WHITE), SpeedText)],
+        ));
 
-                    ..default()
-                })
-                .insert(StallWarningText);
-        });
+    // stall warning, centered
+    commands
+        .spawn(Node {
+            width: percent(100.0),
+            height: percent(60.0),
+            position_type: PositionType::Absolute,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::FlexEnd,
+            bottom: px(0.0),
+            ..default()
+        })
+        .with_child((
+            Text::new("!! STALL WARNING !!"),
+            TextFont {
+                font: font.into(),
+                font_size: FontSize::Px(40.0),
+                ..default()
+            },
+            TextColor(Color::srgb(1.0, 0.0, 0.0)),
+            TextLayout::justify(Justify::Center),
+            Node {
+                align_self: AlignSelf::Center,
+                ..default()
+            },
+            StallWarningText,
+        ));
 }
 
-fn fps_system(diagnostics: Res<Diagnostics>, mut query: Query<&mut Text, With<FpsText>>) {
+fn fps_system(diagnostics: Res<DiagnosticsStore>, mut query: Query<&mut Text, With<FpsText>>) {
     for mut text in query.iter_mut() {
-        if let Some(fps) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
-            if let Some(average) = fps.average() {
-                text.sections[0].value = format!("{:.0}", average);
-            }
+        if let Some(average) = diagnostics
+            .get(&FrameTimeDiagnosticsPlugin::FPS)
+            .and_then(|fps| fps.average())
+        {
+            text.0 = format!("{:.0}", average);
         }
     }
 }
 
 fn stall_warning_system(
-    mut text_query: Query<&mut Style, With<StallWarningText>>,
+    mut text_query: Query<&mut Node, With<StallWarningText>>,
     player_query: Query<&Player>,
 ) {
-    let player = player_query.single();
-    for mut text in text_query.iter_mut() {
-        if player.stalling {
-            text.display = Display::Flex;
+    let Ok(player) = player_query.single() else {
+        return;
+    };
+    for mut node in text_query.iter_mut() {
+        node.display = if player.stalling {
+            Display::Flex
         } else {
-            text.display = Display::None;
-        }
+            Display::None
+        };
     }
 }
 
-fn speed_system(mut text_query: Query<&mut Text, With<SpeedText>>, controls: Res<Controls>) {
-    for mut text in text_query.iter_mut() {
-        text.sections[1].value = format!("{:.0}", controls.thrust);
+fn speed_system(mut span_query: Query<&mut TextSpan, With<SpeedText>>, controls: Res<Controls>) {
+    for mut span in span_query.iter_mut() {
+        span.0 = format!("{:.0}", controls.thrust);
     }
 }
 
+#[allow(dead_code)]
 fn reticule_system(
-    windows: Res<Windows>,
-    mut reticule_query: Query<(&mut Style, &Reticule)>,
+    mut reticule_query: Query<(&mut Node, &Reticule)>,
     targets_query: Query<&GlobalTransform, With<Enemy>>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    images: Res<Assets<Image>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
 ) {
-    let (camera, camera_transform) = camera_query.single();
-    for (mut style, reticule) in reticule_query.iter_mut() {
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+    for (mut node, reticule) in reticule_query.iter_mut() {
         if let Ok(transform) = targets_query.get(reticule.0) {
-            match camera.world_to_screen(&windows, &images, camera_transform, transform.translation)
-            {
-                Some(screen_position) => {
-                    style.display = Display::Flex;
-                    style.position = Rect {
-                        left: Val::Px(screen_position.x),
-                        top: Val::Px(screen_position.y),
-                        ..default()
-                    };
+            match camera.world_to_viewport(camera_transform, transform.translation()) {
+                Ok(screen_position) => {
+                    node.display = Display::Flex;
+                    node.left = px(screen_position.x);
+                    node.top = px(screen_position.y);
                 }
-                None => {
-                    style.display = Display::None;
+                Err(_) => {
+                    node.display = Display::None;
                 }
             }
         } else {
