@@ -10,6 +10,17 @@ use bevy::{
 
 pub struct DevPlugin;
 
+/// Screenshot runs render headless (no window), into this image.
+pub const HEADLESS_SIZE: UVec2 = UVec2::new(2560, 1440);
+
+pub fn headless() -> bool {
+    std::env::var("FLIGHT_SIM_SCREENSHOT").is_ok()
+}
+
+/// The offscreen image the camera renders to in headless runs.
+#[derive(Resource, Clone)]
+pub struct HeadlessTarget(pub Handle<Image>);
+
 #[derive(Resource)]
 struct AutoScreenshot {
     path: String,
@@ -50,26 +61,14 @@ impl Plugin for DevPlugin {
                 after,
                 taken_at: None,
             })
-            .add_systems(Startup, keep_window_on_top)
             .add_systems(Update, auto_screenshot);
-        }
-    }
-}
-
-/// macOS stops presenting windows that are fully covered, and screenshots of
-/// them come back black, so keep the window on top during screenshot runs.
-/// `FLIGHT_SIM_NOVSYNC=1` uncaps the frame rate, for measuring frame cost.
-fn keep_window_on_top(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>) {
-    for mut window in &mut windows {
-        window.window_level = bevy::window::WindowLevel::AlwaysOnTop;
-        if std::env::var("FLIGHT_SIM_NOVSYNC").is_ok() {
-            window.present_mode = bevy::window::PresentMode::AutoNoVsync;
         }
     }
 }
 
 fn auto_screenshot(
     mut commands: Commands,
+    target: Option<Res<HeadlessTarget>>,
     time: Res<Time>,
     mut state: ResMut<AutoScreenshot>,
     mut exit: MessageWriter<AppExit>,
@@ -77,8 +76,12 @@ fn auto_screenshot(
     let now = time.elapsed_secs();
     match state.taken_at {
         None if now >= state.after => {
+            let screenshot = match &target {
+                Some(t) => Screenshot::image(t.0.clone()),
+                None => Screenshot::primary_window(),
+            };
             commands
-                .spawn(Screenshot::primary_window())
+                .spawn(screenshot)
                 .observe(save_to_disk(state.path.clone()));
             state.taken_at = Some(now);
         }

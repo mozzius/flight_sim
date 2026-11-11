@@ -5,7 +5,6 @@
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
-    window::PrimaryWindow,
 };
 
 use crate::{
@@ -36,6 +35,10 @@ impl Plugin for HUDPlugin {
                     update_center_symbols,
                     update_readouts,
                     update_warnings,
+                    gun_cue,
+                    target_panel,
+                    spawn_missile_markers,
+                    update_missile_markers,
                 )
                     .chain()
                     .after(TransformSystems::Propagate),
@@ -87,8 +90,6 @@ enum CenterSymbol {
     FlightPath,
     /// Mouse-aim point.
     AimCircle,
-    /// Gun lead pipper on the selected target.
-    Pipper,
     /// Points at the selected target when it's off screen.
     OffscreenArrow,
 }
@@ -242,9 +243,57 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
         .spawn((ring(34.0, 1.5, Color::srgba(1.0, 1.0, 1.0, 0.8)), CenterSymbol::AimCircle))
         .with_child(dot(13.0, 5.0, Color::WHITE));
+    // gun cue: lead pipper, a line from the target to it, and a SHOOT cue
     commands
-        .spawn((ring(44.0, 2.0, HOSTILE), CenterSymbol::Pipper))
-        .with_child(dot(17.0, 6.0, HOSTILE));
+        .spawn((
+            Node {
+                border: UiRect::all(px(2)),
+                border_radius: BorderRadius::MAX,
+                display: Display::None,
+                // keep the centre dot centred whatever size the ring is
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..abs_node(px(0), px(0), px(44), px(44))
+            },
+            BorderColor::all(HOSTILE),
+            GunCue::Pipper,
+        ))
+        .with_child((
+            Node {
+                width: px(6),
+                height: px(6),
+                border_radius: BorderRadius::MAX,
+                ..default()
+            },
+            BackgroundColor(HOSTILE),
+        ));
+    commands.spawn((
+        Node { display: Display::None, ..abs_node(px(0), px(0), px(10), px(2)) },
+        BackgroundColor(HOSTILE.with_alpha(0.7)),
+        UiTransform::default(),
+        GunCue::LeadLine,
+    ));
+    commands.spawn((
+        Text::new("SHOOT"),
+        text(&font, 18.0, Color::WHITE),
+        shadow(),
+        Node { display: Display::None, ..abs_node(px(0), px(0), Val::Auto, Val::Auto) },
+        GunCue::Shoot,
+    ));
+    // target info, bottom right
+    commands.spawn((
+        Text::new(""),
+        text(&font, 17.0, HOSTILE),
+        TextLayout::justify(Justify::Right),
+        shadow(),
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(24),
+            bottom: px(24),
+            ..default()
+        },
+        TargetPanel,
+    ));
     commands.spawn((
         Node {
             border: UiRect::all(px(3)),
@@ -392,16 +441,17 @@ fn update_markers(
 #[allow(clippy::type_complexity)]
 fn update_center_symbols(
     camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-    window: Query<&Window, With<PrimaryWindow>>,
     mode: Res<ControlMode>,
     aim: Res<MouseAim>,
     player: Query<(&Transform, &FlightState, &Targeting), With<Player>>,
     targets: Query<(&Transform, &FlightState), (With<Aircraft>, Without<Player>)>,
     mut symbols: Query<(&CenterSymbol, &mut Node, &mut UiTransform)>,
 ) {
-    let (Ok((camera, cam_gt)), Ok(window)) = (camera.single(), window.single()) else {
+    let Ok((camera, cam_gt)) = camera.single() else {
         return;
     };
+    // the camera may render to a window or (in headless test runs) an image
+    let viewport = camera.logical_viewport_size().unwrap_or(Vec2::new(1280.0, 720.0));
     let player = player.single().ok();
     let place = |node: &mut Node, world: Option<Vec3>| {
         let size = match node.width {
@@ -440,20 +490,12 @@ fn update_center_symbols(
                 &mut node,
                 (*mode == ControlMode::MouseAim).then(|| pos + aim.dir * 1_000.0),
             ),
-            CenterSymbol::Pipper => {
-                let lead = target.and_then(|(tt, ts)| {
-                    (tt.translation.distance(pos) < 1_800.0).then(|| {
-                        gun_lead_point(pos, state.velocity, tt.translation, ts.velocity)
-                    })
-                });
-                place(&mut node, lead);
-            }
             CenterSymbol::OffscreenArrow => {
                 let Some((tt, _)) = target else {
                     node.display = Display::None;
                     continue;
                 };
-                let size = window.size();
+                let size = viewport;
                 let screen = camera.world_to_viewport(cam_gt, tt.translation).ok();
                 let on_screen = in_front(cam_gt, tt.translation)
                     && screen.is_some_and(|s| {
@@ -602,5 +644,255 @@ fn shadow() -> TextShadow {
     TextShadow {
         offset: Vec2::splat(1.5),
         color: Color::srgba(0.0, 0.0, 0.0, 0.65),
+    }
+}
+
+#[derive(Component, PartialEq, Eq, Clone, Copy)]
+enum GunCue {
+    Pipper,
+    LeadLine,
+    Shoot,
+}
+
+#[derive(Component)]
+struct TargetPanel;
+
+/// How far out the gun cue is shown, and where the gun is effective.
+const GUN_CUE_RANGE: f32 = 3_000.0;
+const GUN_RANGE: f32 = 1_200.0;
+
+/// Gun lead pipper for the locked target: put your nose (the boresight cross)
+/// on it and shoot. Shows a line from the target to where you need to aim,
+/// and turns white with SHOOT when the solution is good.
+#[allow(clippy::type_complexity)]
+fn gun_cue(
+    camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    player: Query<(&Transform, &FlightState, &Targeting, &Weapons), With<Player>>,
+    targets: Query<(&Transform, &FlightState, &Aircraft), Without<Player>>,
+    mut cues: Query<(&GunCue, &mut Node, &mut UiTransform, Option<&mut BorderColor>, Option<&Children>)>,
+    mut dots: Query<&mut BackgroundColor>,
+) {
+    let Ok((camera, cam_gt)) = camera.single() else {
+        return;
+    };
+    let to_screen = |p: Vec3| {
+        in_front(cam_gt, p)
+            .then(|| camera.world_to_viewport(cam_gt, p).ok())
+            .flatten()
+    };
+    // work out the solution once
+    let solution = player.single().ok().and_then(|(t, s, tg, w)| {
+        let (tt, ts, ac) = tg.target.and_then(|e| targets.get(e).ok())?;
+        let dist = tt.translation.distance(t.translation);
+        if dist > GUN_CUE_RANGE {
+            return None;
+        }
+        let lead = gun_lead_point(t.translation, s.velocity, tt.translation, ts.velocity);
+        // on target: the nose points within the target's size of the lead point
+        let lead_dir = (lead - t.translation).normalize_or_zero();
+        let miss = lead_dir.angle_between(t.forward().as_vec3()) * dist;
+        let good = miss < ac.radius * 1.2 && dist < GUN_RANGE && w.gun_ammo > 0;
+        Some((to_screen(lead), to_screen(tt.translation), good, dist))
+    });
+
+    for (cue, mut node, mut ui_transform, border, children) in &mut cues {
+        let Some((lead_screen, target_screen, good, dist)) = solution else {
+            node.display = Display::None;
+            continue;
+        };
+        let colour = if good {
+            Color::WHITE
+        } else if dist < GUN_RANGE {
+            HOSTILE
+        } else {
+            HOSTILE.with_alpha(0.55)
+        };
+        match cue {
+            GunCue::Pipper => {
+                let Some(p) = lead_screen else {
+                    node.display = Display::None;
+                    continue;
+                };
+                // the ring shrinks as the target gets closer: a rough range cue
+                let size = 30.0 + 30.0 * (dist / GUN_CUE_RANGE);
+                node.display = Display::Flex;
+                node.width = px(size);
+                node.height = px(size);
+                node.left = px(p.x - size / 2.0);
+                node.top = px(p.y - size / 2.0);
+                if let Some(mut b) = border {
+                    *b = BorderColor::all(colour);
+                }
+                for child in children.into_iter().flatten() {
+                    if let Ok(mut bg) = dots.get_mut(*child) {
+                        bg.0 = colour;
+                    }
+                }
+            }
+            GunCue::LeadLine => {
+                let (Some(a), Some(b)) = (target_screen, lead_screen) else {
+                    node.display = Display::None;
+                    continue;
+                };
+                let d = b - a;
+                let len = d.length();
+                if len < 25.0 {
+                    node.display = Display::None;
+                    continue;
+                }
+                // a thin bar centred between the two points, rotated onto the line
+                let mid = (a + b) / 2.0;
+                node.display = Display::Flex;
+                node.width = px(len - 30.0);
+                node.left = px(mid.x - (len - 30.0) / 2.0);
+                node.top = px(mid.y - 1.0);
+                ui_transform.rotation = Rot2::radians(d.to_angle());
+            }
+            GunCue::Shoot => {
+                let (Some(p), true) = (lead_screen, good) else {
+                    node.display = Display::None;
+                    continue;
+                };
+                node.display = Display::Flex;
+                node.left = px(p.x - 28.0);
+                node.top = px(p.y + 30.0);
+            }
+        }
+    }
+}
+
+/// Bottom-right: what you're locked on to.
+#[allow(clippy::type_complexity)]
+fn target_panel(
+    player: Query<(&Transform, &FlightState, &Targeting, &Team), With<Player>>,
+    aircraft: Query<(&Transform, &FlightState, &Team), (With<Aircraft>, Without<Disabled>)>,
+    mut panel: Query<&mut Text, With<TargetPanel>>,
+) {
+    let Ok(mut text) = panel.single_mut() else {
+        return;
+    };
+    let value = player
+        .single()
+        .ok()
+        .and_then(|(t, s, tg, team)| {
+            let (tt, ts, _) = aircraft.get(tg.target?).ok()?;
+            let hostiles: Vec<_> = aircraft.iter().filter(|(_, _, tm)| *tm != team).collect();
+            let to = tt.translation - t.translation;
+            let closure = (s.velocity - ts.velocity).dot(to.normalize_or_zero());
+            let lock = if tg.locked() {
+                "LOCKED".to_string()
+            } else if tg.lock > 0.0 {
+                format!("LOCKING {:>3.0}%", tg.lock * 100.0)
+            } else {
+                "NO LOCK".to_string()
+            };
+            Some(format!(
+                "TGT  {} hostiles  [TAB]\n{:.1} km   {:>+5.0} km/h closing\n{:>5.0} m alt   {:>4.0} km/h\n{lock}",
+                hostiles.len(),
+                to.length() / 1000.0,
+                closure * 3.6,
+                tt.translation.y,
+                ts.airspeed * 3.6,
+            ))
+        })
+        .unwrap_or_default();
+    if text.0 != value {
+        text.0 = value;
+    }
+}
+
+/// A diamond on every missile in the air that isn't ours.
+#[derive(Component)]
+struct MissileMarker {
+    missile: Entity,
+}
+
+fn spawn_missile_markers(
+    mut commands: Commands,
+    font: Res<HudFont>,
+    new: Query<Entity, Added<Missile>>,
+) {
+    for missile in &new {
+        commands
+            .spawn((
+                Node {
+                    border: UiRect::all(px(2)),
+                    display: Display::None,
+                    ..abs_node(px(0), px(0), px(14), px(14))
+                },
+                BorderColor::all(WARNING),
+                UiTransform::from_rotation(Rot2::degrees(45.0)),
+                MissileMarker { missile },
+            ))
+            .with_child((
+                Text::new(""),
+                text(&font.0, 13.0, HOSTILE),
+                shadow(),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: px(14),
+                    left: px(14),
+                    width: px(70),
+                    ..default()
+                },
+                // undo the diamond's rotation for the label
+                UiTransform::from_rotation(Rot2::degrees(-45.0)),
+                MarkerLabel,
+            ));
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn update_missile_markers(
+    mut commands: Commands,
+    time: Res<Time>,
+    camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    player: Query<(Entity, &Transform, &Team), With<Player>>,
+    missiles: Query<(&GlobalTransform, &Missile)>,
+    mut markers: Query<(Entity, &MissileMarker, &mut Node, &mut BorderColor, &Children), Without<TargetMarker>>,
+    mut labels: Query<&mut Text, With<MarkerLabel>>,
+) {
+    let Ok((camera, cam_gt)) = camera.single() else {
+        return;
+    };
+    let player = player.single().ok();
+    let blink = (time.elapsed_secs() * 5.0).fract() < 0.6;
+    for (entity, marker, mut node, mut border, children) in &mut markers {
+        let Ok((gt, missile)) = missiles.get(marker.missile) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        let pos = gt.translation();
+        let (threat, hostile, dist) = match player {
+            Some((me, t, team)) => (
+                missile.target == Some(me),
+                missile.team != *team,
+                pos.distance(t.translation),
+            ),
+            None => (false, true, f32::MAX),
+        };
+        // our own missiles don't need markers; distant hostile ones neither
+        let screen = in_front(cam_gt, pos)
+            .then(|| camera.world_to_viewport(cam_gt, pos).ok())
+            .flatten();
+        let (Some(screen), true) = (screen, hostile && (threat || dist < 5_000.0)) else {
+            node.display = Display::None;
+            continue;
+        };
+        let size = if threat { 18.0 } else { 11.0 };
+        node.display = if threat && !blink && dist < 1_500.0 { Display::None } else { Display::Flex };
+        node.width = px(size);
+        node.height = px(size);
+        node.left = px(screen.x - size / 2.0);
+        node.top = px(screen.y - size / 2.0);
+        *border = BorderColor::all(if threat { HOSTILE } else { WARNING.with_alpha(0.7) });
+        for child in children.iter() {
+            if let Ok(mut label) = labels.get_mut(child) {
+                let value = if threat { format!("MSL {:.1}", dist / 1000.0) } else { String::new() };
+                if label.0 != value {
+                    label.0 = value;
+                }
+            }
+        }
     }
 }

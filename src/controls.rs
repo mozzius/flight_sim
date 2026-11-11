@@ -7,11 +7,13 @@
 //!
 //! Keyboard: S/W or ↓/↑ pitch, A/D or ←/→ roll, Q/E yaw, Shift/Ctrl
 //! throttle (hold at the end for afterburner/airbrake), Space or left mouse =
-//! gun, F or right mouse = missile, X = flares, Tab = next target.
+//! gun, F or right mouse = missile, X = flares, Tab / Shift+Tab = next /
+//! previous target, R or middle mouse = target nearest the crosshair.
 //!
 //! Gamepad: left stick pitch/roll, LB/RB yaw, RT/LT throttle (fully pressed =
-//! afterburner/airbrake), A = gun, B = missile, X = flares, Y = next target,
-//! right stick = look around.
+//! afterburner/airbrake), A = gun, B = missile, X = flares, D-pad left/right =
+//! previous/next target, Y or D-pad up = target nearest the crosshair, right
+//! stick = look around.
 
 use bevy::{
     input::mouse::AccumulatedMouseMotion,
@@ -59,6 +61,9 @@ pub struct PlayerActions {
     pub fire_missile: bool,
     pub drop_flares: bool,
     pub next_target: bool,
+    pub previous_target: bool,
+    /// Select the hostile closest to the crosshair.
+    pub target_under_crosshair: bool,
 }
 
 /// Persistent throttle setting (0..1).
@@ -154,7 +159,15 @@ fn gather_actions(
         || (mouse_mode && mouse.just_pressed(MouseButton::Right))
         || pad_just(GamepadButton::East);
     actions.drop_flares |= keys.just_pressed(KeyCode::KeyX) || pad_just(GamepadButton::West);
-    actions.next_target |= keys.just_pressed(KeyCode::Tab) || pad_just(GamepadButton::North);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    actions.next_target |= (keys.just_pressed(KeyCode::Tab) && !shift)
+        || pad_just(GamepadButton::DPadRight);
+    actions.previous_target |=
+        (keys.just_pressed(KeyCode::Tab) && shift) || pad_just(GamepadButton::DPadLeft);
+    actions.target_under_crosshair |= keys.just_pressed(KeyCode::KeyR)
+        || mouse.just_pressed(MouseButton::Middle)
+        || pad_just(GamepadButton::DPadUp)
+        || pad_just(GamepadButton::North);
 }
 
 fn update_mouse_aim(
