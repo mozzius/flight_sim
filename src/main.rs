@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_transform_interpolation::prelude::*;
 
 mod ai;
+mod audio;
 mod camera;
 mod controls;
 mod dev;
@@ -9,6 +10,7 @@ mod effects;
 mod flight;
 mod game;
 mod hud;
+mod terrain_gen;
 mod weapons;
 mod world;
 
@@ -43,6 +45,7 @@ fn main() {
             ai::AIPlugin,
             hud::HUDPlugin,
             effects::EffectsPlugin,
+            audio::AudioFxPlugin,
             dev::DevPlugin,
         ))
         .run();

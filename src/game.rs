@@ -9,6 +9,7 @@ use crate::{
     controls::MouseAim,
     flight::{Aircraft, AircraftCrashed, ControlInput, Disabled, FlightState, FlightSystems},
     weapons::{Targeting, Weapons},
+    world::Terrain,
 };
 
 pub struct GamePlugin;
@@ -105,14 +106,20 @@ fn load_models(mut commands: Commands, asset_server: Res<AssetServer>) {
 #[derive(Component)]
 pub struct AircraftModel;
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_aircraft(
     commands: &mut Commands,
     models: &Models,
+    terrain: &Terrain,
     team: Team,
     position: Vec3,
     heading: Vec3,
     player: bool,
 ) -> Entity {
+    // never spawn inside (or skimming) a mountain: clear the ground ahead by 500 m
+    let ahead = position + heading.normalize_or(Vec3::NEG_Z) * 4_000.0;
+    let ground = terrain.max_height_along(position, ahead);
+    let position = Vec3::new(position.x, position.y.max(ground + 500.0), position.z);
     let transform = Transform::from_translation(position).looking_to(heading, Vec3::Y);
     let speed = 240.0;
     let mut entity = commands.spawn((
@@ -146,9 +153,9 @@ pub fn spawn_aircraft(
     entity.id()
 }
 
-fn initial_spawn(mut commands: Commands, models: Res<Models>, mut score: ResMut<Score>, mut aim: ResMut<MouseAim>) {
+fn initial_spawn(mut commands: Commands, models: Res<Models>, terrain: Res<Terrain>, mut score: ResMut<Score>, mut aim: ResMut<MouseAim>) {
     let north = Vec3::NEG_Z;
-    spawn_aircraft(&mut commands, &models, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0), north, true);
+    spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0), north, true);
     aim.reset = true;
     // wingmen in a loose finger-four
     for offset in [
@@ -156,14 +163,15 @@ fn initial_spawn(mut commands: Commands, models: Res<Models>, mut score: ResMut<
         Vec3::new(150.0, -20.0, 120.0),
         Vec3::new(300.0, 0.0, 240.0),
     ] {
-        spawn_aircraft(&mut commands, &models, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0) + offset, north, false);
+        spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0) + offset, north, false);
     }
-    spawn_enemy_wave(&mut commands, &models, &mut score, Vec3::new(0.0, 1500.0, 6000.0), north);
+    spawn_enemy_wave(&mut commands, &models, &terrain, &mut score, Vec3::new(0.0, 1500.0, 6000.0), north);
 }
 
 fn spawn_enemy_wave(
     commands: &mut Commands,
     models: &Models,
+    terrain: &Terrain,
     score: &mut Score,
     player_pos: Vec3,
     player_heading: Vec3,
@@ -180,7 +188,7 @@ fn spawn_enemy_wave(
             + side * lateral
             + ahead * rng.random_range(-300.0..300.0)
             + Vec3::Y * rng.random_range(1300.0..2600.0);
-        spawn_aircraft(commands, models, Team::Red, pos, -ahead, false);
+        spawn_aircraft(commands, models, terrain, Team::Red, pos, -ahead, false);
     }
     score.last_event = Some((format!("WAVE {}: {} HOSTILES", score.wave, count), 4.0));
 }
@@ -272,6 +280,7 @@ fn respawn(
     mut commands: Commands,
     time: Res<Time>,
     models: Res<Models>,
+    terrain: Res<Terrain>,
     mut queue: ResMut<RespawnQueue>,
     mut score: ResMut<Score>,
     mut aim: ResMut<MouseAim>,
@@ -309,7 +318,7 @@ fn respawn(
         let back = if is_player { 0.0 } else { 1500.0 };
         let pos = Vec3::new(anchor.0.x, 1800.0, anchor.0.z) - heading * back
             + heading.cross(Vec3::Y) * if is_player { 0.0 } else { 300.0 };
-        spawn_aircraft(&mut commands, &models, team, pos, heading, is_player);
+        spawn_aircraft(&mut commands, &models, &terrain, team, pos, heading, is_player);
         if is_player {
             aim.reset = true;
         }
@@ -321,6 +330,7 @@ fn respawn(
 pub fn wave_system(
     mut commands: Commands,
     models: Res<Models>,
+    terrain: Res<Terrain>,
     mut score: ResMut<Score>,
     reds: Query<&Team, Without<Disabled>>,
     player: Query<&Transform, With<Player>>,
@@ -338,6 +348,6 @@ pub fn wave_system(
     let Ok(t) = player.single() else {
         return;
     };
-    spawn_enemy_wave(&mut commands, &models, &mut score, t.translation, t.forward().as_vec3());
+    spawn_enemy_wave(&mut commands, &models, &terrain, &mut score, t.translation, t.forward().as_vec3());
     *cooldown = 5.0;
 }
