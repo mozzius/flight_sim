@@ -113,8 +113,8 @@ fn setup_assets(
 // ---------------------------------------------------------------- aircraft
 
 /// Exhaust nozzle positions in aircraft-local space (metres).
-// measured from the model (see dev probe): nose at z=-12, tail at z=+8.9
-const NOZZLES: [Vec3; 2] = [Vec3::new(0.6, -0.25, 8.5), Vec3::new(-0.6, -0.25, 8.5)];
+// measured from the model: nose at z=-12, tail fins reach z=+8.9, nozzle exits ~6.9
+const NOZZLES: [Vec3; 2] = [Vec3::new(0.6, -0.25, 6.9), Vec3::new(-0.6, -0.25, 6.9)];
 const WINGTIPS: [Vec3; 2] = [Vec3::new(7.3, 0.0, 2.0), Vec3::new(-7.3, 0.0, 2.0)];
 const GUN_PORT: Vec3 = Vec3::new(0.9, 0.9, -7.5);
 
@@ -286,10 +286,14 @@ fn spawn_trail(
     materials: &mut Assets<StandardMaterial>,
     mut trail: Trail,
 ) {
-    let mesh = meshes.add(Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    ));
+    // start with a degenerate triangle: empty meshes make the allocator complain
+    let mesh = meshes.add(
+        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3])
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; 3])
+            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0f32; 4]; 3])
+            .with_inserted_indices(Indices::U32(vec![0, 1, 2])),
+    );
     trail.mesh = mesh.clone();
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
