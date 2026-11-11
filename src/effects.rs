@@ -113,8 +113,8 @@ fn setup_assets(
 // ---------------------------------------------------------------- aircraft
 
 /// Exhaust nozzle positions in aircraft-local space (metres).
-// measured from the model: nose at z=-12, tail fins reach z=+8.9, nozzle exits ~6.9
-const NOZZLES: [Vec3; 2] = [Vec3::new(0.6, -0.25, 6.9), Vec3::new(-0.6, -0.25, 6.9)];
+// measured from the model: nose at z=-12, tail fins reach z=+8.9, nozzle exits ~6.6-7.0; flames start just inside so there is never a gap
+const NOZZLES: [Vec3; 2] = [Vec3::new(0.75, 0.05, 5.4), Vec3::new(-0.75, 0.05, 5.4)];
 const WINGTIPS: [Vec3; 2] = [Vec3::new(7.3, 0.0, 2.0), Vec3::new(-7.3, 0.0, 2.0)];
 const GUN_PORT: Vec3 = Vec3::new(0.9, 0.9, -7.5);
 
