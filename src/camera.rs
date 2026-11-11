@@ -42,7 +42,14 @@ fn spawn_camera(mut commands: Commands) {
             far: 120_000.0,
             ..default()
         }),
-        AtmosphereSettings::default(),
+        // more samples than the defaults: 16 per ray leaves visible stripes in the sky
+        AtmosphereSettings {
+            sky_view_lut_size: UVec2::new(512, 256),
+            sky_view_lut_samples: 48,
+            aerial_view_lut_samples: 20,
+            aerial_view_lut_max_distance: 6.0e4,
+            ..default()
+        },
         AtmosphereEnvironmentMapLight::default(),
         Exposure::SUNLIGHT,
         Tonemapping::AcesFitted,

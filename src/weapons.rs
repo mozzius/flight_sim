@@ -147,9 +147,9 @@ fn setup_assets(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let glow = |materials: &mut Assets<StandardMaterial>, c: LinearRgba| {
+        // unlit: base_color *is* the output, so HDR values here glow
         materials.add(StandardMaterial {
-            base_color: Color::BLACK,
-            emissive: c,
+            base_color: c.into(),
             unlit: true,
             ..default()
         })
@@ -157,7 +157,7 @@ fn setup_assets(
     commands.insert_resource(ProjectileAssets {
         // long thin capsule along -Z; long enough to read as a tracer streak
         tracer_mesh: meshes.add(Capsule3d::new(0.12, 9.0).mesh().latitudes(4).longitudes(6)),
-        tracer_material: glow(&mut materials, LinearRgba::rgb(60.0, 30.0, 6.0)),
+        tracer_material: glow(&mut materials, LinearRgba::rgb(25.0, 12.0, 2.5)),
         missile_mesh: meshes.add(Capsule3d::new(0.13, 3.4).mesh().latitudes(4).longitudes(8)),
         missile_material: materials.add(StandardMaterial {
             base_color: Color::srgb(0.85, 0.85, 0.82),
@@ -166,15 +166,18 @@ fn setup_assets(
             ..default()
         }),
         flame_mesh: meshes.add(Sphere::new(0.35).mesh().ico(1).unwrap()),
-        flame_material: glow(&mut materials, LinearRgba::rgb(80.0, 40.0, 10.0)),
+        flame_material: glow(&mut materials, LinearRgba::rgb(30.0, 14.0, 4.0)),
         flare_mesh: meshes.add(Sphere::new(0.6).mesh().ico(1).unwrap()),
-        flare_material: glow(&mut materials, LinearRgba::rgb(120.0, 90.0, 50.0)),
+        flare_material: glow(&mut materials, LinearRgba::rgb(40.0, 30.0, 18.0)),
     });
 }
 
 fn player_weapon_intents(
     mut actions: ResMut<PlayerActions>,
-    mut player: Query<(Entity, &Transform, &Team, &mut Weapons, &mut Targeting), With<Player>>,
+    mut player: Query<
+        (Entity, &Transform, &Team, &mut Weapons, &mut Targeting),
+        (With<Player>, Without<crate::ai::Pilot>),
+    >,
     candidates: Query<(Entity, &Transform, &Team), (With<Aircraft>, Without<Disabled>)>,
 ) {
     let Ok((me, transform, team, mut weapons, mut targeting)) = player.single_mut() else {

@@ -327,6 +327,21 @@ fn ground_collision(
     }
 }
 
+/// Mouse-aim "fine control": nudge the nose toward a direction using only
+/// pitch and rudder, never roll. Rolling stays with the player, so the mouse
+/// feels like trimming the nose rather than a hands-off autopilot. Returns
+/// (pitch, yaw) inputs in -1..1.
+pub fn fine_aim(transform: &Transform, state: &FlightState, desired_dir: Vec3) -> (f32, f32) {
+    let local = (transform.rotation.inverse() * desired_dir).normalize_or(Vec3::NEG_Z);
+    let pitch_err = local.y.atan2(-local.z);
+    let yaw_err = local.x.atan2(-local.z);
+    let w = state.angular_velocity;
+    // gentle gains with rate damping: precise, no overshoot
+    let pitch = (pitch_err * 2.2 - w.x * 0.5).clamp(-1.0, 1.0);
+    let yaw = (yaw_err * 3.5 + w.y * 0.8).clamp(-1.0, 1.0);
+    (pitch, yaw)
+}
+
 /// Fly toward a world-space direction. Shared by the AI and the mouse-aim
 /// autopilot. Returns (pitch, roll, yaw) inputs in -1..1.
 ///

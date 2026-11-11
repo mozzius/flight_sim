@@ -5,6 +5,7 @@ mod ai;
 mod camera;
 mod controls;
 mod dev;
+mod effects;
 mod flight;
 mod game;
 mod hud;
@@ -41,6 +42,7 @@ fn main() {
             weapons::WeaponsPlugin,
             ai::AIPlugin,
             hud::HUDPlugin,
+            effects::EffectsPlugin,
             dev::DevPlugin,
         ))
         .run();

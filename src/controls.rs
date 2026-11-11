@@ -1,8 +1,9 @@
 //! Player controls. Two modes, toggled with `M` / gamepad Select:
 //!
 //! - **Direct**: keyboard or gamepad sticks drive pitch/roll/yaw.
-//! - **Mouse aim**: the mouse points where you want to go and an autopilot
-//!   flies there. WASD/sticks still override the autopilot.
+//! - **Mouse aim**: the mouse makes fine pitch/rudder corrections toward the
+//!   aim point (kept within 40° of the nose). It never rolls: bank with A/D
+//!   (or the stick), then the mouse pulls you around the turn.
 //!
 //! Keyboard: S/W or ↓/↑ pitch, A/D or ←/→ roll, Q/E yaw, Shift/Ctrl
 //! throttle (hold at the end for afterburner/airbrake), Space or left mouse =
@@ -19,7 +20,7 @@ use bevy::{
 };
 
 use crate::{
-    flight::{ControlInput, FlightState, FlightSystems, steer_towards},
+    flight::{ControlInput, FlightState, FlightSystems, fine_aim},
     game::Player,
 };
 
@@ -173,6 +174,11 @@ fn update_mouse_aim(
     if *mode != ControlMode::MouseAim {
         return;
     }
+    let nose = transform.forward().as_vec3();
+    if aim.dir.angle_between(nose) > MAX_AIM_ANGLE.to_radians() {
+        let axis = nose.cross(aim.dir).normalize_or(Vec3::Y);
+        aim.dir = Quat::from_axis_angle(axis, MAX_AIM_ANGLE.to_radians()) * nose;
+    }
     let grabbed = cursor
         .single()
         .is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
@@ -187,12 +193,26 @@ fn update_mouse_aim(
     let pitch = Quat::from_axis_angle(right, -delta.y);
     let new_dir = (yaw * pitch * aim.dir).normalize();
     // don't let the aim flip over the poles
-    if new_dir.y.abs() < 0.98 {
-        aim.dir = new_dir;
+    let new_dir = if new_dir.y.abs() < 0.98 {
+        new_dir
     } else {
-        aim.dir = (yaw * aim.dir).normalize();
-    }
+        (yaw * aim.dir).normalize()
+    };
+    // Keep the aim within reach of pitch + rudder: it can't wander behind the
+    // plane. Big direction changes need a roll (keyboard/stick) first.
+    let nose = transform.forward().as_vec3();
+    let max_angle = MAX_AIM_ANGLE.to_radians();
+    let angle = new_dir.angle_between(nose);
+    aim.dir = if angle > max_angle {
+        let axis = nose.cross(new_dir).normalize_or(Vec3::Y);
+        Quat::from_axis_angle(axis, max_angle) * nose
+    } else {
+        new_dir
+    };
 }
+
+/// How far (degrees) the mouse-aim point may get from the nose.
+const MAX_AIM_ANGLE: f32 = 40.0;
 
 fn update_look_around(
     gamepads: Query<&Gamepad>,
@@ -234,7 +254,10 @@ fn player_flight_input(
     mode: Res<ControlMode>,
     aim: Res<MouseAim>,
     mut lever: ResMut<ThrottleLever>,
-    mut player: Query<(&mut ControlInput, &Transform, &FlightState), With<Player>>,
+    mut player: Query<
+        (&mut ControlInput, &Transform, &FlightState),
+        (With<Player>, Without<crate::ai::Pilot>),
+    >,
 ) {
     let Ok((mut input, transform, state)) = player.single_mut() else {
         return;
@@ -266,10 +289,10 @@ fn player_flight_input(
             input.yaw = manual_yaw;
         }
         ControlMode::MouseAim => {
-            let (p, r, y) = steer_towards(transform, state, aim.dir, 1.0);
-            // manual input overrides the autopilot on that axis
+            // the mouse trims pitch and rudder only; rolling is up to the player
+            let (p, y) = fine_aim(transform, state, aim.dir);
             input.pitch = if manual_pitch != 0.0 { manual_pitch } else { p };
-            input.roll = if manual_roll != 0.0 { manual_roll } else { r };
+            input.roll = manual_roll;
             input.yaw = if manual_yaw != 0.0 { manual_yaw } else { y };
         }
     }

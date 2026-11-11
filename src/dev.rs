@@ -20,6 +20,18 @@ struct AutoScreenshot {
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, log_state);
+        if std::env::var("FLIGHT_SIM_FX_TEST").is_ok() {
+            app.add_systems(
+                FixedUpdate,
+                force_afterburner
+                    .after(crate::flight::FlightSystems::Pilots)
+                    .before(crate::flight::FlightSystems::Physics),
+            )
+            .add_systems(Update, fx_test_explosion);
+        }
+        if std::env::var("FLIGHT_SIM_AUTOPILOT").is_ok() {
+            app.add_systems(Update, autopilot_player);
+        }
         if let Ok(path) = std::env::var("FLIGHT_SIM_SCREENSHOT") {
             let after = std::env::var("FLIGHT_SIM_SCREENSHOT_AFTER")
                 .ok()
@@ -30,19 +42,17 @@ impl Plugin for DevPlugin {
                 after,
                 taken_at: None,
             })
-            .add_systems(Update, (auto_screenshot, strip_bloom));
+            .add_systems(Startup, keep_window_on_top)
+            .add_systems(Update, auto_screenshot);
         }
     }
 }
 
-/// Screenshots of the HDR target come back black with bloom on, so the
-/// screenshot hook renders without it.
-fn strip_bloom(
-    mut commands: Commands,
-    cams: Query<Entity, With<bevy::post_process::bloom::Bloom>>,
-) {
-    for cam in &cams {
-        commands.entity(cam).remove::<bevy::post_process::bloom::Bloom>();
+/// macOS stops presenting windows that are fully covered, and screenshots of
+/// them come back black, so keep the window on top during screenshot runs.
+fn keep_window_on_top(mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>) {
+    for mut window in &mut windows {
+        window.window_level = bevy::window::WindowLevel::AlwaysOnTop;
     }
 }
 
@@ -94,5 +104,43 @@ pub fn log_state(
             i.pitch, i.roll, i.yaw, i.throttle, cam, aircraft.iter().count()
         ),
         Err(_) => info!("t={:.0} no player, cam={:?} aircraft={}", time.elapsed_secs(), cam, aircraft.iter().count()),
+    }
+}
+
+/// `FLIGHT_SIM_AUTOPILOT=1`: the AI flies (and fights) the player's jet, so
+/// automated screenshot runs show real combat.
+fn autopilot_player(
+    mut commands: Commands,
+    new: Query<Entity, (Added<crate::game::Player>, Without<crate::ai::Pilot>)>,
+) {
+    for e in &new {
+        commands.entity(e).insert(crate::ai::Pilot::new());
+    }
+}
+
+/// `FLIGHT_SIM_FX_TEST=1`: full afterburner, plus an explosion just ahead of
+/// the player shortly before the screenshot.
+fn force_afterburner(mut player: Query<&mut crate::flight::ControlInput, With<crate::game::Player>>) {
+    for mut input in &mut player {
+        input.throttle = 1.0;
+        input.afterburner = true;
+    }
+}
+
+fn fx_test_explosion(
+    time: Res<Time>,
+    shot: Option<Res<AutoScreenshot>>,
+    player: Query<&Transform, With<crate::game::Player>>,
+    mut explosions: MessageWriter<crate::game::Explosion>,
+    mut done: Local<bool>,
+) {
+    let Some(shot) = shot else { return };
+    if *done || time.elapsed_secs() < shot.after - 0.35 {
+        return;
+    }
+    *done = true;
+    if let Ok(t) = player.single() {
+        let p = t.translation + t.forward() * 120.0 + t.right() * 25.0;
+        explosions.write(crate::game::Explosion { position: p, size: 12.0 });
     }
 }
