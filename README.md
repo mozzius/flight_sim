@@ -21,10 +21,15 @@ Two control modes, switch with `M` (gamepad: Select):
 - Q/E: yaw
 - Shift / Ctrl: throttle up / down (hold at the end for afterburner / airbrakes)
 - Space or left mouse: gun · F or right mouse: missile (lock on first) · X: flares
-- Tab: next target · C: look back · N: mute · Esc: release the mouse
+- Tab / Shift+Tab: next / previous target · R or middle mouse: target nearest the crosshair
+- C: look back · N: mute · Esc: release the mouse
 
 Gamepad: left stick pitch/roll, LB/RB yaw, RT/LT throttle, A gun, B missile,
-X flares, Y next target, right stick look around.
+X flares, D-pad left/right cycle targets, Y or D-pad up target nearest the
+crosshair, right stick look around.
+
+Guns: put the boresight cross on the red lead pipper; it turns white with
+SHOOT when you have a firing solution.
 
 ## Dev
 
