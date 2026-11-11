@@ -3,6 +3,7 @@ use bevy_transform_interpolation::prelude::*;
 
 mod ai;
 mod camera;
+mod clouds;
 mod controls;
 mod dev;
 mod effects;
@@ -38,6 +39,7 @@ fn main() {
             flight::FlightPlugin,
             controls::ControlsPlugin,
             camera::CameraPlugin,
+            clouds::CloudsPlugin,
             game::GamePlugin,
             weapons::WeaponsPlugin,
             ai::AIPlugin,
