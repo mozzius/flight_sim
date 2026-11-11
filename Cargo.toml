@@ -6,6 +6,8 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 bevy = "0.20.1"
+bevy_transform_interpolation = "0.6"
+rand = "0.10"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
