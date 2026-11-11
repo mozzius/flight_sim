@@ -172,8 +172,11 @@ fn setup_assets(
     });
 }
 
+#[allow(clippy::type_complexity)]
 fn player_weapon_intents(
     mut actions: ResMut<PlayerActions>,
+    mode: Res<crate::controls::ControlMode>,
+    aim: Res<crate::controls::MouseAim>,
     mut player: Query<
         (Entity, &Transform, &Team, &mut Weapons, &mut Targeting),
         (With<Player>, Without<crate::ai::Pilot>),
@@ -185,41 +188,67 @@ fn player_weapon_intents(
         actions.fire_missile = false;
         actions.drop_flares = false;
         actions.next_target = false;
+        actions.previous_target = false;
+        actions.target_under_crosshair = false;
         return;
     };
     weapons.trigger_gun = actions.firing_gun;
     weapons.fire_missile = std::mem::take(&mut actions.fire_missile);
     weapons.drop_flares = std::mem::take(&mut actions.drop_flares);
-    let cycle = std::mem::take(&mut actions.next_target);
+    let next = std::mem::take(&mut actions.next_target);
+    let previous = std::mem::take(&mut actions.previous_target);
+    let under_crosshair = std::mem::take(&mut actions.target_under_crosshair);
 
-    let current_valid = targeting.target.is_some_and(|t| candidates.contains(t));
-    if cycle || !current_valid {
-        // hostiles sorted by how close to the nose they are
-        let fwd = transform.forward().as_vec3();
-        let mut hostiles: Vec<(Entity, f32)> = candidates
+    let hostiles: Vec<(Entity, Vec3)> = candidates
+        .iter()
+        .filter(|(e, _, t)| *e != me && **t != *team)
+        .map(|(e, t, _)| (e, t.translation - transform.translation))
+        .collect();
+    if hostiles.is_empty() {
+        targeting.target = None;
+        return;
+    }
+    let crosshair = match *mode {
+        crate::controls::ControlMode::MouseAim => aim.dir,
+        crate::controls::ControlMode::Direct => transform.forward().as_vec3(),
+    };
+    let nearest_crosshair = |list: &[(Entity, Vec3)]| {
+        list.iter()
+            .min_by(|a, b| {
+                // mostly angle from the crosshair, a little distance
+                let score = |v: Vec3| v.normalize_or_zero().angle_between(crosshair) + v.length() / 40_000.0;
+                score(a.1).total_cmp(&score(b.1))
+            })
+            .map(|(e, _)| *e)
+    };
+
+    let current_valid = targeting.target.is_some_and(|t| hostiles.iter().any(|(e, _)| *e == t));
+    let new_target = if under_crosshair || !current_valid {
+        nearest_crosshair(&hostiles)
+    } else if next || previous {
+        // a stable sweep: sort by bearing around the nose, left to right
+        let inv = transform.rotation.inverse();
+        let mut by_bearing: Vec<(Entity, f32)> = hostiles
             .iter()
-            .filter(|(e, _, t)| *e != me && **t != *team)
-            .map(|(e, t, _)| {
-                let to = t.translation - transform.translation;
-                let angle = to.normalize_or_zero().angle_between(fwd);
-                // prefer things in front, then things that are close
-                (e, angle + to.length() / 20_000.0)
+            .map(|(e, v)| {
+                let local = inv * *v;
+                (*e, local.x.atan2(-local.z))
             })
             .collect();
-        hostiles.sort_by(|a, b| a.1.total_cmp(&b.1));
-        let next = if cycle && current_valid {
-            let idx = hostiles
-                .iter()
-                .position(|(e, _)| Some(*e) == targeting.target)
-                .map_or(0, |i| (i + 1) % hostiles.len().max(1));
-            hostiles.get(idx).map(|(e, _)| *e)
-        } else {
-            hostiles.first().map(|(e, _)| *e)
-        };
-        if next != targeting.target {
-            targeting.target = next;
-            targeting.lock = 0.0;
-        }
+        by_bearing.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let idx = by_bearing
+            .iter()
+            .position(|(e, _)| Some(*e) == targeting.target)
+            .unwrap_or(0);
+        let n = by_bearing.len();
+        let idx = if next { (idx + 1) % n } else { (idx + n - 1) % n };
+        Some(by_bearing[idx].0)
+    } else {
+        targeting.target
+    };
+    if new_target != targeting.target {
+        targeting.target = new_target;
+        targeting.lock = 0.0;
     }
 }
 

@@ -32,8 +32,8 @@ impl Plugin for CameraPlugin {
 #[derive(Component)]
 pub struct MainCamera;
 
-fn spawn_camera(mut commands: Commands) {
-    commands.spawn((
+fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let mut camera = commands.spawn((
         Camera3d::default(),
         MainCamera,
         Projection::Perspective(PerspectiveProjection {
@@ -55,7 +55,19 @@ fn spawn_camera(mut commands: Commands) {
         Tonemapping::AcesFitted,
         Bloom::NATURAL,
         Transform::from_xyz(0.0, 1510.0, 6030.0),
+        // the HUD draws onto whatever this camera renders to (window or offscreen image)
+        bevy::ui::IsDefaultUiCamera,
     ));
+    if crate::dev::headless() {
+        use bevy::render::render_resource::{TextureFormat, TextureUsages};
+        let size = crate::dev::HEADLESS_SIZE;
+        let mut image =
+            Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8UnormSrgb, None);
+        image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+        let handle = images.add(image);
+        camera.insert(bevy::camera::RenderTarget::Image(handle.clone().into()));
+        commands.insert_resource(crate::dev::HeadlessTarget(handle));
+    }
 }
 
 fn follow_player(
@@ -67,6 +79,10 @@ fn follow_player(
     mut camera: Query<&mut Transform, With<MainCamera>>,
     mut boom: Local<Option<Quat>>,
 ) {
+    // terrain_gen's debug camera owns the camera when it's enabled
+    if std::env::var("TERRAIN_DEBUG_CAM").is_ok() {
+        return;
+    }
     let (Ok(plane), Ok(mut cam)) = (player.single(), camera.single_mut()) else {
         *boom = None;
         return;

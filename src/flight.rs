@@ -88,7 +88,7 @@ impl Aircraft {
             induced_k: 0.12,
             dry_thrust: 150_000.0,
             afterburner_thrust: 290_000.0,
-            max_rates: Vec3::new(1.2, 0.35, 4.0),
+            max_rates: Vec3::new(1.5, 0.5, 4.7),
             g_limit: 9.0,
             alpha_limit: 24f32.to_radians(),
             radius: 9.0,
@@ -269,9 +269,9 @@ fn flight_physics(
             -roll_in.clamp(-1.0, 1.0) * ac.max_rates.z * (0.4 + 0.6 * authority),
         );
         // how fast the controller can change rates (rad/s^2) at full authority
-        let max_accel = Vec3::new(4.0, 1.5, 14.0) * effective;
+        let max_accel = Vec3::new(9.0, 3.0, 28.0) * effective;
         let rate_error = target - state.angular_velocity;
-        let mut ang_accel = (rate_error * 6.0).clamp(-max_accel, max_accel);
+        let mut ang_accel = (rate_error * 11.0).clamp(-max_accel, max_accel);
 
         // weathervane stability: the airflow pulls the nose toward the velocity
         // vector. Always there, but the FBW masks it while it has authority.
@@ -337,8 +337,8 @@ pub fn fine_aim(transform: &Transform, state: &FlightState, desired_dir: Vec3) -
     let yaw_err = local.x.atan2(-local.z);
     let w = state.angular_velocity;
     // gentle gains with rate damping: precise, no overshoot
-    let pitch = (pitch_err * 2.2 - w.x * 0.5).clamp(-1.0, 1.0);
-    let yaw = (yaw_err * 3.5 + w.y * 0.8).clamp(-1.0, 1.0);
+    let pitch = (pitch_err * 7.0 - w.x * 0.9).clamp(-1.0, 1.0);
+    let yaw = (yaw_err * 7.0 + w.y * 1.0).clamp(-1.0, 1.0);
     (pitch, yaw)
 }
 
@@ -520,6 +520,40 @@ mod tests {
         assert!(err < 3.0, "err {err}");
         assert!(bank < 30.0, "should not roll inverted: {bank}");
         assert!(sign_flips <= 2, "roll oscillation: {sign_flips}");
+    }
+
+    #[test]
+    fn controls_respond_quickly() {
+        let mut app = app();
+        let e = spawn(&mut app, 250.0, ControlInput { roll: 1.0, pitch: 1.0, throttle: 0.8, ..default() });
+        run(&mut app, 0.25);
+        let (_, s) = state(&app, e);
+        println!("after 0.25 s: roll {:.0} deg/s pitch {:.0} deg/s", -s.angular_velocity.z.to_degrees(), s.angular_velocity.x.to_degrees());
+        assert!(-s.angular_velocity.z > 3.0, "roll rate builds fast: {}", s.angular_velocity.z);
+        assert!(s.angular_velocity.x > 0.3, "pitch rate builds fast: {}", s.angular_velocity.x);
+    }
+
+    #[test]
+    fn fine_aim_settles_quickly_without_overshoot() {
+        let mut app = app();
+        let e = spawn(&mut app, 250.0, ControlInput { throttle: 0.8, ..default() });
+        // 8 degrees up and 4 right
+        let desired = Vec3::new(0.07, 0.14, -1.0).normalize();
+        let mut errs = Vec::new();
+        for _ in 0..(3.0 * PHYSICS_HZ) as usize {
+            let (t, s) = state(&app, e);
+            let (pitch, yaw) = fine_aim(&t, &s, desired);
+            let mut input = app.world_mut().get_mut::<ControlInput>(e).unwrap();
+            input.pitch = pitch;
+            input.yaw = yaw;
+            app.update();
+            errs.push(state(&app, e).0.forward().as_vec3().angle_between(desired).to_degrees());
+        }
+        let at_1s = errs[PHYSICS_HZ as usize];
+        let final_err = *errs.last().unwrap();
+        println!("fine aim: err at 1 s {at_1s:.2} deg, at 3 s {final_err:.2} deg");
+        assert!(at_1s < 2.5, "should mostly be there within a second: {at_1s}");
+        assert!(final_err < 1.0, "settles: {final_err}");
     }
 
     #[test]

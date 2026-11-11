@@ -5,7 +5,7 @@ edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-bevy = "0.20.1"
+bevy = { version = "0.20.1", features = ["wav"] }
 bevy_transform_interpolation = "0.6"
 rand = "0.10"
 
