@@ -5,7 +5,6 @@
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
-    window::PrimaryWindow,
 };
 
 use crate::{
@@ -442,16 +441,17 @@ fn update_markers(
 #[allow(clippy::type_complexity)]
 fn update_center_symbols(
     camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-    window: Query<&Window, With<PrimaryWindow>>,
     mode: Res<ControlMode>,
     aim: Res<MouseAim>,
     player: Query<(&Transform, &FlightState, &Targeting), With<Player>>,
     targets: Query<(&Transform, &FlightState), (With<Aircraft>, Without<Player>)>,
     mut symbols: Query<(&CenterSymbol, &mut Node, &mut UiTransform)>,
 ) {
-    let (Ok((camera, cam_gt)), Ok(window)) = (camera.single(), window.single()) else {
+    let Ok((camera, cam_gt)) = camera.single() else {
         return;
     };
+    // the camera may render to a window or (in headless test runs) an image
+    let viewport = camera.logical_viewport_size().unwrap_or(Vec2::new(1280.0, 720.0));
     let player = player.single().ok();
     let place = |node: &mut Node, world: Option<Vec3>| {
         let size = match node.width {
@@ -495,7 +495,7 @@ fn update_center_symbols(
                     node.display = Display::None;
                     continue;
                 };
-                let size = window.size();
+                let size = viewport;
                 let screen = camera.world_to_viewport(cam_gt, tt.translation).ok();
                 let on_screen = in_front(cam_gt, tt.translation)
                     && screen.is_some_and(|s| {

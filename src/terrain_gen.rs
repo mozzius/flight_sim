@@ -33,15 +33,38 @@ use bevy::{
     asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     mesh::{Indices, PrimitiveTopology},
+    pbr::{ExtendedMaterial, MaterialExtension},
+    render::render_resource::AsBindGroup,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
 pub struct TerrainGenPlugin;
 
+/// Baked macro textures plus per-pixel detail (see `assets/shaders/terrain.wesl`).
+pub type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainDetail>;
+
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+pub struct TerrainDetail {
+    /// x: normal detail strength, y: snow line (m), z: rock slope threshold
+    #[uniform(100)]
+    pub params: Vec4,
+}
+
+impl MaterialExtension for TerrainDetail {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        "shaders/terrain.wesl".into()
+    }
+
+    fn deferred_fragment_shader() -> bevy::shader::ShaderRef {
+        "shaders/terrain.wesl".into()
+    }
+}
+
 impl Plugin for TerrainGenPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, generate_terrain);
+        app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
+            .add_systems(Startup, generate_terrain);
         if let Some(cam) = std::env::var("TERRAIN_DEBUG_CAM")
             .ok()
             .and_then(|s| DebugCam::from_env(&s))
@@ -914,7 +937,7 @@ fn build_chunk(
 pub(crate) fn generate_terrain(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let start = Instant::now();
@@ -940,12 +963,18 @@ pub(crate) fn generate_terrain(
     ] {
         let extent = grid.spacing * cells as f32;
         let (color, normal) = bake_textures(grid.origin, extent, tex_res);
-        let material = materials.add(StandardMaterial {
-            base_color_texture: Some(images.add(color)),
-            normal_map_texture: Some(images.add(normal)),
-            perceptual_roughness: 0.9,
-            reflectance: 0.25,
-            ..default()
+        let material = materials.add(ExtendedMaterial {
+            base: StandardMaterial {
+                base_color_texture: Some(images.add(color)),
+                normal_map_texture: Some(images.add(normal)),
+                perceptual_roughness: 0.9,
+                reflectance: 0.25,
+                ..default()
+            },
+            extension: TerrainDetail {
+                // normal detail strength, snow line (m), rock slope threshold
+                params: Vec4::new(1.0, 2350.0, 0.36, 0.0),
+            },
         });
 
         let is_coarse = std::ptr::eq(grid, &coarse);

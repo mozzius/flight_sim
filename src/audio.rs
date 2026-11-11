@@ -8,7 +8,8 @@
 //!   engines and guns with Doppler shift, missile motors, explosions (delayed
 //!   by the speed of sound), hits, flares, launches.
 //!
-//! `N` mutes. Screenshot runs (`FLIGHT_SIM_SCREENSHOT`) are silent.
+//! `N` mutes. Automated test runs (`FLIGHT_SIM_SCREENSHOT`) don't load this
+//! plugin at all.
 
 use std::{f32::consts::TAU, sync::Arc};
 
@@ -32,6 +33,7 @@ pub struct AudioFxPlugin;
 impl Plugin for AudioFxPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DelayedSounds>()
+            .init_resource::<Muted>()
             .add_systems(Startup, (synthesise, setup_player_loops).chain())
             .add_systems(
                 Update,
@@ -434,9 +436,6 @@ fn looping(volume: f32, spatial: bool) -> PlaybackSettings {
 }
 
 fn setup_player_loops(mut commands: Commands, sounds: Res<Sounds>) {
-    if std::env::var("FLIGHT_SIM_SCREENSHOT").is_ok() {
-        commands.insert_resource(GlobalVolume::new(Volume::Linear(0.0)));
-    }
     for (kind, handle) in [
         (PlayerLoop::Engine, &sounds.engine),
         (PlayerLoop::Afterburner, &sounds.afterburner),
@@ -461,16 +460,14 @@ fn attach_listener(
     }
 }
 
-fn toggle_mute(keys: Res<ButtonInput<KeyCode>>, mut volume: ResMut<GlobalVolume>, mut before: Local<Option<Volume>>) {
-    if !keys.just_pressed(KeyCode::KeyN) {
-        return;
-    }
-    match before.take() {
-        Some(v) => volume.volume = v,
-        None => {
-            *before = Some(volume.volume);
-            volume.volume = Volume::Linear(0.0);
-        }
+/// `N` mutes everything. (Setting a sink's volume overrides the global
+/// volume, so muting is applied by the systems that drive the sinks.)
+#[derive(Resource, Default)]
+struct Muted(bool);
+
+fn toggle_mute(keys: Res<ButtonInput<KeyCode>>, mut muted: ResMut<Muted>) {
+    if keys.just_pressed(KeyCode::KeyN) {
+        muted.0 = !muted.0;
     }
 }
 
@@ -482,6 +479,7 @@ fn approach(current: f32, target: f32, dt: f32, rate: f32) -> f32 {
 #[allow(clippy::type_complexity)]
 fn player_loops(
     time: Res<Time>,
+    muted: Res<Muted>,
     player: Query<(Entity, &FlightState, &Aircraft, &Weapons, &Targeting, Has<Disabled>), With<Player>>,
     missiles: Query<&Missile>,
     mut loops: Query<(&PlayerLoop, &mut AudioSink)>,
@@ -535,6 +533,7 @@ fn player_loops(
             PlayerLoop::Gun | PlayerLoop::Lock | PlayerLoop::Growl | PlayerLoop::Warning => 40.0,
             _ => 4.0,
         };
+        let target = if muted.0 { 0.0 } else { target };
         sink.set_volume(Volume::Linear(approach(current, target, dt, rate)));
         let current_speed = sink.speed();
         sink.set_speed(approach(current_speed, speed, dt, 3.0));
@@ -594,6 +593,7 @@ fn doppler(listener_pos: Vec3, listener_vel: Vec3, source_pos: Vec3, source_vel:
 #[allow(clippy::type_complexity)]
 fn remote_loops(
     time: Res<Time>,
+    muted: Res<Muted>,
     camera: Query<&GlobalTransform, With<MainCamera>>,
     player: Query<&FlightState, With<Player>>,
     aircraft: Query<(&GlobalTransform, &FlightState, &Weapons, Has<Disabled>)>,
@@ -634,6 +634,7 @@ fn remote_loops(
                 )
             }
         };
+        let target = if muted.0 { 0.0 } else { target };
         let current = sink.volume().to_linear();
         let rate = if *kind == RemoteLoop::Gun { 40.0 } else { 5.0 };
         sink.set_volume(Volume::Linear(approach(current, target, dt, rate)));
@@ -694,12 +695,20 @@ fn one_shots(
     }
 }
 
-fn play_delayed(mut commands: Commands, time: Res<Time>, mut delayed: ResMut<DelayedSounds>) {
+fn play_delayed(
+    mut commands: Commands,
+    time: Res<Time>,
+    muted: Res<Muted>,
+    mut delayed: ResMut<DelayedSounds>,
+) {
     let dt = time.delta_secs();
     delayed.0.retain_mut(|(t, handle, pos, volume, scale)| {
         *t -= dt;
         if *t > 0.0 {
             return true;
+        }
+        if muted.0 {
+            return false;
         }
         commands.spawn((
             AudioPlayer(handle.clone()),
