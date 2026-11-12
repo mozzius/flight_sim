@@ -67,9 +67,47 @@
 
       // Report WGSL compile errors with the offending lines (Safari's and
       // Chrome's compilers are stricter than naga, which the native build uses).
+      // Bevy's PBR shaders alias texture/sampler bindings with `let` (e.g.
+      // `let texture = base_color_texture;`). The WGSL spec forbids that (they
+      // aren't constructible types); Chrome lets it slide, Safari doesn't. Undo
+      // the aliases: drop those lines and use the binding name directly.
+      const fixHandleLets = (code) => {
+        const handles = new Set();
+        for (const m of code.matchAll(/var\s+(\w+)\s*:\s*(texture_\w+|sampler(?:_comparison)?)\b/g)) handles.add(m[1]);
+        if (!handles.size) return code;
+        const out = [];
+        let depth = 0;
+        let aliases = []; // { name, target, depth }
+        for (let line of code.split("\n")) {
+          const m = /^\s*let\s+(\w+)\s*=\s*(\w+)\s*;\s*$/.exec(line);
+          const target = m && (handles.has(m[2]) ? m[2] : aliases.findLast((a) => a.name === m[2])?.target);
+          if (m && target) {
+            aliases.push({ name: m[1], target, depth });
+            out.push(""); // keep the line numbers
+            continue;
+          }
+          const seen = new Set();
+          for (let i = aliases.length - 1; i >= 0; i--) {
+            const a = aliases[i];
+            if (seen.has(a.name)) continue;
+            seen.add(a.name);
+            line = line.replace(new RegExp("(?<![\\w.])" + a.name + "\\b", "g"), a.target);
+          }
+          for (const ch of line) {
+            if (ch === "{") depth++;
+            else if (ch === "}") depth--;
+          }
+          aliases = aliases.filter((a) => a.depth <= depth);
+          out.push(line);
+        }
+        return out.join("\n");
+      };
+      window.__fixHandleLets = fixHandleLets;
+
       if (window.GPUDevice) {
         const csm = GPUDevice.prototype.createShaderModule;
         GPUDevice.prototype.createShaderModule = function (desc) {
+          if (typeof desc.code === "string" && desc.code.includes("let ")) desc = { ...desc, code: fixHandleLets(desc.code) };
           // an error scope catches the creation error itself, with its message
           this.pushErrorScope("validation");
           const m = csm.call(this, desc);
