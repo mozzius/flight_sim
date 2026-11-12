@@ -64,6 +64,24 @@
       });
       window.__showError = show;
 
+      // Report WGSL compile errors with the offending lines (Safari's and
+      // Chrome's compilers are stricter than naga, which the native build uses).
+      if (window.GPUDevice) {
+        const csm = GPUDevice.prototype.createShaderModule;
+        GPUDevice.prototype.createShaderModule = function (desc) {
+          const m = csm.call(this, desc);
+          m.getCompilationInfo?.().then((info) => {
+            for (const e of info.messages) {
+              if (e.type !== "error") continue;
+              const lines = String(desc.code).split("\n");
+              const around = lines.slice(Math.max(0, e.lineNum - 2), e.lineNum + 1).map((l) => l.trim()).join(" ⏎ ");
+              show("WGSL error: " + e.message + "\n  line " + e.lineNum + ": " + around.slice(0, 400));
+            }
+          });
+          return m;
+        };
+      }
+
       // A lost GPU device leaves the last frame frozen on screen with no error
       // logged (on iOS usually the GPU process running out of memory): say so.
       if (window.GPUAdapter) {
@@ -141,6 +159,15 @@
     // only suspended ones: a closed context rejects resume()
     const resume = () => contexts.forEach((c) => c.state === "suspended" && c.resume().catch(() => {}));
     for (const ev of ["pointerdown", "keydown", "touchstart"]) addEventListener(ev, resume, { capture: true });
+
+    // Render at most 1.5x on touch devices (2x elsewhere): a phone at 3x pushes
+    // ~4x the pixels through the clouds and post-processing, and runs out of
+    // GPU memory. winit sizes the canvas from devicePixelRatio, so cap that.
+    {
+      const real = window.devicePixelRatio || 1;
+      const cap = navigator.maxTouchPoints > 0 ? 1.5 : 2;
+      if (real > cap) Object.defineProperty(window, "devicePixelRatio", { get: () => cap, configurable: true });
+    }
 
     const overlay = document.getElementById("overlay");
     const status = document.getElementById("status");

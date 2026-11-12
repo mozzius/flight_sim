@@ -70,6 +70,11 @@ fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         // the HUD draws onto whatever this camera renders to (window or offscreen image)
         bevy::ui::IsDefaultUiCamera,
     ));
+    // web: no MSAA. Its multisampled colour, depth and prepass targets cost a
+    // lot of GPU memory, which phones run out of
+    if cfg!(target_arch = "wasm32") {
+        camera.insert(bevy::render::view::Msaa::Off);
+    }
     if crate::dev::headless() {
         use bevy::render::render_resource::{TextureFormat, TextureUsages};
         let size = crate::dev::HEADLESS_SIZE;

@@ -798,18 +798,8 @@ fn mip_chain(level0: Vec<Vec4>, res: usize, renormalize: bool) -> Vec<Vec<Vec4>>
     levels
 }
 
-fn make_image(
-    levels: &[Vec<Vec4>],
-    res: usize,
-    format: TextureFormat,
-    encode: impl Fn(Vec4) -> [u8; 4],
-) -> Image {
-    let mut data = Vec::with_capacity(res * res * 4 * 4 / 3 + 16);
-    for level in levels {
-        for &v in level {
-            data.extend_from_slice(&encode(v));
-        }
-    }
+/// A square RGBA8 image from `data` holding all `mips` levels back to back.
+fn make_image(data: Vec<u8>, res: usize, mips: u32, format: TextureFormat) -> Image {
     let size = Extent3d {
         width: res as u32,
         height: res as u32,
@@ -822,7 +812,7 @@ fn make_image(
         RenderAssetUsages::RENDER_WORLD,
     );
     image.data = Some(data);
-    image.texture_descriptor.mip_level_count = levels.len() as u32;
+    image.texture_descriptor.mip_level_count = mips;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::ClampToEdge,
         address_mode_v: ImageAddressMode::ClampToEdge,
@@ -901,50 +891,60 @@ pub struct TextureBake {
 }
 
 impl TextureBake {
+    /// The colour and normal images with full mip chains. Level 0 goes straight
+    /// from the stored bytes; only the (quarter-size) levels below are worked
+    /// in floats, to keep the peak memory down (wasm memory never shrinks).
     fn images(&self) -> (Image, Image) {
         let res = self.res;
-        let colors: Vec<Vec4> = self
-            .color
-            .chunks_exact(3)
-            .map(|c| {
-                let l = LinearRgba::from(Srgba::rgb_u8(c[0], c[1], c[2]));
-                Vec4::new(l.red, l.green, l.blue, 1.0)
-            })
-            .collect();
-        let normals: Vec<Vec4> = self
-            .normal
-            .chunks_exact(2)
-            .map(|n| {
-                let x = n[0] as f32 / 255.0 * 2.0 - 1.0;
-                let z = n[1] as f32 / 255.0 * 2.0 - 1.0;
-                let y = (1.0 - x * x - z * z).max(0.0).sqrt();
-                Vec4::new(x, z, y, 1.0)
-            })
-            .collect();
         let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        let color_image = make_image(
-            &mip_chain(colors, res, false),
-            res,
-            TextureFormat::Rgba8UnormSrgb,
-            |v| {
+        let srgb_to_linear: Vec<f32> =
+            (0..=255u8).map(|b| LinearRgba::from(Srgba::rgb_u8(b, 0, 0)).red).collect();
+        let color_at = |k: usize| {
+            let c = &self.color[k * 3..k * 3 + 3];
+            Vec4::new(srgb_to_linear[c[0] as usize], srgb_to_linear[c[1] as usize], srgb_to_linear[c[2] as usize], 1.0)
+        };
+        let normal_at = |k: usize| {
+            let x = self.normal[k * 2] as f32 / 255.0 * 2.0 - 1.0;
+            let z = self.normal[k * 2 + 1] as f32 / 255.0 * 2.0 - 1.0;
+            Vec4::new(x, z, (1.0 - x * x - z * z).max(0.0).sqrt(), 1.0)
+        };
+        // level 1 straight from the bytes
+        let half = res / 2;
+        let level1 = |at: &dyn Fn(usize) -> Vec4, renormalize: bool| -> Vec<Vec4> {
+            (0..half * half)
+                .map(|k| {
+                    let (i, j) = (k % half * 2, k / half * 2);
+                    let v = at(j * res + i) + at(j * res + i + 1) + at((j + 1) * res + i) + at((j + 1) * res + i + 1);
+                    if renormalize { v.truncate().normalize_or(Vec3::Z).extend(1.0) } else { v * 0.25 }
+                })
+                .collect()
+        };
+
+        let mut color_data = Vec::with_capacity(res * res * 4 * 4 / 3 + 16);
+        for c in self.color.chunks_exact(3) {
+            color_data.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+        for level in mip_chain(level1(&color_at, false), half, false) {
+            for v in level {
                 let s = Srgba::from(LinearRgba::rgb(v.x, v.y, v.z));
-                [to_u8(s.red), to_u8(s.green), to_u8(s.blue), 255]
-            },
-        );
-        let normal_image = make_image(
-            &mip_chain(normals, res, true),
-            res,
-            TextureFormat::Rgba8Unorm,
-            |v| {
-                [
-                    to_u8(v.x * 0.5 + 0.5),
-                    to_u8(v.y * 0.5 + 0.5),
-                    to_u8(v.z * 0.5 + 0.5),
-                    255,
-                ]
-            },
-        );
-        (color_image, normal_image)
+                color_data.extend_from_slice(&[to_u8(s.red), to_u8(s.green), to_u8(s.blue), 255]);
+            }
+        }
+        let mut normal_data = Vec::with_capacity(res * res * 4 * 4 / 3 + 16);
+        for k in 0..res * res {
+            let v = normal_at(k);
+            normal_data.extend_from_slice(&[self.normal[k * 2], self.normal[k * 2 + 1], to_u8(v.z * 0.5 + 0.5), 255]);
+        }
+        for level in mip_chain(level1(&normal_at, true), half, true) {
+            for v in level {
+                normal_data.extend_from_slice(&[to_u8(v.x * 0.5 + 0.5), to_u8(v.y * 0.5 + 0.5), to_u8(v.z * 0.5 + 0.5), 255]);
+            }
+        }
+        let mips = res.ilog2() + 1;
+        (
+            make_image(color_data, res, mips, TextureFormat::Rgba8UnormSrgb),
+            make_image(normal_data, res, mips, TextureFormat::Rgba8Unorm),
+        )
     }
 }
 
