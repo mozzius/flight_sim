@@ -568,27 +568,47 @@ fn projectile_fx(
     mut particles: ResMut<Particles>,
     missiles: Query<(Entity, &GlobalTransform, &Missile)>,
     flares: Query<(Entity, &GlobalTransform), With<Flare>>,
+    camera: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
     mut last: Local<HashMap<Entity, Option<Vec3>>>,
     mut points: Local<Vec<Vec3>>,
 ) {
     let mut rng = rand::rng();
     let t = time.elapsed_secs();
+    let cam = camera.single().map_or(Vec3::ZERO, |c| c.translation());
+    // world size of ~one pixel at a distance (65° fov, ~1440 px tall)
+    let pixel = |p: Vec3| p.distance(cam) * 0.00088;
     last.retain(|e, _| missiles.contains(*e) || flares.contains(*e));
     for (entity, gt, missile) in &missiles {
         // missile meshes point along local +Y; the motor is at -Y
         let motor = gt.transform_point(Vec3::new(0.0, -2.0, 0.0));
-        if !missile.motor_burning() {
+        let dir = missile.velocity.normalize_or(Vec3::Y);
+        let flick = plume::turbulence(t * 1.7, entity.index().index() as f32);
+        // never let it shrink below a few pixels, so missiles stay visible far out
+        let min_size = pixel(motor) * 4.0;
+        if !missile.motor_lit() {
+            // burnt out: just the hot motor casing glinting
+            let s = (0.8_f32).max(min_size * 0.7);
+            particles.add(
+                Particle {
+                    life: 0.025,
+                    size: (s, s),
+                    glow: 1.5,
+                    heat: 0.3,
+                    ..Particle::glow(motor)
+                },
+                1.0,
+            );
             last.insert(entity, None);
             continue;
         }
-        let dir = missile.velocity.normalize_or(Vec3::Y);
+        let boost = missile.motor_burning();
         // hot exhaust flame just behind the nozzle
-        let flick = plume::turbulence(t * 1.7, entity.index().index() as f32);
+        let s = (if boost { 2.2 } else { 1.4 } * flick).max(min_size);
         particles.add(
             Particle {
                 life: 0.025,
-                size: (2.2 * flick, 2.2 * flick),
-                glow: 6.5,
+                size: (s, s),
+                glow: if boost { 6.5 } else { 4.0 },
                 ..Particle::glow(motor - dir * 0.8)
             },
             1.0,
@@ -596,16 +616,21 @@ fn projectile_fx(
         // thick, billowing smoke, laid down every couple of metres
         let entry = last.entry(entity).or_insert(None);
         let age = missile.age;
-        spaced(entry, motor, 1.1, &mut points);
+        // the sustainer leaves a thinner trail
+        spaced(entry, motor, if boost { 1.1 } else { 1.6 }, &mut points);
+        let thin = if boost { 1.0 } else { 0.75 };
         for &p in points.iter() {
             particles.add(
                 Particle {
                     vel: missile.velocity * 0.04 + rand_dir(&mut rng) * 2.5,
-                    life: rng.random_range(7.0..10.0),
-                    size: (rng.random_range(1.3..1.8), rng.random_range(10.0..15.0)),
+                    life: rng.random_range(10.0..14.0),
+                    size: (
+                        rng.random_range(1.3..1.8) * thin,
+                        rng.random_range(13.0..19.0) * thin,
+                    ),
                     grow: 3.5,
-                    albedo: Vec3::splat(rng.random_range(0.8..0.9)),
-                    opacity: 0.8,
+                    albedo: Vec3::splat(rng.random_range(0.95..1.0)),
+                    opacity: 0.8 * thin.sqrt(),
                     heat: if age < 0.3 { 0.0 } else { 0.9 },
                     cool: 0.05,
                     glow: 3.5,

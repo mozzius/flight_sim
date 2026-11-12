@@ -18,24 +18,29 @@ const BULLET_LIFE: f32 = 2.2;
 const BULLET_DAMAGE: f32 = 5.0;
 const GUN_RATE: f32 = 25.0; // tracer entities per second (each stands for a few rounds)
 
-const MISSILE_THRUST: f32 = 300.0; // m/s^2
+const MISSILE_THRUST: f32 = 300.0; // m/s^2, boost phase
 const MISSILE_BURN: f32 = 3.0;
-const MISSILE_LIFE: f32 = 14.0;
+/// After the boost, a weaker sustainer keeps it fast (and smoking) out to here.
+const MISSILE_SUSTAIN: f32 = 10.0;
+const MISSILE_SUSTAIN_THRUST: f32 = 50.0;
+const MISSILE_LIFE: f32 = 16.0;
 const MISSILE_DRAG: f32 = 2.6e-4;
 /// Proportional navigation gain.
 const MISSILE_NAV_GAIN: f32 = 3.0;
-/// Peak lateral acceleration (G) at full dynamic pressure.
-const MISSILE_MAX_G: f32 = 30.0;
-/// How quickly the missile's airframe follows its guidance commands (s).
-/// This lag is what lets a well-timed last-second break make it overshoot.
-const MISSILE_AUTOPILOT_LAG: f32 = 0.75;
+/// Peak lateral acceleration (G) at full dynamic pressure, fresh off the rail.
+const MISSILE_MAX_G: f32 = 45.0;
+/// How quickly the missile's airframe follows its guidance commands (s),
+/// fresh and at the end of its life. This lag is what lets a well-timed
+/// last-second break make it overshoot, and it grows as the missile tires.
+const MISSILE_AUTOPILOT_LAG: (f32, f32) = (0.22, 0.9);
 /// Energy cost of turning: forward deceleration per unit of lateral accel.
 /// Augmented PN strength (0 = plain PN, 0.5 = classic APN).
 const MISSILE_APN: f32 = 0.5;
 /// How long the seeker's tracker takes to notice the target's acceleration (s).
-const MISSILE_TRACKER_LAG: f32 = 1.0;
+/// (fresh, tired), like the autopilot lag.
+const MISSILE_TRACKER_LAG: (f32, f32) = (0.5, 1.1);
 const MISSILE_TURN_DRAG: f32 = 0.05;
-const MISSILE_FUSE: f32 = 9.0;
+const MISSILE_FUSE: f32 = 14.0;
 const MISSILE_DAMAGE: f32 = 95.0;
 /// How far off its nose the seeker can look before it loses the target.
 const SEEKER_GIMBAL: f32 = 0.87; // ~50 degrees
@@ -45,6 +50,11 @@ const MAX_FLARES: u32 = 40;
 /// Seconds to regenerate one missile / one flare salvo's worth.
 pub const MISSILE_RELOAD_TIME: f32 = 12.0;
 const FLARE_RELOAD_TIME: f32 = 2.5;
+pub const MAX_GUN_AMMO: u32 = 600;
+/// Tracer rounds regained per second while the trigger is released.
+const GUN_RELOAD_RATE: f32 = 30.0;
+/// The gun only starts reloading after this long off the trigger (s).
+const GUN_RELOAD_DELAY: f32 = 1.5;
 
 pub const LOCK_CONE: f32 = 0.6; // radians off the nose (~34°)
 pub const LOCK_RANGE: f32 = 5_500.0;
@@ -87,6 +97,8 @@ pub struct Weapons {
     /// Progress (0..1) toward the next missile being reloaded.
     pub missile_reload: f32,
     flare_reload: f32,
+    gun_reload: f32,
+    gun_idle: f32,
     gun_cooldown: f32,
     missile_cooldown: f32,
     flare_cooldown: f32,
@@ -101,11 +113,13 @@ pub struct Weapons {
 impl Weapons {
     pub fn fighter() -> Self {
         Weapons {
-            gun_ammo: 600,
+            gun_ammo: MAX_GUN_AMMO,
             missiles: MAX_MISSILES,
             flares: MAX_FLARES,
             missile_reload: 0.0,
             flare_reload: 0.0,
+            gun_reload: 0.0,
+            gun_idle: 0.0,
             gun_cooldown: 0.0,
             missile_cooldown: 0.0,
             flare_cooldown: 0.0,
@@ -155,8 +169,21 @@ pub struct Missile {
 }
 
 impl Missile {
+    /// Boost phase: full thrust and thick smoke.
     pub fn motor_burning(&self) -> bool {
         self.age < MISSILE_BURN
+    }
+
+    /// Boost or sustainer still lit.
+    pub fn motor_lit(&self) -> bool {
+        self.age < MISSILE_SUSTAIN
+    }
+
+    /// How agile the missile still is (1 fresh, falling to 0 late in its
+    /// flight): it can pull hard right after launch but bleeds energy and
+    /// control authority the longer it flies.
+    pub fn agility(&self) -> f32 {
+        ((-(self.age - 1.5).max(0.0) / 4.0).exp() - 0.1).max(0.0) / 0.9
     }
 }
 
@@ -348,6 +375,18 @@ fn fire_weapons(
             if weapons.flare_reload >= 1.0 {
                 weapons.flare_reload = 0.0;
                 weapons.flares += 1;
+            }
+        }
+        // the gun reloads once you let go of the trigger for a moment
+        if weapons.trigger_gun {
+            weapons.gun_idle = 0.0;
+        } else {
+            weapons.gun_idle += dt;
+            if weapons.gun_idle > GUN_RELOAD_DELAY && weapons.gun_ammo < MAX_GUN_AMMO {
+                weapons.gun_reload += dt * GUN_RELOAD_RATE;
+                let whole = weapons.gun_reload.floor();
+                weapons.gun_reload -= whole;
+                weapons.gun_ammo = (weapons.gun_ammo + whole as u32).min(MAX_GUN_AMMO);
             }
         }
         if disabled {
@@ -616,6 +655,8 @@ pub fn missile_guidance(
     let mut accel = Vec3::NEG_Y * GRAVITY - missile.velocity * speed * MISSILE_DRAG;
     if missile.motor_burning() && missile.age > 0.25 {
         accel += dir * MISSILE_THRUST;
+    } else if missile.motor_lit() {
+        accel += dir * MISSILE_SUSTAIN_THRUST;
     }
 
     // guidance command
@@ -638,7 +679,9 @@ pub fn missile_guidance(
                     // so turning early doesn't help; only a sharp late break does
                     if let Some(last) = missile.last_target_velocity {
                         let measured = (tvel - last) / dt.max(1e-4);
-                        let k = 1.0 - (-dt / MISSILE_TRACKER_LAG).exp();
+                        let (fresh, tired) = MISSILE_TRACKER_LAG;
+                        let lag = tired + (fresh - tired) * missile.agility();
+                        let k = 1.0 - (-dt / lag).exp();
                         missile.target_accel += (measured - missile.target_accel) * k;
                         let a = missile.target_accel;
                         let perp = a - los_hat * a.dot(los_hat);
@@ -653,10 +696,14 @@ pub fn missile_guidance(
     // only lateral, limited by the lift available at this speed
     command -= dir * command.dot(dir);
     let lift = (speed / 600.0).powi(2).min(1.0);
-    let command = command.clamp_length_max(MISSILE_MAX_G * GRAVITY * lift);
+    let agility = missile.agility();
+    let max_g = MISSILE_MAX_G * (0.25 + 0.75 * agility);
+    let command = command.clamp_length_max(max_g * GRAVITY * lift);
 
     // the airframe follows the command with a lag
-    let k = 1.0 - (-dt / MISSILE_AUTOPILOT_LAG).exp();
+    let (fresh, tired) = MISSILE_AUTOPILOT_LAG;
+    let lag = tired + (fresh - tired) * agility;
+    let k = 1.0 - (-dt / lag).exp();
     missile.lateral += (command - missile.lateral) * k;
     missile.lateral -= dir * missile.lateral.dot(dir);
     accel += missile.lateral;
@@ -788,6 +835,9 @@ mod tests {
         (5_000.0, 180.0), // head on
     ];
 
+    /// Close-range shots, fired while the missile is still fresh.
+    const CLOSE_SHOTS: [(f32, f32); 3] = [(1_200.0, 0.0), (1_400.0, 60.0), (1_800.0, 120.0)];
+
     fn hit_rate(evasion: Evasion, up: bool) -> (usize, Vec<f32>) {
         let misses: Vec<f32> = SHOTS.iter().map(|(r, a)| engage(*r, *a, evasion, up)).collect();
         (misses.iter().filter(|m| **m < MISSILE_FUSE).count(), misses)
@@ -802,10 +852,10 @@ mod tests {
 
     #[test]
     fn a_well_timed_break_usually_defeats_a_missile() {
-        // breaks 1-2 s before impact, sideways and up, over every launch geometry
+        // breaks 1-1.5 s before impact, sideways and up, over every launch geometry
         let mut total_hits = 0;
         let mut total = 0;
-        for t in [1.0, 1.5, 2.0] {
+        for t in [1.0, 1.5] {
             for up in [false, true] {
                 let (hits, misses) = hit_rate(Evasion::BreakAt(t), up);
                 println!("break {} at {t}s: {hits}/{} hit, miss distances {misses:.0?}", if up { "up" } else { "sideways" }, SHOTS.len());
@@ -813,8 +863,8 @@ mod tests {
                 total += SHOTS.len() - 1; // the 4 km tail chase is out of range anyway
             }
         }
-        println!("late breaks: {total_hits}/{total} hit");
-        assert!(total_hits * 4 <= total, "a well-timed break should work at least ~75% of the time");
+        println!("well-timed breaks: {total_hits}/{total} hit");
+        assert!(total_hits * 100 <= total * 45, "a well-timed break should work more often than not");
     }
 
     /// Not a pass/fail test: prints how the evasion window looks.
@@ -824,6 +874,23 @@ mod tests {
             let (hits, _) = hit_rate(Evasion::BreakAt(t), false);
             println!("window: break {t:.1}s before impact -> {hits}/{} hit", SHOTS.len());
         }
+    }
+
+    #[test]
+    fn close_range_shots_are_hard_to_dodge() {
+        let mut hits = 0;
+        let mut total = 0;
+        for t in [0.6, 1.0, 1.5, 2.0] {
+            for up in [false, true] {
+                for (r, a) in CLOSE_SHOTS {
+                    let miss = engage(r, a, Evasion::BreakAt(t), up);
+                    total += 1;
+                    hits += (miss < MISSILE_FUSE) as usize;
+                }
+            }
+        }
+        println!("close range with a break: {hits}/{total} hit");
+        assert!(hits * 2 >= total, "a fresh missile should usually get through: {hits}/{total}");
     }
 
     #[test]

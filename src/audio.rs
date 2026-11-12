@@ -659,7 +659,7 @@ fn remote_loops(
                     continue;
                 };
                 (
-                    if missile.motor_burning() { 1.0 } else { 0.0 },
+                    if missile.motor_burning() { 1.0 } else if missile.motor_lit() { 0.45 } else { 0.0 },
                     doppler(listener_pos, listener_vel, gt.translation(), missile.velocity),
                 )
             }

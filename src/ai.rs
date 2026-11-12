@@ -196,7 +196,7 @@ fn ai_pilots(
             let side = if side.dot(fwd) > 0.0 { side } else { -side };
             // good pilots time a hard break for the last couple of seconds;
             // until then, beam it (and dive if there's room)
-            let break_at = 1.2 + 1.3 * pilot.skill;
+            let break_at = 2.6 - 1.2 * pilot.skill; // the best pilots wait for ~1.4 s
             if tti < break_at {
                 aggression = 1.2;
                 (side + Vec3::Y * if clearance > 700.0 { -0.2 } else { 0.4 }).normalize()

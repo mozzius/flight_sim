@@ -25,7 +25,7 @@ const INCOMING: Color = Color::srgb(1.0, 0.3, 0.95);
 
 /// Break 1-3 s before impact: the missile's airframe can't follow a sudden
 /// hard turn that late (see the missile tests in weapons.rs).
-pub const BREAK_WINDOW: (f32, f32) = (0.7, 3.0);
+pub const BREAK_WINDOW: (f32, f32) = (0.8, 1.8);
 
 /// Range and seconds-to-impact of a missile chasing the player.
 fn time_to_impact(missile_pos: Vec3, missile_vel: Vec3, player_pos: Vec3, player_vel: Vec3) -> (f32, f32) {
