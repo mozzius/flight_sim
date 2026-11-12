@@ -16,7 +16,7 @@ mod pause;
 mod platform;
 mod respawn;
 mod terrain_gen;
-mod title;
+mod loading;
 mod touch;
 mod weapons;
 mod world;
@@ -24,15 +24,6 @@ mod world;
 use flight::FlightSystems;
 
 fn main() {
-    // `FLIGHT_SIM_BAKE_MAP=<path>`: write the built-in map pre-baked for the
-    // web build (web texture resolution) and exit. See scripts/build-web.sh.
-    if let Ok(path) = std::env::var("FLIGHT_SIM_BAKE_MAP") {
-        let bake = terrain_gen::MapBake::bake(title::BUILTIN_SEED, 2);
-        let bytes = bake.to_bytes();
-        std::fs::write(&path, &bytes).expect("writing the map file");
-        println!("wrote {path} ({:.1} MB)", bytes.len() as f64 / 1e6);
-        return;
-    }
     let mut app = App::new();
     if dev::headless() {
         // Automated screenshot runs: no window at all (nothing pops up on
@@ -96,6 +87,6 @@ fn main() {
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
-        .add_plugins(title::TitlePlugin)
+        .add_plugins(loading::LoadingPlugin)
         .run();
 }

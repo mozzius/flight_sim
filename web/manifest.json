@@ -1,0 +1,9 @@
+{
+  "name": "Flight Sim",
+  "short_name": "Flight Sim",
+  "start_url": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14"
+}

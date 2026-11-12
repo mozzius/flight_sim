@@ -16,7 +16,7 @@ impl Plugin for PausePlugin {
             .add_systems(Startup, spawn_menu)
             .add_systems(
                 Update,
-                (toggle_pause.run_if(in_state(crate::title::GameState::Playing)), update_menu).chain(),
+                (toggle_pause.run_if(in_state(crate::loading::GameState::Playing)), update_menu).chain(),
             );
     }
 }
@@ -118,10 +118,13 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
             .with_children(|panel| {
                 panel.spawn(text("PAUSED", 34.0, GREEN));
                 panel
-                    .spawn(Node {
-                        column_gap: px(48),
-                        ..default()
-                    })
+                    .spawn((
+                        DesktopOnly,
+                        Node {
+                            column_gap: px(48),
+                            ..default()
+                        },
+                    ))
                     .with_children(|cols| {
                         for (title, rows) in [("KEYBOARD & MOUSE", KEYBOARD), ("GAMEPAD", GAMEPAD)] {
                             cols.spawn(Node {
@@ -137,7 +140,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         }
                     });
                 panel.spawn((text("", 16.0, GREEN), PauseStats));
-                panel.spawn(text("Esc / Start: resume      Q: quit", 16.0, DIM));
+                panel.spawn((DesktopOnly, text("Esc / Start: resume      Q: quit", 16.0, DIM)));
             });
         });
 }
@@ -168,7 +171,13 @@ fn toggle_pause(
     }
 }
 
+/// Keyboard/gamepad help: hidden when playing by touch.
+#[derive(Component)]
+pub struct DesktopOnly;
+
 fn update_menu(
+    touch: Res<crate::touch::TouchInput>,
+    mut desktop_only: Query<&mut Node, (With<DesktopOnly>, Without<PauseMenu>)>,
     paused: Res<Paused>,
     score: Res<Score>,
     mode: Res<ControlMode>,
@@ -178,6 +187,13 @@ fn update_menu(
 ) {
     if let Ok(mut node) = menu.single_mut() {
         node.display = if paused.0 { Display::Flex } else { Display::None };
+    }
+    // (also the respawn prompt's key hint)
+    let help = if touch.active { Display::None } else { Display::Flex };
+    for mut node in &mut desktop_only {
+        if node.display != help {
+            node.display = help;
+        }
     }
     if !paused.0 {
         return;

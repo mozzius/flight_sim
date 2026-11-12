@@ -23,7 +23,7 @@ impl Plugin for RespawnPlugin {
                 Update,
                 (track_player, update_prompt, respawn_on_request)
                     .chain()
-                    .run_if(in_state(crate::title::GameState::Playing)),
+                    .run_if(in_state(crate::loading::GameState::Playing)),
             );
     }
 }
@@ -106,7 +106,12 @@ fn spawn_prompt(mut commands: Commands, asset_server: Res<AssetServer>) {
             ))
             .with_child((Text::new("RESPAWN"), text(26.0, GREEN)))
             .observe(|_: On<PointerClick>, mut clicked: ResMut<ButtonClicked>| clicked.0 = true);
-            root.spawn((Text::new("click, Enter or (A)"), text(15.0, Color::srgb(0.65, 0.8, 0.7))));
+            root.spawn((
+                crate::pause::DesktopOnly,
+                Node::default(),
+                Text::new("click, Enter or (A)"),
+                text(15.0, Color::srgb(0.65, 0.8, 0.7)),
+            ));
         });
 }
 

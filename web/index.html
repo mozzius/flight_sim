@@ -4,23 +4,30 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Flight Sim</title>
+  <!-- installed to the home screen: full screen, drawn under the status bar and notch -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Flight Sim">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="manifest" href="manifest.json">
   <style>
     html, body { margin: 0; height: 100%; background: #0b0f14; overflow: hidden; }
-    #bevy { display: block; width: 100%; height: 100%; outline: none; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+    #bevy { position: fixed; inset: 0; display: block; width: 100%; height: 100%; outline: none; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
     html, body { overscroll-behavior: none; touch-action: none; }
+    /* matches the game's own loading screen (src/loading.rs), which takes over */
     #overlay {
       position: fixed; inset: 0; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 14px;
-      color: #9fe6a0; font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      background: #0b0f14; text-align: center; padding: 16px; letter-spacing: .04em;
+      align-items: center; justify-content: center; gap: 18px;
+      color: #9fe6a0; font: 18px/1 "Roboto Mono", ui-monospace, Menlo, monospace;
+      background: #0b0f14;
     }
-    #overlay h1 { margin: 0; font-size: 28px; letter-spacing: .3em; }
-    #overlay .dim { color: #5f8c63; font-size: 13px; }
-    #overlay button {
-      font: inherit; color: #0b0f14; background: #9fe6a0; border: 0;
-      padding: 10px 28px; letter-spacing: .2em; cursor: pointer;
-    }
+    #overlay .bar { width: 220px; height: 3px; background: rgba(159, 230, 160, .18); overflow: hidden; }
+    #overlay .bar div { width: 30%; height: 100%; background: #9fe6a0; animation: slide 1.1s ease-in-out infinite alternate; }
+    @keyframes slide { from { transform: translateX(-40%); } to { transform: translateX(270%); } }
     #overlay.hidden { display: none; }
+    #safe { position: fixed; visibility: hidden; pointer-events: none;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
     #debug {
       position: fixed; left: 0; top: 0; width: 55%; max-height: 100%; overflow: auto;
       z-index: 11; padding: 6px 8px; white-space: pre-wrap; pointer-events: none;
@@ -37,13 +44,10 @@
 <body>
   <canvas id="bevy" tabindex="0"></canvas>
   <div id="overlay">
-    <h1>FLIGHT SIM</h1>
-    <div id="status">LOADING…</div>
-    <div class="dim">Mouse aims · A/D roll · Shift/Ctrl throttle · click guns · right click missile · Tab target · Esc pause</div>
-    <div class="dim">On a phone or tablet: hold it sideways. Left stick rolls, drag anywhere to aim, hold GUN (and drag) to fire, slider on the right is throttle.</div>
-    <div class="dim">build __BUILD__</div>
-    <div class="dim">Needs a WebGPU browser (recent Chrome, Edge or Safari). </div>
+    <div>FLIGHT SIM</div>
+    <div class="bar"><div></div></div>
   </div>
+  <div id="safe"></div>
   <div id="errors"></div>
   <pre id="debug" hidden></pre>
   <script>
@@ -225,15 +229,23 @@
       window.FLIGHT_SIM_LOW_MEMORY = q.has("low") || (navigator.maxTouchPoints > 0 && !q.has("high"));
     }
 
+    // Safe-area insets for the touch controls (read by src/platform.rs)
+    {
+      const probe = document.getElementById("safe");
+      const read = () => {
+        const cs = getComputedStyle(probe);
+        window.FLIGHT_SIM_SAFE_AREA = ["paddingLeft", "paddingTop", "paddingRight", "paddingBottom"].map((k) => parseFloat(cs[k]) || 0);
+      };
+      read();
+      addEventListener("resize", read);
+    }
+
     const overlay = document.getElementById("overlay");
-    const status = document.getElementById("status");
     const canvas = document.getElementById("bevy");
 
-    // The terrain is generated on startup and blocks the page for a few seconds:
-    // paint the status first, then start the game.
-    status.textContent = "LOADING…";
+    // Let the overlay paint before the game module starts loading.
     if (!navigator.gpu) {
-      window.__showError("This browser has no WebGPU, so the game falls back to WebGL2 and may not render. On iPhone it needs iOS 26 or newer.");
+      window.__showError("This browser has no WebGPU, so the game may not render. It needs a recent Chrome, Edge or Safari (iOS 26+).");
     } else if (!(await navigator.gpu.requestAdapter())) {
       window.__showError("WebGPU is present but no GPU adapter was available.");
     }
@@ -244,7 +256,6 @@
     } catch (e) {
       // winit throws a control-flow exception to hand the loop to the browser; that one is fine
       if (!String(e).includes("Using exceptions for control flow")) {
-        status.textContent = "FAILED TO START: " + e;
         console.error(e);
         throw e;
       }

@@ -33,7 +33,7 @@ pub struct Terrain {
 const STEP: f32 = 32.0;
 
 impl Terrain {
-    /// Swap in a newly loaded map (see `title::load_map`).
+    /// Swap in a newly loaded map (see `loading::load_map`).
     pub fn set(&mut self, generated: GeneratedTerrain) {
         self.generated = Some(generated);
     }

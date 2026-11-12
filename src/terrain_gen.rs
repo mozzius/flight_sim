@@ -20,8 +20,8 @@
 //!   a higher resolution than the meshes (colour from height, slope, the filter's ridge map,
 //!   and a baked cavity term).
 //!
-//! Generation runs synchronously in a `Startup` system (multi-threaded with scoped std
-//! threads, ~1.5 s), so `GeneratedTerrain` exists from the first `Update` onwards.
+//! Generation is a slice per frame under the loading screen (`MapBaker`, see `loading.rs`;
+//! multi-threaded natively, ~2 s), then `spawn_map` builds the meshes.
 //! Valley floors sit at roughly 0..400 m, most peaks at 2000..3500 m (max ~3.9 km).
 //!
 //! Debug: `TERRAIN_DEBUG_CAM=<n>` overrides the `Camera3d` transform with one of a few fixed
@@ -39,11 +39,8 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
-pub mod bake;
 mod roads;
 mod trees;
-
-pub use bake::{MapBake, MapFile};
 
 pub struct TerrainGenPlugin;
 
@@ -94,8 +91,6 @@ impl Plugin for TerrainGenPlugin {
             MaterialPlugin::<SceneryMaterial>::default(),
         ))
         .init_resource::<trees::LoadedTrees>()
-        .init_asset::<MapFile>()
-        .init_asset_loader::<bake::MapFileLoader>()
         .add_systems(Update, trees::stream_trees);
         if let Some(cam) = std::env::var("TERRAIN_DEBUG_CAM")
             .ok()
@@ -710,24 +705,6 @@ fn par_map<T: Send + Clone + Default>(
     out
 }
 
-/// Bakes the height grid used for both the mesh and collision queries.
-fn bake_grid(spacing: f32, cells: usize) -> HeightGrid {
-    let n = cells + 1;
-    let origin = Vec2::splat(-spacing * cells as f32 * 0.5);
-    let heights = par_map(n, n, |i, j| {
-        let x = origin.x + i as f32 * spacing;
-        let z = origin.y + j as f32 * spacing;
-        sample_terrain(x, z, octaves_at(x, z)).height
-    });
-    HeightGrid {
-        origin,
-        spacing,
-        inv_spacing: 1.0 / spacing,
-        n,
-        heights,
-    }
-}
-
 fn srgb(r: f32, g: f32, b: f32) -> Vec3 {
     let c = Color::srgb(r, g, b).to_linear();
     Vec3::new(c.red, c.green, c.blue)
@@ -831,45 +808,44 @@ fn make_image(data: Vec<u8>, res: usize, mips: u32, format: TextureFormat) -> Im
 /// the gullies and ridges comes from here, the mesh only provides the silhouette. The normal
 /// map is in a tangent space where T = +X, B = +Z and N = +Y (the mesh supplies exactly those
 /// as its normals and tangents), so it holds world-space normals.
-fn bake_textures(origin: Vec2, extent: f32, res: usize) -> TextureBake {
-    let step = extent / res as f32;
-    // Texel-centred samples with a one texel border for the finite differences.
+/// One texture sample (height, ridge map) on the texel-centred lattice, which has a one texel
+/// border for the finite differences: sample (i, j) sits at texel (i - 1, j - 1).
+fn texture_sample(origin: Vec2, step: f32, i: usize, j: usize) -> (f32, f32) {
+    let x = origin.x + (i as f32 - 0.5) * step;
+    let z = origin.y + (j as f32 - 0.5) * step;
+    let t = sample_terrain(x, z, octaves_at(x, z).max(EROSION_OCTAVES as f32));
+    (t.height, t.ridge_map)
+}
+
+/// Colour and normal of texel (i, j), from the finished sample lattice (`res + 2` wide).
+fn texture_texel(samples: &[(f32, f32)], res: usize, origin: Vec2, step: f32, i: usize, j: usize) -> (Vec4, Vec4) {
     let n = res + 2;
-    let samples = par_map(n, n, |i, j| {
-        let x = origin.x + (i as f32 - 0.5) * step;
-        let z = origin.y + (j as f32 - 0.5) * step;
-        let t = sample_terrain(x, z, octaves_at(x, z).max(EROSION_OCTAVES as f32));
-        (t.height, t.ridge_map)
-    });
-    let texels = par_map(res, res, |i, j| {
-        let k = (j + 1) * n + i + 1;
-        let dx = (samples[k + 1].0 - samples[k - 1].0) / (2.0 * step);
-        let dz = (samples[k + n].0 - samples[k - n].0) / (2.0 * step);
-        let normal = Vec3::new(-dx, 1.0, -dz).normalize();
-        let xz = origin + (Vec2::new(i as f32, j as f32) + 0.5) * step;
-        let jitter = noised(xz / 900.0, 77).x + 0.5 * noised(xz / 310.0, 78).x;
-        let mut color = terrain_color(samples[k].0, normal, samples[k].1, jitter);
+    let k = (j + 1) * n + i + 1;
+    let dx = (samples[k + 1].0 - samples[k - 1].0) / (2.0 * step);
+    let dz = (samples[k + n].0 - samples[k - n].0) / (2.0 * step);
+    let normal = Vec3::new(-dx, 1.0, -dz).normalize();
+    let xz = origin + (Vec2::new(i as f32, j as f32) + 0.5) * step;
+    let jitter = noised(xz / 900.0, 77).x + 0.5 * noised(xz / 310.0, 78).x;
+    let mut color = terrain_color(samples[k].0, normal, samples[k].1, jitter);
 
-        // Cheap baked cavity / ambient occlusion: compare the height with its surroundings at a
-        // few radii. Gully floors (concave) get darker, ridge crests (convex) a little lighter,
-        // which makes the dendritic erosion pattern read even under a high sun.
-        let h_at = |di: isize, dj: isize| {
-            let si = (i as isize + 1 + di).clamp(0, n as isize - 1) as usize;
-            let sj = (j as isize + 1 + dj).clamp(0, n as isize - 1) as usize;
-            samples[sj * n + si].0
-        };
-        let mut cavity = 0.0;
-        for r in [2isize, 5, 12] {
-            let mean = (h_at(r, 0) + h_at(-r, 0) + h_at(0, r) + h_at(0, -r)) * 0.25;
-            cavity += (mean - samples[k].0) / (r as f32 * step) / 3.0;
-        }
-        color *= 1.0 - smoothstep(0.0, 0.25, cavity) * 0.55 + smoothstep(0.0, 0.25, -cavity) * 0.2;
+    // Cheap baked cavity / ambient occlusion: compare the height with its surroundings at a
+    // few radii. Gully floors (concave) get darker, ridge crests (convex) a little lighter,
+    // which makes the dendritic erosion pattern read even under a high sun.
+    let h_at = |di: isize, dj: isize| {
+        let si = (i as isize + 1 + di).clamp(0, n as isize - 1) as usize;
+        let sj = (j as isize + 1 + dj).clamp(0, n as isize - 1) as usize;
+        samples[sj * n + si].0
+    };
+    let mut cavity = 0.0;
+    for r in [2isize, 5, 12] {
+        let mean = (h_at(r, 0) + h_at(-r, 0) + h_at(0, r) + h_at(0, -r)) * 0.25;
+        cavity += (mean - samples[k].0) / (r as f32 * step) / 3.0;
+    }
+    color *= 1.0 - smoothstep(0.0, 0.25, cavity) * 0.55 + smoothstep(0.0, 0.25, -cavity) * 0.2;
+    (color.extend(1.0), Vec4::new(normal.x, normal.z, normal.y, 1.0))
+}
 
-        (
-            color.extend(1.0),
-            Vec4::new(normal.x, normal.z, normal.y, 1.0),
-        )
-    });
+fn quantize_texels(texels: Vec<(Vec4, Vec4)>, res: usize) -> TextureBake {
     let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     let mut color = Vec::with_capacity(res * res * 3);
     let mut normal = Vec::with_capacity(res * res * 2);
@@ -882,8 +858,8 @@ fn bake_textures(origin: Vec2, extent: f32, res: usize) -> TextureBake {
 }
 
 /// A baked terrain texture: sRGB colour (3 bytes per texel) and the normal's
-/// x and z (2 bytes; y is rebuilt). Quantised like this so a generated map and
-/// one loaded from a file go through exactly the same path.
+/// x and z (2 bytes; y is rebuilt). Compact, as the web build's memory never
+/// shrinks once it has grown.
 pub struct TextureBake {
     res: usize,
     color: Vec<u8>,
@@ -1042,31 +1018,189 @@ fn build_chunk(
     .with_inserted_indices(Indices::U32(indices))
 }
 
-impl MapBake {
-    /// Generates a map: height grids, roads and terrain textures (at
-    /// 1/`texture_div` of the full resolution). This is the slow part.
-    pub fn bake(seed: u32, texture_div: usize) -> MapBake {
-        let start = Instant::now();
+/// Everything a map needs that's expensive to compute.
+pub struct MapBake {
+    seed: u32,
+    near: HeightGrid,
+    fine: HeightGrid,
+    coarse: HeightGrid,
+    roads: Vec<roads::Road>,
+    /// near, fine, coarse; `None` where it won't be drawn (the near one on low-memory devices)
+    textures: [Option<TextureBake>; 3],
+}
+
+/// Bakes a map a slice at a time (`step`), so a loading screen can show
+/// progress: the web build is single-threaded, and one big bake would freeze
+/// the page for many seconds.
+pub struct MapBaker {
+    seed: u32,
+    texture_div: usize,
+    start: Instant,
+    grids: Vec<HeightGrid>,
+    roads: Vec<roads::Road>,
+    textures: Vec<Option<TextureBake>>,
+    stage: Stage,
+    /// Rough cost units done / in total, for the progress bar.
+    done: f64,
+    total: f64,
+}
+
+enum Stage {
+    /// Height grid `which` (near, fine, coarse), rows done so far.
+    Grid { which: usize, heights: Vec<f32> },
+    Roads,
+    /// Texture `which`: the sample lattice, then the texels.
+    Samples { which: usize, samples: Vec<(f32, f32)> },
+    Texels { which: usize, samples: Vec<(f32, f32)>, texels: Vec<(Vec4, Vec4)> },
+    Done,
+}
+
+const GRIDS: [(f32, usize); 3] = [
+    (NEAR_SPACING, NEAR_CELLS),
+    (FINE_SPACING, FINE_CELLS),
+    (COARSE_SPACING, COARSE_CELLS),
+];
+const TEXTURE_RES: [usize; 3] = [NEAR_TEXTURE_RES, FINE_TEXTURE_RES, COARSE_TEXTURE_RES];
+/// Cost of a texel relative to a full terrain sample (it's mostly lookups).
+const TEXEL_COST: f64 = 0.15;
+/// Roads, in terrain-sample units (Dijkstra over the near grid).
+const ROADS_COST: f64 = 250_000.0;
+
+impl MapBaker {
+    pub fn new(seed: u32, texture_div: usize) -> Self {
         SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
         info!("terrain: map seed {seed} (FLIGHT_SIM_SEED={seed} to fly it again)");
-        let mut near = bake_grid(NEAR_SPACING, NEAR_CELLS);
-        // roads level the ground under them, so they come before the textures and meshes
-        let roads = roads::build_roads(&mut near);
-        let fine = bake_grid(FINE_SPACING, FINE_CELLS);
-        let coarse = bake_grid(COARSE_SPACING, COARSE_CELLS);
-        let grids_done = start.elapsed();
-        let textures = [
-            (&near, NEAR_CELLS, NEAR_TEXTURE_RES),
-            (&fine, FINE_CELLS, FINE_TEXTURE_RES),
-            (&coarse, COARSE_CELLS, COARSE_TEXTURE_RES),
-        ]
-        .map(|(grid, cells, res)| bake_textures(grid.origin, grid.spacing * cells as f32, res / texture_div));
-        info!(
-            "terrain: baked in {:.2?} (height grids {:.2?})",
-            start.elapsed(),
-            grids_done
-        );
-        MapBake { seed, near, fine, coarse, roads, textures }
+        let mut total = ROADS_COST;
+        for (_, cells) in GRIDS {
+            total += ((cells + 1) * (cells + 1)) as f64;
+        }
+        for which in 0..3 {
+            if Self::wants_texture(which) {
+                let res = TEXTURE_RES[which] / texture_div;
+                total += ((res + 2) * (res + 2)) as f64 + (res * res) as f64 * TEXEL_COST;
+            }
+        }
+        MapBaker {
+            seed,
+            texture_div,
+            start: Instant::now(),
+            grids: Vec::new(),
+            roads: Vec::new(),
+            textures: Vec::new(),
+            stage: Stage::Grid { which: 0, heights: Vec::new() },
+            done: 0.0,
+            total,
+        }
+    }
+
+    /// Low-memory devices never draw the near grid, so skip its texture.
+    fn wants_texture(which: usize) -> bool {
+        !(which == 0 && crate::platform::low_memory())
+    }
+
+    pub fn progress(&self) -> f32 {
+        (self.done / self.total).min(1.0) as f32
+    }
+
+    /// Bakes for roughly `budget` (at least one slice); returns the map when done.
+    pub fn step(&mut self, budget: std::time::Duration) -> Option<MapBake> {
+        let t0 = Instant::now();
+        // rows per slice: ~40k samples single-threaded, more when there are cores to share it
+        let slice = if cfg!(target_arch = "wasm32") { 40_000 } else { 400_000 };
+        loop {
+            self.advance(slice);
+            if matches!(self.stage, Stage::Done) {
+                info!("terrain: baked in {:.2?}", self.start.elapsed());
+                let mut grids = std::mem::take(&mut self.grids).into_iter();
+                let mut textures = std::mem::take(&mut self.textures).into_iter();
+                return Some(MapBake {
+                    seed: self.seed,
+                    near: grids.next().unwrap(),
+                    fine: grids.next().unwrap(),
+                    coarse: grids.next().unwrap(),
+                    roads: std::mem::take(&mut self.roads),
+                    textures: [textures.next().unwrap(), textures.next().unwrap(), textures.next().unwrap()],
+                });
+            }
+            if t0.elapsed() >= budget {
+                return None;
+            }
+        }
+    }
+
+    /// One slice of work (about `slice` terrain samples).
+    fn advance(&mut self, slice: usize) {
+        let stage = std::mem::replace(&mut self.stage, Stage::Done);
+        self.stage = match stage {
+            Stage::Grid { which, mut heights } => {
+                let (spacing, cells) = GRIDS[which];
+                let n = cells + 1;
+                let origin = Vec2::splat(-spacing * cells as f32 * 0.5);
+                let j0 = heights.len() / n;
+                let rows = (slice / n).clamp(1, n - j0);
+                heights.extend(par_map(n, rows, |i, j| {
+                    let x = origin.x + i as f32 * spacing;
+                    let z = origin.y + (j0 + j) as f32 * spacing;
+                    sample_terrain(x, z, octaves_at(x, z)).height
+                }));
+                self.done += (rows * n) as f64;
+                if heights.len() < n * n {
+                    Stage::Grid { which, heights }
+                } else {
+                    self.grids.push(HeightGrid { origin, spacing, inv_spacing: 1.0 / spacing, n, heights });
+                    // roads level the ground under them, so they come right after the near grid
+                    if which == 0 { Stage::Roads } else if which < 2 { Stage::Grid { which: which + 1, heights: Vec::new() } } else { self.next_texture(0) }
+                }
+            }
+            Stage::Roads => {
+                self.roads = roads::build_roads(&mut self.grids[0]);
+                self.done += ROADS_COST;
+                Stage::Grid { which: 1, heights: Vec::new() }
+            }
+            Stage::Samples { which, mut samples } => {
+                let (origin, step, res) = self.texture_frame(which);
+                let n = res + 2;
+                let j0 = samples.len() / n;
+                let rows = (slice / n).clamp(1, n - j0);
+                samples.extend(par_map(n, rows, |i, j| texture_sample(origin, step, i, j0 + j)));
+                self.done += (rows * n) as f64;
+                if samples.len() < n * n {
+                    Stage::Samples { which, samples }
+                } else {
+                    Stage::Texels { which, samples, texels: Vec::new() }
+                }
+            }
+            Stage::Texels { which, samples, mut texels } => {
+                let (origin, step, res) = self.texture_frame(which);
+                let j0 = texels.len() / res;
+                let rows = ((slice as f64 / TEXEL_COST) as usize / res).clamp(1, res - j0);
+                texels.extend(par_map(res, rows, |i, j| texture_texel(&samples, res, origin, step, i, j0 + j)));
+                self.done += (rows * res) as f64 * TEXEL_COST;
+                if texels.len() < res * res {
+                    Stage::Texels { which, samples, texels }
+                } else {
+                    self.textures.push(Some(quantize_texels(texels, res)));
+                    self.next_texture(which + 1)
+                }
+            }
+            Stage::Done => Stage::Done,
+        };
+    }
+
+    fn next_texture(&mut self, mut which: usize) -> Stage {
+        while which < 3 && !Self::wants_texture(which) {
+            self.textures.push(None);
+            which += 1;
+        }
+        if which < 3 { Stage::Samples { which, samples: Vec::new() } } else { Stage::Done }
+    }
+
+    /// (origin, texel size, resolution) of texture `which`.
+    fn texture_frame(&self, which: usize) -> (Vec2, f32, usize) {
+        let grid = &self.grids[which];
+        let extent = grid.spacing * GRIDS[which].1 as f32;
+        let res = TEXTURE_RES[which] / self.texture_div;
+        (grid.origin, extent / res as f32, res)
     }
 }
 
@@ -1112,6 +1246,7 @@ pub fn spawn_map(
         if low && std::ptr::eq(grid, &near) {
             continue;
         }
+        let Some(texture) = texture else { continue };
         let (color, normal) = texture.images(low);
         let material = materials.add(ExtendedMaterial {
             base: StandardMaterial {
@@ -1299,10 +1434,16 @@ mod tests {
 
     #[test]
     fn no_nans() {
-        let fine = bake_grid(FINE_SPACING, FINE_CELLS);
-        let bad: Vec<_> = (0..fine.heights.len())
-            .filter(|&k| !fine.heights[k].is_finite())
-            .map(|k| fine.world_pos(k % fine.n, k / fine.n))
+        let n = FINE_CELLS + 1;
+        let origin = Vec2::splat(-FINE_SPACING * FINE_CELLS as f32 * 0.5);
+        let pos = |i: usize, j: usize| origin + Vec2::new(i as f32, j as f32) * FINE_SPACING;
+        let heights = par_map(n, n, |i, j| {
+            let p = pos(i, j);
+            sample_terrain(p.x, p.y, octaves_at(p.x, p.y)).height
+        });
+        let bad: Vec<_> = (0..heights.len())
+            .filter(|&k| !heights[k].is_finite())
+            .map(|k| pos(k % n, k / n))
             .take(10)
             .collect();
         assert!(bad.is_empty(), "non-finite samples at {bad:?}");

@@ -31,15 +31,14 @@ crosshair, right stick look around.
 Guns: put the boresight cross on the red lead pipper; it turns white with
 SHOOT when you have a firing solution.
 
-The title screen picks the map: **Valley**, the built-in one, or **Random**, freshly
-generated mountains, roads and forests. A random map's seed is shown while it
-generates and in the pause menu; `FLIGHT_SIM_SEED=<n>` flies it again (and skips the
-title screen, as does `FLIGHT_SIM_MAP=builtin|random`). The round opens with a short
+Every round flies a freshly generated map (mountains, roads and forests); its seed is in
+the pause menu and `FLIGHT_SIM_SEED=<n>` flies it again. The round opens with a short
 fly-by shot: any key, click, tap or gamepad A skips it.
 
-On a touchscreen: joystick and flares on the left; drag anywhere to aim; gun (hold,
-and drag to aim while firing), missile and target buttons on the right, with a
-throttle slider on the edge (top = afterburner, bottom = airbrake); pause top left.
+On a touchscreen: swipe anywhere to aim and an autopilot flies there (banking into turns,
+levelling out once on target); GUN (hold), MSL, FLR and TGT on the left, the throttle slider
+on the right edge (top = afterburner, bottom = airbrake), pause top left. Phones and
+tablets get a lighter scene (fewer trees, half-res terrain textures).
 
 ## Dev
 
@@ -52,8 +51,8 @@ throttle slider on the edge (top = afterburner, bottom = airbrake); pause top le
 `TERRAIN_DEBUG_CAM=1..4` (terrain viewpoints), `FLIGHT_SIM_FX_TEST=explosion|engines|missile|vapour|...`
 (staged effects), `CLOUDS_DEBUG_CAM=above|below|inside|sun|horizon`, `CLOUDS_DIV=2..4` (cloud
 resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FLIGHT_SIM_PAUSE_TEST=1`, `FLIGHT_SIM_KILL_TEST=1`,
-`FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_SEED=<n>` (that random map; screenshot runs fly the
-built-in map by default, `FLIGHT_SIM_MAP=title` shows the title screen instead).
+`FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_SEED=<n>` (fly that map; screenshot runs default to
+seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene).
 Screenshot runs are headless (no window) and silent.
 
 ## Web build
@@ -68,6 +67,6 @@ vercel deploy dist --prod --scope samuel-newmans-projects --project flight-sim
 ```
 
 The web build is single-threaded, so it bakes the terrain textures at half
-resolution and plants trees a couple of chunks per frame. The built-in map is
-downloaded pre-baked (`assets/maps/builtin.map`, written by the build script);
-a random map still freezes the page for ~15 s while it generates.
+resolution, a slice per frame under a loading bar, and plants trees a couple of
+chunks per frame. `?debug` shows the log and GPU state on the page; `?low` /
+`?high` force the phone/tablet scene on or off.

@@ -22,7 +22,7 @@ use bevy::{
 };
 
 use crate::{
-    flight::{ControlInput, FlightState, FlightSystems, fine_aim},
+    flight::{ControlInput, FlightState, FlightSystems, fine_aim, steer_towards},
     game::Player,
 };
 
@@ -140,7 +140,8 @@ fn manage_cursor(
     mode: Res<ControlMode>,
     paused: Res<crate::pause::Paused>,
     prompt: Res<crate::respawn::RespawnPrompt>,
-    state: Res<State<crate::title::GameState>>,
+    touch: Res<crate::touch::TouchInput>,
+    state: Res<State<crate::loading::GameState>>,
     mut focus_events: MessageReader<bevy::window::WindowFocused>,
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
@@ -154,7 +155,8 @@ fn manage_cursor(
         && !paused.0
         && !prompt.ready()
         && window.focused
-        && *state.get() == crate::title::GameState::Playing;
+        && !touch.active
+        && *state.get() == crate::loading::GameState::Playing;
     let (grab, visible) = if want {
         (CursorGrabMode::Locked, false)
     } else {
@@ -231,15 +233,19 @@ fn update_mouse_aim(
     if *mode != ControlMode::MouseAim || paused.0 {
         return;
     }
+    // touch flies bank-to-turn (see player_flight_input), so the aim may go much further round
+    let max_angle = if touch.active { TOUCH_MAX_AIM_ANGLE } else { MAX_AIM_ANGLE }.to_radians();
     let nose = transform.forward().as_vec3();
-    if aim.dir.angle_between(nose) > MAX_AIM_ANGLE.to_radians() {
+    if aim.dir.angle_between(nose) > max_angle {
         let axis = nose.cross(aim.dir).normalize_or(Vec3::Y);
-        aim.dir = Quat::from_axis_angle(axis, MAX_AIM_ANGLE.to_radians()) * nose;
+        aim.dir = Quat::from_axis_angle(axis, max_angle) * nose;
     }
     let grabbed = cursor
         .single()
         .is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
-    let mouse = if grabbed { motion.delta } else { Vec2::ZERO };
+    // Browsers also report finger drags as mouse motion: with touch controls
+    // up, only the touch layer (which knows which finger is which) aims.
+    let mouse = if grabbed && !touch.active { motion.delta } else { Vec2::ZERO };
     let pixels = mouse + touch_pan;
     if pixels == Vec2::ZERO {
         return;
@@ -260,7 +266,6 @@ fn update_mouse_aim(
     // Keep the aim within reach of pitch + rudder: it can't wander behind the
     // plane. Big direction changes need a roll (keyboard/stick) first.
     let nose = transform.forward().as_vec3();
-    let max_angle = MAX_AIM_ANGLE.to_radians();
     let angle = new_dir.angle_between(nose);
     aim.dir = if angle > max_angle {
         let axis = nose.cross(new_dir).normalize_or(Vec3::Y);
@@ -272,6 +277,8 @@ fn update_mouse_aim(
 
 /// How far (degrees) the mouse-aim point may get from the nose.
 const MAX_AIM_ANGLE: f32 = 40.0;
+/// With touch controls the autopilot banks and pulls, so the aim can go well off the nose.
+const TOUCH_MAX_AIM_ANGLE: f32 = 110.0;
 
 fn update_look_around(
     gamepads: Query<&Gamepad>,
@@ -297,9 +304,8 @@ fn axis(keys: &ButtonInput<KeyCode>, pos: &[KeyCode], neg: &[KeyCode]) -> f32 {
     p - n
 }
 
-fn touch_deadzone(v: f32, dz: f32) -> f32 {
-    if v.abs() < dz { 0.0 } else { (v - dz * v.signum()) / (1.0 - dz) }
-}
+/// How hard the touch autopilot pulls (the AI flies at about 1).
+const TOUCH_AGGRESSION: f32 = 1.4;
 
 fn deadzone(v: f32) -> f32 {
     if v.abs() < 0.12 {
@@ -350,12 +356,8 @@ fn player_flight_input(
         (-deadzone(stick.y), deadzone(stick.x), yaw)
     });
 
-    // touch joystick: like a gamepad stick, but pitch needs a firm push so a
-    // sideways roll doesn't knock the aim off
-    let (touch_pitch, touch_roll) = (-touch_deadzone(touch.stick.y, 0.35), touch_deadzone(touch.stick.x, 0.1));
-
-    let manual_pitch = (key_pitch + pad_pitch + touch_pitch).clamp(-1.0, 1.0);
-    let manual_roll = (key_roll + pad_roll + touch_roll).clamp(-1.0, 1.0);
+    let manual_pitch = (key_pitch + pad_pitch).clamp(-1.0, 1.0);
+    let manual_roll = (key_roll + pad_roll).clamp(-1.0, 1.0);
     let manual_yaw = (key_yaw + pad_yaw).clamp(-1.0, 1.0);
 
     match *mode {
@@ -363,6 +365,14 @@ fn player_flight_input(
             input.pitch = manual_pitch;
             input.roll = manual_roll;
             input.yaw = manual_yaw;
+        }
+        ControlMode::MouseAim if touch.active => {
+            // touch: a full autopilot toward the aim point, banking into turns
+            // and rolling wings-level once the nose is on it
+            let (p, r, y) = steer_towards(transform, state, aim.dir, TOUCH_AGGRESSION);
+            input.pitch = p;
+            input.roll = r;
+            input.yaw = y;
         }
         ControlMode::MouseAim => {
             // the mouse trims pitch and rudder only; rolling is up to the player
