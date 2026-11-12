@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::VisibilityRange,
-    light::{NotShadowCaster, NotShadowReceiver},
+    light::NotShadowCaster,
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
 };
@@ -323,8 +323,6 @@ pub(super) fn stream_trees(
                     end_margin: LOD_SWITCH,
                     use_aabb: true,
                 },
-                NotShadowCaster,
-                NotShadowReceiver,
             ))
             .id();
         let far = commands
@@ -337,8 +335,8 @@ pub(super) fn stream_trees(
                     end_margin: FAR_END,
                     use_aabb: true,
                 },
+                // far trees only receive shadows (casting them is costly and invisible out here)
                 NotShadowCaster,
-                NotShadowReceiver,
             ))
             .id();
         loaded.0.insert(key, vec![near, far]);
