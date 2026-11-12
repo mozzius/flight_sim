@@ -64,6 +64,18 @@
       });
       window.__showError = show;
 
+      // A lost GPU device leaves the last frame frozen on screen with no error
+      // logged (on iOS usually the GPU process running out of memory): say so.
+      if (window.GPUAdapter) {
+        const reqDev = GPUAdapter.prototype.requestDevice;
+        GPUAdapter.prototype.requestDevice = async function (d) {
+          const dev = await reqDev.call(this, d);
+          dev.lost.then((i) => show("GPU device lost (" + i.reason + "): " + i.message + "\nUsually this means the GPU ran out of memory."));
+          dev.addEventListener("uncapturederror", (e) => show("GPU error: " + e.error.message));
+          return dev;
+        };
+      }
+
       // ?debug: mirror the whole log and some GPU/canvas state on the page
       if (!new URLSearchParams(location.search).has("debug")) return;
       const dbg = document.getElementById("debug");
@@ -93,12 +105,11 @@
           log("G", ["canvas configure " + c.format + " alpha=" + c.alphaMode + " usage=" + c.usage]);
           return cfg.call(this, c);
         };
-        const reqDev = GPUAdapter.prototype.requestDevice;
+        const reqDev2 = GPUAdapter.prototype.requestDevice;
         GPUAdapter.prototype.requestDevice = async function (d) {
           log("G", ["requestDevice features=" + [...(d?.requiredFeatures || [])].join(",")]);
-          const dev = await reqDev.call(this, d);
+          const dev = await reqDev2.call(this, d);
           dev.lost.then((i) => log("G", ["DEVICE LOST: " + i.reason + " " + i.message]));
-          dev.addEventListener("uncapturederror", (e) => log("G", ["gpu error: " + e.error.message]));
           return dev;
         };
       }
