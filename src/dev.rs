@@ -40,6 +40,14 @@ impl Plugin for DevPlugin {
             )
             .add_systems(Update, fx_test_explosion);
         }
+        if std::env::var("FLIGHT_SIM_CAM").is_ok() {
+            app.add_systems(
+                PostUpdate,
+                orbit_camera
+                    .after(TransformSystems::Propagate)
+                    .before(crate::effects::EffectsSystems),
+            );
+        }
         if std::env::var("FLIGHT_SIM_AUTOPILOT").is_ok() {
             app.add_systems(Update, autopilot_player);
         }
@@ -126,29 +134,138 @@ fn autopilot_player(
     }
 }
 
-/// `FLIGHT_SIM_FX_TEST=1`: full afterburner, plus an explosion just ahead of
-/// the player shortly before the screenshot.
-fn force_afterburner(mut player: Query<&mut crate::flight::ControlInput, With<crate::game::Player>>) {
+/// `FLIGHT_SIM_FX_TEST=<mode>` stages one effect shortly before the screenshot
+/// (`FLIGHT_SIM_FX_LEAD` seconds before it, default 0.35):
+/// - `1` / `explosion`: full afterburner plus an explosion ahead of the player
+///   (`FLIGHT_SIM_FX_SIZE`, default 12)
+/// - `ground`: a crash-sized explosion on the ground ahead
+/// - `engines` / `dry`: afterburner / full dry power only
+/// - `missile`: fires a missile
+/// - `vapour`: a hard pull
+/// - `damage`: the player is badly damaged from the start
+/// - `burning`: the player is shot down
+/// - `gun`: holds the trigger
+/// - `stress`: big explosions every 0.8 s ahead of the jet
+/// - `contrail`: the player starts 5 km higher, where contrails form
+fn fx_mode() -> String {
+    std::env::var("FLIGHT_SIM_FX_TEST").unwrap_or_default()
+}
+
+fn fx_lead() -> f32 {
+    std::env::var("FLIGHT_SIM_FX_LEAD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.35)
+}
+
+fn force_afterburner(
+    time: Res<Time>,
+    shot: Option<Res<AutoScreenshot>>,
+    mut player: Query<&mut crate::flight::ControlInput, With<crate::game::Player>>,
+    mut actions: ResMut<crate::controls::PlayerActions>,
+    mut fired: Local<bool>,
+) {
+    let mode = fx_mode();
+    let staged = shot.is_some_and(|s| time.elapsed_secs() >= s.after - fx_lead());
+    if mode == "gun" {
+        actions.firing_gun = true;
+    }
+    if mode == "missile" && staged && !*fired {
+        *fired = true;
+        actions.fire_missile = true;
+    }
     for mut input in &mut player {
         input.throttle = 1.0;
-        input.afterburner = true;
+        input.afterburner = !matches!(mode.as_str(), "dry" | "vapour" | "missile" | "gun");
+        input.pitch = 0.0;
+        input.roll = 0.0;
+        if mode == "vapour" && staged {
+            input.pitch = 1.0;
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn fx_test_explosion(
     time: Res<Time<Real>>,
     shot: Option<Res<AutoScreenshot>>,
-    player: Query<&Transform, With<crate::game::Player>>,
+    terrain: Res<crate::world::Terrain>,
+    mut player: Query<(&mut Transform, &crate::flight::FlightState, &mut crate::game::Health), With<crate::game::Player>>,
     mut explosions: MessageWriter<crate::game::Explosion>,
     mut done: Local<bool>,
+    mut stress_count: Local<u32>,
+    mut lifted: Local<bool>,
 ) {
     let Some(shot) = shot else { return };
-    if *done || time.elapsed_secs() < shot.after - 0.35 {
+    let mode = fx_mode();
+    if mode == "contrail"
+        && !*lifted
+        && let Ok((mut t, _, _)) = player.single_mut()
+    {
+        t.translation.y += 5_000.0;
+        *lifted = true;
+    }
+    if mode == "damage" {
+        for (_, _, mut health) in &mut player {
+            health.current = health.current.min(health.max * 0.2);
+        }
+    }
+    if *done || time.elapsed_secs() < shot.after - fx_lead() {
         return;
     }
     *done = true;
-    if let Ok(t) = player.single() {
-        let p = t.translation + t.forward() * 120.0 + t.right() * 25.0;
-        explosions.write(crate::game::Explosion { position: p, size: 12.0 });
+    // `stress`: a big air burst every 0.8 s from 3 s on, for frame-time checks
+    if mode == "stress" {
+        *done = false;
+        if time.elapsed_secs() < 3.0 + *stress_count as f32 * 0.8 {
+            return;
+        }
+        *stress_count += 1;
+        if let Ok((t, _, _)) = player.single() {
+            let side = if stress_count.is_multiple_of(2) { 1.0 } else { -1.0 };
+            let p = t.translation + t.forward() * 250.0 + t.right() * side * 60.0;
+            let size = [12.0, 9.0, 25.0, 6.0][*stress_count as usize % 4];
+            explosions.write(crate::game::Explosion { position: p, size });
+        }
+        return;
     }
+    let Ok((t, state, mut health)) = player.single_mut() else { return };
+    // where the jet will be when the screenshot is taken
+    let ahead = t.translation + state.velocity * fx_lead();
+    match mode.as_str() {
+        "1" | "explosion" => {
+            let size = std::env::var("FLIGHT_SIM_FX_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(12.0);
+            let p = ahead + t.forward() * 130.0 + t.right() * 30.0;
+            explosions.write(crate::game::Explosion { position: p, size });
+        }
+        "ground" => {
+            // on the line of sight of FLIGHT_SIM_CAM=0,60,40 (looking steeply down past the jet)
+            let mut p = ahead + t.forward() * (t.translation.y / 60f32.to_radians().tan()) + t.right() * 350.0;
+            p.y = terrain.height_at(p.x, p.z);
+            explosions.write(crate::game::Explosion { position: p, size: 25.0 });
+        }
+        "burning" => health.current = 0.0,
+        _ => {}
+    }
+}
+
+/// `FLIGHT_SIM_CAM=<yaw°>,<pitch°>,<distance m>`: park the camera at a fixed
+/// spot relative to the player's jet (yaw 0 = straight behind), for close-ups.
+fn orbit_camera(
+    player: Query<&Transform, (With<crate::game::Player>, Without<crate::camera::MainCamera>)>,
+    mut camera: Query<(&mut Transform, &mut GlobalTransform), With<crate::camera::MainCamera>>,
+) {
+    let v: Vec<f32> = std::env::var("FLIGHT_SIM_CAM")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    let [yaw, pitch, dist] = v[..] else { return };
+    let (Ok(plane), Ok((mut cam, mut global))) = (player.single(), camera.single_mut()) else {
+        return;
+    };
+    let dir = Quat::from_rotation_y(yaw.to_radians()) * Quat::from_rotation_x(-pitch.to_radians()) * Vec3::Z;
+    let focus = plane.transform_point(Vec3::new(0.0, 0.0, 6.0));
+    cam.translation = focus + plane.rotation * dir * dist;
+    cam.look_at(focus, plane.up());
+    // runs after propagation (so it wins over the chase camera): the camera
+    // has no parent, so its global transform is just its transform
+    *global = GlobalTransform::from(*cam);
 }
