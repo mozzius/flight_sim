@@ -79,7 +79,7 @@
 
     // The terrain is generated on startup and blocks the page for a few seconds:
     // paint the status first, then start the game.
-    status.textContent = "GENERATING TERRAIN… (about 15 s, the page will freeze)";
+    status.textContent = "LOADING…";
     if (!navigator.gpu) {
       window.__showError("This browser has no WebGPU, so the game falls back to WebGL2 and may not render. On iPhone it needs iOS 26 or newer.");
     } else if (!(await navigator.gpu.requestAdapter())) {
@@ -97,14 +97,11 @@
         throw e;
       }
     }
-    // init returns before the first frame; the first frame then generates the terrain
-    // and blocks for a while. Hide the overlay once frames start flowing after that stall.
-    let last = performance.now(), stalled = false;
-    const started = last;
-    const watch = (now) => {
-      if (now - last > 400) stalled = true;
-      last = now;
-      if ((stalled && now - started > 0) || now - started > 60000) {
+    // init returns before the first frame, and the first frames bake the cloud
+    // noise (a short freeze): hide the overlay once frames are flowing after that.
+    let frames = 0;
+    const watch = () => {
+      if (++frames >= 20) {
         overlay.classList.add("hidden");
         canvas.focus();
       } else requestAnimationFrame(watch);

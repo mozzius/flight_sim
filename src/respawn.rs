@@ -19,7 +19,12 @@ impl Plugin for RespawnPlugin {
         app.init_resource::<RespawnPrompt>()
             .init_resource::<ButtonClicked>()
             .add_systems(Startup, spawn_prompt)
-            .add_systems(Update, (track_player, update_prompt, respawn_on_request).chain());
+            .add_systems(
+                Update,
+                (track_player, update_prompt, respawn_on_request)
+                    .chain()
+                    .run_if(in_state(crate::title::GameState::Playing)),
+            );
     }
 }
 

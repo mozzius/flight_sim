@@ -39,8 +39,11 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
+pub mod bake;
 mod roads;
 mod trees;
+
+pub use bake::{MapBake, MapFile};
 
 pub struct TerrainGenPlugin;
 
@@ -91,7 +94,8 @@ impl Plugin for TerrainGenPlugin {
             MaterialPlugin::<SceneryMaterial>::default(),
         ))
         .init_resource::<trees::LoadedTrees>()
-        .add_systems(Startup, generate_terrain)
+        .init_asset::<MapFile>()
+        .init_asset_loader::<bake::MapFileLoader>()
         .add_systems(Update, trees::stream_trees);
         if let Some(cam) = std::env::var("TERRAIN_DEBUG_CAM")
             .ok()
@@ -162,7 +166,7 @@ const EROSION_GAIN: f32 = 0.5;
 const EROSION_LACUNARITY: f32 = 2.0;
 const EROSION_NORMALIZATION: f32 = 0.5;
 
-/// The map's seed: random each launch (see `generate_terrain`), or `FLIGHT_SIM_SEED`.
+/// The map's seed (set by `MapBake::bake` / `from_bytes`).
 static SEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1337);
 
 /// The current map's seed.
@@ -182,10 +186,10 @@ const CHUNK_CELLS: usize = 100;
 /// Colour / normal map resolution for each grid (the erosion detail lives in these).
 // The texture bake is most of the startup time. The web build is single-threaded,
 // so it bakes at half resolution (a quarter of the work).
-const TEXTURE_DIV: usize = if cfg!(target_arch = "wasm32") { 2 } else { 1 };
-const NEAR_TEXTURE_RES: usize = 4096 / TEXTURE_DIV; // 6 m per texel
-const FINE_TEXTURE_RES: usize = 2048 / TEXTURE_DIV; // 25 m per texel
-const COARSE_TEXTURE_RES: usize = 1024 / TEXTURE_DIV; // 150 m per texel
+pub const TEXTURE_DIV: usize = if cfg!(target_arch = "wasm32") { 2 } else { 1 };
+const NEAR_TEXTURE_RES: usize = 4096; // 6 m per texel
+const FINE_TEXTURE_RES: usize = 2048; // 25 m per texel
+const COARSE_TEXTURE_RES: usize = 1024; // 150 m per texel
 const SKIRT_DEPTH: f32 = 400.0;
 
 // ---------------------------------------------------------------------------------------------
@@ -193,7 +197,6 @@ const SKIRT_DEPTH: f32 = 400.0;
 // ---------------------------------------------------------------------------------------------
 
 /// The generated heightfield, kept on the CPU for collision queries.
-#[derive(Resource)]
 pub struct GeneratedTerrain {
     near: HeightGrid,
     fine: HeightGrid,
@@ -838,7 +841,7 @@ fn make_image(
 /// the gullies and ridges comes from here, the mesh only provides the silhouette. The normal
 /// map is in a tangent space where T = +X, B = +Z and N = +Y (the mesh supplies exactly those
 /// as its normals and tangents), so it holds world-space normals.
-fn bake_textures(origin: Vec2, extent: f32, res: usize) -> (Image, Image) {
+fn bake_textures(origin: Vec2, extent: f32, res: usize) -> TextureBake {
     let step = extent / res as f32;
     // Texel-centred samples with a one texel border for the finite differences.
     let n = res + 2;
@@ -877,32 +880,72 @@ fn bake_textures(origin: Vec2, extent: f32, res: usize) -> (Image, Image) {
             Vec4::new(normal.x, normal.z, normal.y, 1.0),
         )
     });
-    let (colors, normals): (Vec<Vec4>, Vec<Vec4>) = texels.into_iter().unzip();
-
     let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    let color_image = make_image(
-        &mip_chain(colors, res, false),
-        res,
-        TextureFormat::Rgba8UnormSrgb,
-        |v| {
-            let s = Srgba::from(LinearRgba::rgb(v.x, v.y, v.z));
-            [to_u8(s.red), to_u8(s.green), to_u8(s.blue), 255]
-        },
-    );
-    let normal_image = make_image(
-        &mip_chain(normals, res, true),
-        res,
-        TextureFormat::Rgba8Unorm,
-        |v| {
-            [
-                to_u8(v.x * 0.5 + 0.5),
-                to_u8(v.y * 0.5 + 0.5),
-                to_u8(v.z * 0.5 + 0.5),
-                255,
-            ]
-        },
-    );
-    (color_image, normal_image)
+    let mut color = Vec::with_capacity(res * res * 3);
+    let mut normal = Vec::with_capacity(res * res * 2);
+    for (c, n) in texels {
+        let srgb = Srgba::from(LinearRgba::rgb(c.x, c.y, c.z));
+        color.extend([to_u8(srgb.red), to_u8(srgb.green), to_u8(srgb.blue)]);
+        normal.extend([to_u8(n.x * 0.5 + 0.5), to_u8(n.y * 0.5 + 0.5)]);
+    }
+    TextureBake { res, color, normal }
+}
+
+/// A baked terrain texture: sRGB colour (3 bytes per texel) and the normal's
+/// x and z (2 bytes; y is rebuilt). Quantised like this so a generated map and
+/// one loaded from a file go through exactly the same path.
+pub struct TextureBake {
+    res: usize,
+    color: Vec<u8>,
+    normal: Vec<u8>,
+}
+
+impl TextureBake {
+    fn images(&self) -> (Image, Image) {
+        let res = self.res;
+        let colors: Vec<Vec4> = self
+            .color
+            .chunks_exact(3)
+            .map(|c| {
+                let l = LinearRgba::from(Srgba::rgb_u8(c[0], c[1], c[2]));
+                Vec4::new(l.red, l.green, l.blue, 1.0)
+            })
+            .collect();
+        let normals: Vec<Vec4> = self
+            .normal
+            .chunks_exact(2)
+            .map(|n| {
+                let x = n[0] as f32 / 255.0 * 2.0 - 1.0;
+                let z = n[1] as f32 / 255.0 * 2.0 - 1.0;
+                let y = (1.0 - x * x - z * z).max(0.0).sqrt();
+                Vec4::new(x, z, y, 1.0)
+            })
+            .collect();
+        let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let color_image = make_image(
+            &mip_chain(colors, res, false),
+            res,
+            TextureFormat::Rgba8UnormSrgb,
+            |v| {
+                let s = Srgba::from(LinearRgba::rgb(v.x, v.y, v.z));
+                [to_u8(s.red), to_u8(s.green), to_u8(s.blue), 255]
+            },
+        );
+        let normal_image = make_image(
+            &mip_chain(normals, res, true),
+            res,
+            TextureFormat::Rgba8Unorm,
+            |v| {
+                [
+                    to_u8(v.x * 0.5 + 0.5),
+                    to_u8(v.y * 0.5 + 0.5),
+                    to_u8(v.z * 0.5 + 0.5),
+                    255,
+                ]
+            },
+        );
+        (color_image, normal_image)
+    }
 }
 
 /// Builds one chunk mesh covering cells [i0, i1) x [j0, j1) of `grid`, with UVs mapping the
@@ -993,28 +1036,47 @@ fn build_chunk(
     .with_inserted_indices(Indices::U32(indices))
 }
 
-pub(crate) fn generate_terrain(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<TerrainMaterial>>,
-    mut scenery_materials: ResMut<Assets<SceneryMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    let start = Instant::now();
-    // a new map every launch, unless one is asked for
-    let seed = std::env::var("FLIGHT_SIM_SEED")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(rand::random::<u32>);
-    SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
-    info!("terrain: map seed {seed} (FLIGHT_SIM_SEED={seed} to fly it again)");
+impl MapBake {
+    /// Generates a map: height grids, roads and terrain textures (at
+    /// 1/`texture_div` of the full resolution). This is the slow part.
+    pub fn bake(seed: u32, texture_div: usize) -> MapBake {
+        let start = Instant::now();
+        SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+        info!("terrain: map seed {seed} (FLIGHT_SIM_SEED={seed} to fly it again)");
+        let mut near = bake_grid(NEAR_SPACING, NEAR_CELLS);
+        // roads level the ground under them, so they come before the textures and meshes
+        let roads = roads::build_roads(&mut near);
+        let fine = bake_grid(FINE_SPACING, FINE_CELLS);
+        let coarse = bake_grid(COARSE_SPACING, COARSE_CELLS);
+        let grids_done = start.elapsed();
+        let textures = [
+            (&near, NEAR_CELLS, NEAR_TEXTURE_RES),
+            (&fine, FINE_CELLS, FINE_TEXTURE_RES),
+            (&coarse, COARSE_CELLS, COARSE_TEXTURE_RES),
+        ]
+        .map(|(grid, cells, res)| bake_textures(grid.origin, grid.spacing * cells as f32, res / texture_div));
+        info!(
+            "terrain: baked in {:.2?} (height grids {:.2?})",
+            start.elapsed(),
+            grids_done
+        );
+        MapBake { seed, near, fine, coarse, roads, textures }
+    }
+}
 
-    let mut near = bake_grid(NEAR_SPACING, NEAR_CELLS);
-    // roads level the ground under them, so they come before the meshes
-    let road_lines = roads::build_roads(&mut near);
-    let fine = bake_grid(FINE_SPACING, FINE_CELLS);
-    let coarse = bake_grid(COARSE_SPACING, COARSE_CELLS);
-    let grids_done = start.elapsed();
+/// Turns a baked map into meshes, materials, roads and the tree field, and
+/// returns the heightfield for collision queries.
+pub fn spawn_map(
+    bake: MapBake,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<TerrainMaterial>,
+    scenery_materials: &mut Assets<SceneryMaterial>,
+    images: &mut Assets<Image>,
+) -> GeneratedTerrain {
+    let start = Instant::now();
+    let MapBake { seed, near, fine, coarse, roads: road_lines, textures } = bake;
+    SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
 
     let root = commands
         .spawn((
@@ -1029,13 +1091,15 @@ pub(crate) fn generate_terrain(
     let fine_half = FINE_SPACING * FINE_CELLS as f32 * 0.5;
 
     // (grid, cells, texture resolution, half-extent of the finer grid covering its middle)
-    for (grid, cells, tex_res, hole) in [
-        (&near, NEAR_CELLS, NEAR_TEXTURE_RES, 0.0),
-        (&fine, FINE_CELLS, FINE_TEXTURE_RES, near_half),
-        (&coarse, COARSE_CELLS, COARSE_TEXTURE_RES, fine_half),
-    ] {
-        let extent = grid.spacing * cells as f32;
-        let (color, normal) = bake_textures(grid.origin, extent, tex_res);
+    for ((grid, cells, hole), texture) in [
+        (&near, NEAR_CELLS, 0.0),
+        (&fine, FINE_CELLS, near_half),
+        (&coarse, COARSE_CELLS, fine_half),
+    ]
+    .into_iter()
+    .zip(&textures)
+    {
+        let (color, normal) = texture.images();
         let material = materials.add(ExtendedMaterial {
             base: StandardMaterial {
                 base_color_texture: Some(images.add(color)),
@@ -1120,12 +1184,11 @@ pub(crate) fn generate_terrain(
         max_h = max_h.max(h);
     }
     info!(
-        "terrain: generated in {:.2?} (height grids {:.2?}); {chunks} chunks, {triangles} triangles, heights {min_h:.0}..{max_h:.0} m",
+        "terrain: built in {:.2?}; {chunks} chunks, {triangles} triangles, heights {min_h:.0}..{max_h:.0} m",
         start.elapsed(),
-        grids_done,
     );
 
-    commands.insert_resource(GeneratedTerrain { near, fine, coarse });
+    GeneratedTerrain { near, fine, coarse }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1176,13 +1239,11 @@ impl DebugCam {
 
 fn debug_cam(
     view: Res<DebugCam>,
-    terrain: Option<Res<GeneratedTerrain>>,
+    terrain: Res<crate::world::Terrain>,
     mut cams: Query<&mut Transform, With<Camera3d>>,
 ) {
     let mut eye = view.eye;
-    if let Some(t) = &terrain {
-        eye.y = eye.y.max(t.height_at(eye.x, eye.z) + 150.0);
-    }
+    eye.y = eye.y.max(terrain.height_at(eye.x, eye.z) + 150.0);
     for mut tf in &mut cams {
         *tf = Transform::from_translation(eye).looking_at(view.target, Vec3::Y);
     }

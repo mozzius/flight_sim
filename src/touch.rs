@@ -30,7 +30,12 @@ impl Plugin for TouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchInput>()
             .add_systems(Startup, spawn_ui)
-            .add_systems(Update, (read_touches, layout_ui).chain().in_set(TouchSystems));
+            .add_systems(
+                Update,
+                (read_touches.run_if(in_state(crate::title::GameState::Playing)), layout_ui)
+                    .chain()
+                    .in_set(TouchSystems),
+            );
     }
 }
 

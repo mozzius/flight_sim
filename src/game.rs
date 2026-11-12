@@ -22,12 +22,13 @@ impl Plugin for GamePlugin {
             .add_message::<AircraftDestroyed>()
             .add_message::<PlayerKill>()
             .add_systems(Startup, load_models)
-            .add_systems(PostStartup, initial_spawn)
+            .add_systems(OnEnter(crate::title::GameState::Playing), initial_spawn)
             .add_systems(
                 FixedUpdate,
                 (handle_damage, handle_crashes, respawn, wave_system)
                     .chain()
-                    .after(FlightSystems::Combat),
+                    .after(FlightSystems::Combat)
+                    .run_if(in_state(crate::title::GameState::Playing)),
             );
     }
 }

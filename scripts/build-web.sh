@@ -14,5 +14,8 @@ if command -v wasm-opt >/dev/null; then
   wasm-opt -Os --all-features dist/flight_sim_bg.wasm -o dist/flight_sim_bg.wasm
 fi
 cp -R assets dist/assets
+# the built-in map, pre-baked so the browser doesn't have to generate it
+mkdir -p dist/assets/maps
+FLIGHT_SIM_BAKE_MAP="$PWD/dist/assets/maps/builtin.map" cargo run --release
 cp web/index.html web/vercel.json dist/
 du -sh dist/flight_sim_bg.wasm dist

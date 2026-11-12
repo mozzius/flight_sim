@@ -31,9 +31,15 @@ crosshair, right stick look around.
 Guns: put the boresight cross on the red lead pipper; it turns white with
 SHOOT when you have a firing solution.
 
-Every launch generates a new map (mountains, roads and forests). The seed is
-logged at startup and shown in the pause menu; `FLIGHT_SIM_SEED=<n>` flies that
-map again. The round opens with a short fly-by shot: any key, click or gamepad A skips it.
+The title screen picks the map: **Valley**, the built-in one, or **Random**, freshly
+generated mountains, roads and forests. A random map's seed is shown while it
+generates and in the pause menu; `FLIGHT_SIM_SEED=<n>` flies it again (and skips the
+title screen, as does `FLIGHT_SIM_MAP=builtin|random`). The round opens with a short
+fly-by shot: any key, click, tap or gamepad A skips it.
+
+On a touchscreen: joystick and flares on the left; drag anywhere to aim; gun (hold,
+and drag to aim while firing), missile and target buttons on the right, with a
+throttle slider on the edge (top = afterburner, bottom = airbrake); pause top left.
 
 ## Dev
 
@@ -46,7 +52,8 @@ map again. The round opens with a short fly-by shot: any key, click or gamepad A
 `TERRAIN_DEBUG_CAM=1..4` (terrain viewpoints), `FLIGHT_SIM_FX_TEST=explosion|engines|missile|vapour|...`
 (staged effects), `CLOUDS_DEBUG_CAM=above|below|inside|sun|horizon`, `CLOUDS_DIV=2..4` (cloud
 resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FLIGHT_SIM_PAUSE_TEST=1`, `FLIGHT_SIM_KILL_TEST=1`,
-`FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_SEED=<n>` (fixed map; otherwise random).
+`FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_SEED=<n>` (that random map; screenshot runs fly the
+built-in map by default, `FLIGHT_SIM_MAP=title` shows the title screen instead).
 Screenshot runs are headless (no window) and silent.
 
 ## Web build
@@ -61,5 +68,6 @@ vercel deploy dist --prod --scope samuel-newmans-projects --project flight-sim
 ```
 
 The web build is single-threaded, so it bakes the terrain textures at half
-resolution and plants trees a couple of chunks per frame; startup still freezes
-the page for ~15 s while the terrain generates.
+resolution and plants trees a couple of chunks per frame. The built-in map is
+downloaded pre-baked (`assets/maps/builtin.map`, written by the build script);
+a random map still freezes the page for ~15 s while it generates.

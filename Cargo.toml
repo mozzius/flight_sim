@@ -8,6 +8,7 @@ edition = "2024"
 bevy = { version = "0.20.1", features = ["wav"] }
 bevy_transform_interpolation = "0.6"
 rand = "0.10"
+miniz_oxide = "0.8"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

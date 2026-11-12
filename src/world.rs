@@ -10,7 +10,7 @@ use bevy::{
     prelude::*,
 };
 
-use crate::terrain_gen::{GeneratedTerrain, TerrainGenPlugin, generate_terrain};
+use crate::terrain_gen::{GeneratedTerrain, TerrainGenPlugin};
 
 pub struct WorldPlugin;
 
@@ -18,9 +18,7 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Terrain>()
             .add_plugins(TerrainGenPlugin)
-            // the generator inserts its resource at Startup; adopt it right
-            // after, before anything spawns in PostStartup
-            .add_systems(Startup, (setup, adopt_generated_terrain.after(generate_terrain)));
+            .add_systems(Startup, setup);
     }
 }
 
@@ -35,6 +33,11 @@ pub struct Terrain {
 const STEP: f32 = 32.0;
 
 impl Terrain {
+    /// Swap in a newly loaded map (see `title::load_map`).
+    pub fn set(&mut self, generated: GeneratedTerrain) {
+        self.generated = Some(generated);
+    }
+
     /// Height of the ground at a world (x, z) position.
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
         self.generated.as_ref().map_or(0.0, |t| t.height_at(x, z))
@@ -65,11 +68,6 @@ impl Terrain {
     }
 }
 
-fn adopt_generated_terrain(world: &mut World) {
-    if let Some(generated) = world.remove_resource::<GeneratedTerrain>() {
-        world.resource_mut::<Terrain>().generated = Some(generated);
-    }
-}
 
 fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<ScatteringMedium>>) {
     // sun

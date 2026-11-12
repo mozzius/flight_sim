@@ -14,7 +14,10 @@ impl Plugin for PausePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Paused(std::env::var("FLIGHT_SIM_PAUSE_TEST").is_ok()))
             .add_systems(Startup, spawn_menu)
-            .add_systems(Update, (toggle_pause, update_menu).chain());
+            .add_systems(
+                Update,
+                (toggle_pause.run_if(in_state(crate::title::GameState::Playing)), update_menu).chain(),
+            );
     }
 }
 

@@ -122,10 +122,17 @@ fn spawn_letterbox(mut commands: Commands) {
     }
 }
 
-fn letterbox(intro: Res<Intro>, mut bars: Query<(&mut Node, &mut Visibility), With<Letterbox>>) {
+fn letterbox(
+    intro: Res<Intro>,
+    state: Res<State<crate::title::GameState>>,
+    mut bars: Query<(&mut Node, &mut Visibility), With<Letterbox>>) {
     // slide out alongside the end of the camera move
     let out = ((intro.t - (INTRO_LEN - 1.0)) / 0.8).clamp(0.0, 1.0);
-    let h = 11.0 * (1.0 - out * out * (3.0 - 2.0 * out));
+    let mut h = 11.0 * (1.0 - out * out * (3.0 - 2.0 * out));
+    // no bars over the title screen
+    if *state.get() != crate::title::GameState::Playing {
+        h = 0.0;
+    }
     for (mut node, mut vis) in &mut bars {
         let target = if h <= 0.01 { Visibility::Hidden } else { Visibility::Inherited };
         if *vis != target {
