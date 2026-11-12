@@ -26,6 +26,27 @@ fn detect() -> bool {
     std::env::var("FLIGHT_SIM_LOW_MEMORY").is_ok()
 }
 
+/// Whether to use Bevy's physical atmosphere. It samples 32-bit float
+/// lookup textures with filtering, which needs the `float32-filterable` GPU
+/// feature; many phones lack it, so the page checks
+/// (`window.FLIGHT_SIM_NO_ATMOSPHERE`, or `?noatmo`) and they get a plain
+/// gradient sky instead. Natively: `FLIGHT_SIM_NO_ATMOSPHERE=1`.
+pub fn atmosphere() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            !js_sys::Reflect::get(&js_sys::global(), &"FLIGHT_SIM_NO_ATMOSPHERE".into())
+                .map(|v| v.is_truthy())
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::env::var("FLIGHT_SIM_NO_ATMOSPHERE").is_err()
+        }
+    })
+}
+
 /// Screen-edge insets (left, top, right, bottom) in logical pixels that
 /// controls should keep clear of: the notch and the home indicator. From the
 /// page's `env(safe-area-inset-*)` on the web, zero elsewhere.

@@ -18,7 +18,8 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Terrain>()
             .add_plugins(TerrainGenPlugin)
-            .add_systems(Startup, setup);
+            .add_systems(Startup, setup)
+            .add_systems(Update, follow_sky_dome);
     }
 }
 
@@ -69,7 +70,12 @@ impl Terrain {
 }
 
 
-fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<ScatteringMedium>>) {
+fn setup(
+    mut commands: Commands,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     if crate::platform::low_memory() {
         commands.insert_resource(bevy::light::DirectionalLightShadowMap { size: 1024 });
     }
@@ -90,8 +96,76 @@ fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Scatterin
         .build(),
     ));
 
-    // the planet's atmosphere (centered below the origin by default)
-    commands.spawn(Atmosphere::earth(
-        scattering_mediums.add(ScatteringMedium::default()),
+    if crate::platform::atmosphere() {
+        // the planet's atmosphere (centered below the origin by default)
+        commands.spawn(Atmosphere::earth(
+            scattering_mediums.add(ScatteringMedium::default()),
+        ));
+    } else {
+        spawn_sky_dome(&mut commands, &mut meshes, &mut materials);
+    }
+}
+
+/// Fallback sky for GPUs that can't run the atmosphere (see
+/// `platform::atmosphere`): a gradient dome around the camera, plus flat
+/// ambient light standing in for the sky's environment lighting.
+#[derive(Component)]
+struct SkyDome;
+
+const SKY_DOME_RADIUS: f32 = 100_000.0;
+
+fn spawn_sky_dome(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
+    let mut mesh = Sphere::new(1.0).mesh().uv(48, 24);
+    let colors: Vec<[f32; 4]> = mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .and_then(|a| a.as_float3())
+        .unwrap_or_default()
+        .iter()
+        .map(|p| {
+            // pale at the horizon, deep blue overhead, grey-blue below
+            let horizon = LinearRgba::from(Color::srgb(0.72, 0.8, 0.9));
+            let zenith = LinearRgba::from(Color::srgb(0.2, 0.38, 0.7));
+            let below = LinearRgba::from(Color::srgb(0.45, 0.52, 0.6));
+            let y = p[1];
+            let c = if y >= 0.0 {
+                horizon.mix(&zenith, y.powf(0.6))
+            } else {
+                horizon.mix(&below, (-y * 4.0).min(1.0))
+            };
+            [c.red, c.green, c.blue, 1.0]
+        })
+        .collect();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    commands.spawn((
+        SkyDome,
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            fog_enabled: false,
+            cull_mode: None,
+            ..default()
+        })),
+        Transform::from_scale(Vec3::splat(SKY_DOME_RADIUS)),
+        bevy::light::NotShadowCaster,
+        bevy::light::NotShadowReceiver,
     ));
+    commands.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(0.7, 0.8, 1.0),
+        brightness: SKY_AMBIENT,
+        ..default()
+    });
+}
+
+/// Sky light (cd/m²) on the fallback path, roughly what the atmosphere's environment light gives.
+const SKY_AMBIENT: f32 = 12_000.0;
+
+fn follow_sky_dome(
+    camera: Query<&Transform, (With<crate::camera::MainCamera>, Without<SkyDome>)>,
+    mut dome: Query<&mut Transform, With<SkyDome>>,
+) {
+    let (Ok(cam), Ok(mut dome)) = (camera.single(), dome.single_mut()) else {
+        return;
+    };
+    dome.translation = cam.translation;
 }

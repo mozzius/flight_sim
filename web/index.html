@@ -192,7 +192,7 @@
         const feats = a ? [...a.features].join(",") : "";
         const c = document.getElementById("bevy");
         setInterval(() => {
-          status = "build __BUILD__" + (window.FLIGHT_SIM_LOW_MEMORY ? " LOW" : "") + " · adapter " + info + " " + lim + "\nfeatures " + feats + "\ncanvas " + c.width + "x" + c.height + " css " + c.clientWidth + "x" + c.clientHeight +
+          status = "build __BUILD__" + (window.FLIGHT_SIM_LOW_MEMORY ? " LOW" : "") + (window.FLIGHT_SIM_NO_ATMOSPHERE ? " NOATMO" : "") + " · adapter " + info + " " + lim + "\nfeatures " + feats + "\ncanvas " + c.width + "x" + c.height + " css " + c.clientWidth + "x" + c.clientHeight +
             " dpr " + devicePixelRatio + "\nsubmits " + submits + " frames " + textures;
           render();
         }, 1000);
@@ -246,8 +246,13 @@
     // Let the overlay paint before the game module starts loading.
     if (!navigator.gpu) {
       window.__showError("This browser has no WebGPU, so the game may not render. It needs a recent Chrome, Edge or Safari (iOS 26+).");
-    } else if (!(await navigator.gpu.requestAdapter())) {
-      window.__showError("WebGPU is present but no GPU adapter was available.");
+    } else {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) window.__showError("WebGPU is present but no GPU adapter was available.");
+      // Bevy's atmosphere needs filterable 32-bit float textures; without them
+      // the game draws a plain sky instead (src/platform.rs)
+      window.FLIGHT_SIM_NO_ATMOSPHERE =
+        new URLSearchParams(location.search).has("noatmo") || !adapter?.features.has("float32-filterable");
     }
     await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
     try {
