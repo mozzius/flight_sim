@@ -9,10 +9,13 @@
 //! in front of the sky and distant terrain.
 //!
 //! * `FLIGHT_SIM_NO_CLOUDS=1` disables the plugin.
-//! * `CLOUDS_DIV=<n>` renders the clouds at 1/n resolution per axis (default 4).
+//! * `CLOUDS_DIV=<n>` renders the clouds at 1/n resolution per axis.
+//! * `CLOUDS_BLEND=<0..1>` weight of the new frame in the temporal
+//!   accumulation (1 disables it).
+//! * `CLOUDS_DEBUG=1` shows cloud opacity instead of colour.
 //! * `CLOUDS_DEBUG_CAM=<above|inside|below|sun|horizon>` parks the camera at a
-//!   fixed cloud-viewing spot (for screenshots).
-//! * `CLOUDS_NOVSYNC=1` disables vsync, for timing.
+//!   cloud-viewing spot (for screenshots).
+//! * `CLOUDS_NOVSYNC=1` disables vsync in windowed runs, for timing.
 //!
 //! The CPU-side [`CloudField`] mirrors the coverage map and height profile so
 //! gameplay can ask how much cloud is at a point.
@@ -199,7 +202,8 @@ pub struct CloudSettings {
     /// Atmospheric tint on the sun by the time it reaches the layer.
     pub sun_tint: Vec3,
     pub wind: Vec2,
-    /// Render at 1/divisor resolution per axis.
+    /// Render at 1/divisor resolution per axis (3 = 1/9 of the pixels; the
+    /// temporal accumulation and depth-aware upsample hide most of it).
     pub divisor: u32,
     pub max_steps: u32,
     /// Smallest march step, metres; steps grow with distance.
@@ -233,7 +237,7 @@ impl Default for CloudSettings {
             ambient_bottom: Vec3::new(0.62, 0.68, 0.82) * 6_500.0,
             sun_tint: Vec3::new(1.0, 0.95, 0.88),
             wind: Vec2::new(6.0, 2.0),
-            divisor: 4,
+            divisor: 3,
             max_steps: 128,
             step_min: 32.0,
             step_scale: 0.025,
@@ -373,12 +377,28 @@ fn debug_camera(
     settings: Res<CloudSettings>,
     field: Res<CloudField>,
     terrain: Res<crate::world::Terrain>,
-    mut preset: Local<Option<Option<String>>>,
+    mut pose: Local<Option<Option<(Vec3, Vec3)>>>,
 ) {
-    let preset = preset.get_or_insert_with(|| std::env::var("CLOUDS_DEBUG_CAM").ok());
-    let Some(preset) = preset.as_deref() else {
+    let pose = pose.get_or_insert_with(|| {
+        let preset = std::env::var("CLOUDS_DEBUG_CAM").ok()?;
+        Some(debug_pose(&preset, &settings, &field, &terrain))
+    });
+    let Some((pos, dir)) = *pose else {
         return;
     };
+    for (mut transform, mut global) in &mut camera {
+        *transform = Transform::from_translation(pos).looking_to(dir, Vec3::Y);
+        *global = GlobalTransform::from(*transform);
+    }
+}
+
+/// Camera position and look direction for a `CLOUDS_DEBUG_CAM` preset.
+fn debug_pose(
+    preset: &str,
+    settings: &CloudSettings,
+    field: &CloudField,
+    terrain: &crate::world::Terrain,
+) -> (Vec3, Vec3) {
     let (bottom, top) = (settings.layer_bottom, settings.layer_top);
     let sun = Vec3::new(4.0, 10.0, 10.0).normalize();
     // for the sun shot, find a spot with thick cloud between the camera and the sun
@@ -404,7 +424,7 @@ fn debug_camera(
         }
         best.1
     };
-    let (pos, dir) = match preset {
+    match preset {
         "above" => (
             Vec3::new(0.0, top + 1_200.0, 0.0),
             Vec3::new(0.3, -0.28, 0.9).normalize(),
@@ -431,10 +451,6 @@ fn debug_camera(
         ),
         "sun" => (sun_spot(), (sun - Vec3::Y * 0.25).normalize()),
         _ => (Vec3::new(0.0, 1_500.0, 6_000.0), -Vec3::Z),
-    };
-    for (mut transform, mut global) in &mut camera {
-        *transform = Transform::from_translation(pos).looking_to(dir, Vec3::Y);
-        *global = GlobalTransform::from(*transform);
     }
 }
 
