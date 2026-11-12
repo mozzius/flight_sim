@@ -92,8 +92,10 @@ fn emission(p: vec3<f32>, t: f32) -> vec3<f32> {
 
     // ---- inside the nozzle: glowing hot metal / flame front, seen through the mouth
     if z < 0.0 {
-        let inside = smoothstep(1.0, 0.45, r2) * smoothstep(-EXIT, -EXIT + 0.8, z);
-        let hot = mix(vec3(1.0, 0.3, 0.07) * (0.15 + dry * 0.6), vec3(1.0, 0.7, 0.38) * 5.0, ab);
+        // dry: only a dull glow deep in the throat; afterburner: the whole duct is alight
+        let throat = smoothstep(-EXIT, -EXIT + 0.6, z) * (1.0 - smoothstep(-1.0, -0.3, z));
+        let inside = smoothstep(1.0, 0.45, r2) * mix(throat, smoothstep(-EXIT, -EXIT + 0.8, z), ab);
+        let hot = mix(vec3(1.0, 0.28, 0.06) * (0.05 + dry * 0.35), vec3(1.0, 0.7, 0.38) * 5.0, ab);
         return hot * inside * 1.6;
     }
 
@@ -137,7 +139,7 @@ fn emission(p: vec3<f32>, t: f32) -> vec3<f32> {
 
     // ---- dry power: barely visible, a dull glow just past the exit
     let dry_glow = exp(-r2 * 2.0) * exp(-z * 2.2) * dry * dry * (0.6 + 0.6 * turb);
-    e += (1.0 - ab) * dry_glow * vec3(1.0, 0.35, 0.1) * 0.35;
+    e += (1.0 - ab) * dry_glow * vec3(1.0, 0.35, 0.1) * 0.15;
     return e;
 }
 

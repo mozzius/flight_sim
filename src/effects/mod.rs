@@ -373,7 +373,7 @@ fn aircraft_fx(
             let g = smoothstep(4.0, 8.0, state.g_load.abs());
             let aoa = smoothstep(11.0, 22.0, state.alpha.to_degrees().abs());
             let sheet = g.max(aoa) * humidity * smoothstep(60.0, 120.0, state.airspeed);
-            let mut n = sheet * 420.0 * dt;
+            let mut n = sheet * 650.0 * dt;
             while n > 0.0 {
                 if n < 1.0 && rng.random::<f32>() > n {
                     break;
@@ -383,21 +383,21 @@ fn aircraft_fx(
                 let lead = WING[0].lerp(WING[1], u);
                 let trail = WING[3].lerp(WING[2], u);
                 let mut p = lead.lerp(trail, v * 0.85);
-                p.y += rng.random_range(0.15..0.7);
+                p.y += rng.random_range(0.1..0.4);
                 if rng.random_bool(0.5) {
                     p.x = -p.x;
                 }
                 particles.add(
                     Particle {
                         vel: Vec3::new(0.0, 0.6, rng.random_range(14.0..30.0)),
-                        life: rng.random_range(0.12..0.26),
-                        size: (rng.random_range(1.0..1.5), rng.random_range(2.2..3.4)),
+                        life: rng.random_range(0.08..0.18),
+                        size: (rng.random_range(0.7..1.1), rng.random_range(1.5..2.3)),
                         albedo: Vec3::splat(1.0),
-                        opacity: 0.55 * (0.4 + 0.6 * sheet),
+                        opacity: 0.28 * (0.4 + 0.6 * sheet),
                         soft: 0.15,
                         drag: 0.0,
-                        fade_in: 0.04,
-                        dissolve: 0.15,
+                        fade_in: 0.03,
+                        dissolve: 0.0,
                         frame: Some(entity),
                         ..Particle::puff(p)
                     },
@@ -441,7 +441,7 @@ fn aircraft_fx(
         let damage = 1.0 - (health.current / health.max).clamp(0.0, 1.0);
         let tail = gt.transform_point(Vec3::new(0.0, 0.3, 6.5));
         if disabled || damage > 0.45 {
-            let spacing = if disabled { 2.6 } else { 4.0 };
+            let spacing = if disabled { 1.5 } else { 3.0 };
             spaced(&mut fx.smoke, tail, spacing, &mut points);
             for &p in points.iter() {
                 let grey = if disabled { rng.random_range(0.035..0.07) } else { 0.32 - damage * 0.22 };
@@ -450,8 +450,8 @@ fn aircraft_fx(
                     Particle {
                         vel: state.velocity * 0.06 + rand_dir(&mut rng) * 2.0,
                         life: rng.random_range(5.0..8.0) * big,
-                        size: (2.2 * big, rng.random_range(12.0..18.0) * big),
-                        grow: 2.5,
+                        size: (3.5 * big, rng.random_range(12.0..18.0) * big),
+                        grow: 3.5,
                         albedo: Vec3::splat(grey),
                         opacity: if disabled { 0.9 } else { 0.5 + 0.35 * damage },
                         drag: 1.4,
@@ -857,7 +857,7 @@ fn blast(
             dir.y = dir.y.abs() * 0.8 + 0.2;
         }
         let dir = dir.normalize();
-        let shade = rng.random_range(0.1..0.2);
+        let shade = rng.random_range(0.13..0.24);
         // puffs thrown furthest cool first; the core burns longest
         let reach: f32 = rng.random_range(0.0..1.0);
         particles.add(
@@ -1065,7 +1065,7 @@ fn update_bursts(
             return false;
         }
         let strength = (1.0 - c.age / c.life).sqrt();
-        c.smoke_acc += dt * 7.0 * strength;
+        c.smoke_acc += dt * 4.0 * strength;
         while c.smoke_acc >= 1.0 {
             c.smoke_acc -= 1.0;
             let shade = rng.random_range(0.05..0.12);
@@ -1073,7 +1073,7 @@ fn update_bursts(
                 Particle {
                     vel: Vec3::Y * rng.random_range(5.0..9.0) * c.size.sqrt() * 0.5,
                     life: rng.random_range(10.0..15.0),
-                    size: (c.size * 0.8, c.size * rng.random_range(3.0..4.5)),
+                    size: (c.size * 0.8, c.size * rng.random_range(2.4..3.2)),
                     grow: 1.6,
                     albedo: Vec3::splat(shade),
                     opacity: 0.85 * strength.max(0.4),
@@ -1158,8 +1158,8 @@ impl Trail {
     /// (lifetime, start width, end width, opacity, dissolve start, albedo)
     fn style(&self) -> (f32, f32, f32, f32, f32, f32) {
         match self.kind {
-            RibbonKind::Vortex => (1.0, 0.3, 1.2, 0.75, 0.2, 0.97),
-            RibbonKind::Contrail => (16.0, 0.8, 14.0, 0.8, 0.2, 0.97),
+            RibbonKind::Vortex => (0.9, 0.2, 0.8, 0.5, 0.15, 0.97),
+            RibbonKind::Contrail => (16.0, 0.6, 9.0, 0.8, 0.25, 0.97),
         }
     }
 }

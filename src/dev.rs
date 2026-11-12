@@ -145,6 +145,7 @@ fn autopilot_player(
 /// - `burning`: the player is shot down
 /// - `gun`: holds the trigger
 /// - `stress`: big explosions every 0.8 s ahead of the jet
+/// - `contrail`: the player starts 5 km higher, where contrails form
 fn fx_mode() -> String {
     std::env::var("FLIGHT_SIM_FX_TEST").unwrap_or_default()
 }
@@ -180,17 +181,26 @@ fn force_afterburner(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn fx_test_explosion(
     time: Res<Time>,
     shot: Option<Res<AutoScreenshot>>,
     terrain: Res<crate::world::Terrain>,
-    mut player: Query<(&Transform, &crate::flight::FlightState, &mut crate::game::Health), With<crate::game::Player>>,
+    mut player: Query<(&mut Transform, &crate::flight::FlightState, &mut crate::game::Health), With<crate::game::Player>>,
     mut explosions: MessageWriter<crate::game::Explosion>,
     mut done: Local<bool>,
     mut stress_count: Local<u32>,
+    mut lifted: Local<bool>,
 ) {
     let Some(shot) = shot else { return };
     let mode = fx_mode();
+    if mode == "contrail"
+        && !*lifted
+        && let Ok((mut t, _, _)) = player.single_mut()
+    {
+        t.translation.y += 5_000.0;
+        *lifted = true;
+    }
     if mode == "damage" {
         for (_, _, mut health) in &mut player {
             health.current = health.current.min(health.max * 0.2);

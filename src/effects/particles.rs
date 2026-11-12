@@ -27,7 +27,7 @@ use bevy::{
 use super::textures;
 use crate::camera::MainCamera;
 
-pub const MAX_PARTICLES: usize = 24_000;
+pub const MAX_PARTICLES: usize = 16_000;
 
 /// Steady breeze that carries smoke (m/s).
 pub const WIND: Vec3 = Vec3::new(5.0, 0.0, 2.0);
