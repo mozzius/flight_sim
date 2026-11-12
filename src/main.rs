@@ -12,6 +12,7 @@ mod flight;
 mod game;
 mod hud;
 mod pause;
+mod respawn;
 mod terrain_gen;
 mod weapons;
 mod world;
@@ -68,6 +69,7 @@ fn main() {
             ai::AIPlugin,
             hud::HUDPlugin,
             pause::PausePlugin,
+            respawn::RespawnPlugin,
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))

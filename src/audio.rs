@@ -608,6 +608,8 @@ fn attach_missile_loops(mut commands: Commands, sounds: Res<Sounds>, new: Query<
                 spatial_scale: Some(SpatialScale::new(1.0 / 90.0)),
                 ..looping(0.0, true)
             },
+            // spatial sinks need a GlobalTransform
+            Transform::default(),
         ));
     }
 }

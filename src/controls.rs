@@ -133,6 +133,7 @@ fn toggle_mode(
 fn manage_cursor(
     mode: Res<ControlMode>,
     paused: Res<crate::pause::Paused>,
+    prompt: Res<crate::respawn::RespawnPrompt>,
     mut focus_events: MessageReader<bevy::window::WindowFocused>,
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
@@ -141,7 +142,8 @@ fn manage_cursor(
         return;
     };
     let regained_focus = focus_events.read().any(|e| e.focused);
-    let want = *mode == ControlMode::MouseAim && !paused.0 && window.focused;
+    // free the mouse while the RESPAWN button is up so it can be clicked
+    let want = *mode == ControlMode::MouseAim && !paused.0 && !prompt.ready() && window.focused;
     let (grab, visible) = if want {
         (CursorGrabMode::Locked, false)
     } else {

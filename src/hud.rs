@@ -621,13 +621,8 @@ fn update_warnings(
     }
     for (warning, mut node, mut text) in &mut warnings {
         let show = match (warning, player) {
-            (Warning::Respawn, None) => {
-                let value = format!("RESPAWNING IN {:.0}", (4.0 - *dead_timer).max(0.0).ceil());
-                if text.0 != value {
-                    text.0 = value;
-                }
-                true
-            }
+            // the RESPAWN button (see `respawn`) replaced the countdown
+            (Warning::Respawn, None) => false,
             (_, None) | (Warning::Respawn, _) => false,
             (Warning::Stall, Some((_, _, s, ac, _))) => s.stalling(ac),
             (Warning::PullUp, Some((_, t, s, _, _))) => {

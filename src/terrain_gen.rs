@@ -128,19 +128,25 @@ const EROSION_ONSET: Vec4 = Vec4::new(1.25, 1.25, 2.8, 1.5);
 const EROSION_ASSUMED_SLOPE: Vec2 = Vec2::new(0.7, 1.0);
 const EROSION_CELL_SCALE: f32 = 0.7;
 const EROSION_OCTAVES: u32 = 5;
+/// Near the spawn area the high-res grid can show one more octave of gullies.
+const NEAR_EROSION_OCTAVES: u32 = 6;
 const EROSION_GAIN: f32 = 0.5;
 const EROSION_LACUNARITY: f32 = 2.0;
 const EROSION_NORMALIZATION: f32 = 0.5;
 
 const SEED: u32 = 1337;
 
-// Grids. The fine grid's extent is a whole number of coarse cells so their vertices line up.
+// Grids. Each grid's extent is a whole number of the next coarser grid's chunks, so their
+// vertices line up and covered chunks can be skipped.
+const NEAR_SPACING: f32 = 32.0;
+const NEAR_CELLS: usize = 800; // ±12.8 km
 const FINE_SPACING: f32 = 64.0;
 const FINE_CELLS: usize = 800; // ±25.6 km
 const COARSE_SPACING: f32 = 256.0;
 const COARSE_CELLS: usize = 600; // ±76.8 km
 const CHUNK_CELLS: usize = 100;
 /// Colour / normal map resolution for each grid (the erosion detail lives in these).
+const NEAR_TEXTURE_RES: usize = 4096; // 6 m per texel
 const FINE_TEXTURE_RES: usize = 2048; // 25 m per texel
 const COARSE_TEXTURE_RES: usize = 1024; // 150 m per texel
 const SKIRT_DEPTH: f32 = 400.0;
@@ -152,18 +158,21 @@ const SKIRT_DEPTH: f32 = 400.0;
 /// The generated heightfield, kept on the CPU for collision queries.
 #[derive(Resource)]
 pub struct GeneratedTerrain {
+    near: HeightGrid,
     fine: HeightGrid,
     coarse: HeightGrid,
 }
 
 impl GeneratedTerrain {
     /// Terrain surface height at world (x, z), bilinearly interpolated, metres. Fast (O(1)).
-    /// Uses the same height grids as the rendered mesh (64 m spacing within ±25.6 km, 256 m
+    /// Uses the same height grids as the rendered mesh (32 m within ±12.8 km, 64 m within ±25.6 km, 256 m
     /// beyond), so it matches the mesh at its vertices; between them bilinear interpolation
     /// differs slightly from the mesh's triangles. Outside the generated area (±76.8 km) the
     /// edge height is extended.
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
-        if let Some(h) = self.fine.sample_inside(x, z) {
+        if let Some(h) = self.near.sample_inside(x, z) {
+            h
+        } else if let Some(h) = self.fine.sample_inside(x, z) {
             h
         } else {
             self.coarse.sample_clamped(x, z)
@@ -433,7 +442,7 @@ fn erosion_filter(
     let mut gully_slope = slope.lerp(slope / slope_length * assumed_slope.x, assumed_slope.y);
 
     let full_octaves = octaves.ceil() as u32;
-    for i in 0..full_octaves.min(EROSION_OCTAVES) {
+    for i in 0..full_octaves.min(NEAR_EROSION_OCTAVES) {
         let octave_weight = (octaves - i as f32).clamp(0.0, 1.0);
         let ph = phacelle_noise(
             p * freq,
@@ -609,7 +618,9 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
 fn octaves_at(x: f32, z: f32) -> f32 {
     let r = x.abs().max(z.abs());
     let fine_edge = FINE_SPACING * FINE_CELLS as f32 * 0.5;
-    EROSION_OCTAVES as f32
+    let near_edge = NEAR_SPACING * NEAR_CELLS as f32 * 0.5;
+    NEAR_EROSION_OCTAVES as f32
+        - smoothstep(near_edge * 0.7, near_edge * 0.95, r)
         - smoothstep(fine_edge * 0.75, fine_edge, r)
         - 0.5 * smoothstep(fine_edge * 1.5, fine_edge * 2.8, r)
 }
@@ -786,7 +797,7 @@ fn bake_textures(origin: Vec2, extent: f32, res: usize) -> (Image, Image) {
     let samples = par_map(n, n, |i, j| {
         let x = origin.x + (i as f32 - 0.5) * step;
         let z = origin.y + (j as f32 - 0.5) * step;
-        let t = sample_terrain(x, z, EROSION_OCTAVES as f32);
+        let t = sample_terrain(x, z, octaves_at(x, z).max(EROSION_OCTAVES as f32));
         (t.height, t.ridge_map)
     });
     let texels = par_map(res, res, |i, j| {
@@ -942,6 +953,7 @@ pub(crate) fn generate_terrain(
 ) {
     let start = Instant::now();
 
+    let near = bake_grid(NEAR_SPACING, NEAR_CELLS);
     let fine = bake_grid(FINE_SPACING, FINE_CELLS);
     let coarse = bake_grid(COARSE_SPACING, COARSE_CELLS);
     let grids_done = start.elapsed();
@@ -955,11 +967,14 @@ pub(crate) fn generate_terrain(
         .id();
     let mut triangles = 0usize;
     let mut chunks = 0usize;
+    let near_half = NEAR_SPACING * NEAR_CELLS as f32 * 0.5;
     let fine_half = FINE_SPACING * FINE_CELLS as f32 * 0.5;
 
-    for (grid, cells, tex_res) in [
-        (&fine, FINE_CELLS, FINE_TEXTURE_RES),
-        (&coarse, COARSE_CELLS, COARSE_TEXTURE_RES),
+    // (grid, cells, texture resolution, half-extent of the finer grid covering its middle)
+    for (grid, cells, tex_res, hole) in [
+        (&near, NEAR_CELLS, NEAR_TEXTURE_RES, 0.0),
+        (&fine, FINE_CELLS, FINE_TEXTURE_RES, near_half),
+        (&coarse, COARSE_CELLS, COARSE_TEXTURE_RES, fine_half),
     ] {
         let extent = grid.spacing * cells as f32;
         let (color, normal) = bake_textures(grid.origin, extent, tex_res);
@@ -977,15 +992,14 @@ pub(crate) fn generate_terrain(
             },
         });
 
-        let is_coarse = std::ptr::eq(grid, &coarse);
         let n_chunks = cells / CHUNK_CELLS;
         for cj in 0..n_chunks {
             for ci in 0..n_chunks {
                 let (i0, j0) = (ci * CHUNK_CELLS, cj * CHUNK_CELLS);
                 let (i1, j1) = (i0 + CHUNK_CELLS, j0 + CHUNK_CELLS);
-                // Skip coarse chunks fully covered by the fine grid.
+                // Skip chunks fully covered by the finer grid.
                 let (a, b) = (grid.world_pos(i0, j0), grid.world_pos(i1, j1));
-                if is_coarse && a.min_element() >= -fine_half && b.max_element() <= fine_half {
+                if a.min_element() >= -hole && b.max_element() <= hole {
                     continue;
                 }
                 let mesh = build_chunk(grid, i0, i1, j0, j1, &mut triangles);
@@ -1003,7 +1017,7 @@ pub(crate) fn generate_terrain(
     }
 
     let (mut min_h, mut max_h) = (f32::MAX, f32::MIN);
-    for &h in fine.heights.iter().chain(coarse.heights.iter()) {
+    for &h in near.heights.iter().chain(fine.heights.iter()).chain(coarse.heights.iter()) {
         min_h = min_h.min(h);
         max_h = max_h.max(h);
     }
@@ -1013,7 +1027,7 @@ pub(crate) fn generate_terrain(
         grids_done,
     );
 
-    commands.insert_resource(GeneratedTerrain { fine, coarse });
+    commands.insert_resource(GeneratedTerrain { near, fine, coarse });
 }
 
 // ---------------------------------------------------------------------------------------------

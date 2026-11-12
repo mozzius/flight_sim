@@ -284,9 +284,8 @@ fn handle_crashes(
             });
         }
         commands.entity(crash.entity).despawn();
-        if is_player {
-            queue.pending.push((4.0, *team, true));
-        } else if *team == Team::Blue {
+        // the player respawns from the RESPAWN button (see `respawn`)
+        if !is_player && *team == Team::Blue {
             queue.pending.push((20.0, *team, false));
         }
     }
