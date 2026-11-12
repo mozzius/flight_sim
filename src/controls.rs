@@ -37,7 +37,13 @@ impl Plugin for ControlsPlugin {
             .init_resource::<LookAround>()
             .add_systems(
                 Update,
-                (toggle_mode, manage_cursor, gather_actions, update_mouse_aim, update_look_around),
+                (
+                    toggle_mode,
+                    manage_cursor,
+                    gather_actions.before(crate::touch::TouchSystems),
+                    update_mouse_aim.after(crate::touch::TouchSystems),
+                    update_look_around,
+                ),
             )
             .add_systems(
                 FixedUpdate,
@@ -199,10 +205,13 @@ fn update_mouse_aim(
     paused: Res<crate::pause::Paused>,
     mode: Res<ControlMode>,
     mut aim: ResMut<MouseAim>,
+    mut touch: ResMut<crate::touch::TouchInput>,
     intro: Res<crate::intro::Intro>,
     player: Query<&Transform, With<Player>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
 ) {
+    // touch drags pile up until used; never let them carry over
+    let touch_pan = std::mem::take(&mut touch.pan) * crate::touch::PAN_SCALE;
     let Ok(transform) = player.single() else {
         return;
     };
@@ -225,12 +234,14 @@ fn update_mouse_aim(
     let grabbed = cursor
         .single()
         .is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
-    if !grabbed {
+    let mouse = if grabbed { motion.delta } else { Vec2::ZERO };
+    let pixels = mouse + touch_pan;
+    if pixels == Vec2::ZERO {
         return;
     }
     // rotate the aim direction around world up (yaw) and the camera's right (pitch)
     let sensitivity = 0.0025;
-    let delta = motion.delta * sensitivity;
+    let delta = pixels * sensitivity;
     let yaw = Quat::from_rotation_y(-delta.x);
     let right = aim.dir.cross(Vec3::Y).normalize_or(Vec3::X);
     let pitch = Quat::from_axis_angle(right, -delta.y);
@@ -281,6 +292,10 @@ fn axis(keys: &ButtonInput<KeyCode>, pos: &[KeyCode], neg: &[KeyCode]) -> f32 {
     p - n
 }
 
+fn touch_deadzone(v: f32, dz: f32) -> f32 {
+    if v.abs() < dz { 0.0 } else { (v - dz * v.signum()) / (1.0 - dz) }
+}
+
 fn deadzone(v: f32) -> f32 {
     if v.abs() < 0.12 {
         0.0
@@ -297,6 +312,7 @@ fn player_flight_input(
     mode: Res<ControlMode>,
     aim: Res<MouseAim>,
     mut lever: ResMut<ThrottleLever>,
+    touch: Res<crate::touch::TouchInput>,
     intro: Res<crate::intro::Intro>,
     mut player: Query<
         (&mut ControlInput, &Transform, &FlightState),
@@ -329,8 +345,12 @@ fn player_flight_input(
         (-deadzone(stick.y), deadzone(stick.x), yaw)
     });
 
-    let manual_pitch = (key_pitch + pad_pitch).clamp(-1.0, 1.0);
-    let manual_roll = (key_roll + pad_roll).clamp(-1.0, 1.0);
+    // touch joystick: like a gamepad stick, but pitch needs a firm push so a
+    // sideways roll doesn't knock the aim off
+    let (touch_pitch, touch_roll) = (-touch_deadzone(touch.stick.y, 0.35), touch_deadzone(touch.stick.x, 0.1));
+
+    let manual_pitch = (key_pitch + pad_pitch + touch_pitch).clamp(-1.0, 1.0);
+    let manual_roll = (key_roll + pad_roll + touch_roll).clamp(-1.0, 1.0);
     let manual_yaw = (key_yaw + pad_yaw).clamp(-1.0, 1.0);
 
     match *mode {
@@ -357,9 +377,12 @@ fn player_flight_input(
     if down {
         lever.0 = (lever.0 - dt * 0.6).max(0.0);
     }
+    if let Some(t) = touch.throttle {
+        lever.0 = t;
+    }
     let mut throttle = lever.0;
-    let mut afterburner = up && lever.0 >= 1.0;
-    let mut airbrake = down && lever.0 <= 0.0;
+    let mut afterburner = (up && lever.0 >= 1.0) || touch.afterburner;
+    let mut airbrake = (down && lever.0 <= 0.0) || touch.airbrake;
 
     if let Some(g) = pad {
         let rt = g.get(GamepadButton::RightTrigger2).unwrap_or(0.0);

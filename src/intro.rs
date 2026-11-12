@@ -1,6 +1,6 @@
 //! Opening shot: when the round starts the camera looks at the jet from the
 //! front, then swings smoothly round to the chase position, the letterbox
-//! bars slide away and the HUD flickers on. Any key, click or gamepad A skips it.
+//! bars slide away and the HUD flickers on. Any key, click, tap or gamepad A skips it.
 //!
 //! The camera path itself lives in `camera::follow_player` (it ends exactly on
 //! the gameplay camera pose); this module owns the clock, the letterbox and
@@ -59,6 +59,7 @@ fn advance(
     paused: Res<Paused>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
     gamepads: Query<&Gamepad>,
     player: Query<(), With<Player>>,
     mut intro: ResMut<Intro>,
@@ -68,6 +69,7 @@ fn advance(
     }
     let skip = keys.get_just_pressed().any(|k| *k != KeyCode::Escape)
         || mouse.get_just_pressed().next().is_some()
+        || touches.any_just_pressed()
         || gamepads.iter().any(|g| g.just_pressed(GamepadButton::South));
     if skip {
         // jump to the HUD boot so it still lands nicely

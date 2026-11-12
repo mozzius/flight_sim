@@ -15,6 +15,7 @@ mod intro;
 mod pause;
 mod respawn;
 mod terrain_gen;
+mod touch;
 mod weapons;
 mod world;
 
@@ -80,6 +81,7 @@ fn main() {
             pause::PausePlugin,
             respawn::RespawnPlugin,
             intro::IntroPlugin,
+            touch::TouchPlugin,
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
