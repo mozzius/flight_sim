@@ -265,7 +265,7 @@ pub fn setup(
     mut materials: ResMut<Assets<ParticleMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let start = std::time::Instant::now();
+    let start = bevy::platform::time::Instant::now();
     let atlas = images.add(textures::puff_atlas());
     let noise = images.add(textures::noise());
     debug!("baked effect textures in {:?}", start.elapsed());
@@ -413,7 +413,7 @@ pub fn build_mesh(
     time: Res<Time>,
     mut log: Local<(f32, f32, u32)>,
 ) {
-    let started = std::time::Instant::now();
+    let started = bevy::platform::time::Instant::now();
     let Ok(cam) = camera.single() else {
         return;
     };

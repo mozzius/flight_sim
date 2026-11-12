@@ -113,6 +113,11 @@ fn light_smoke(albedo: vec3<f32>, n: vec3<f32>, to_cam: vec3<f32>, thick: f32, d
 
 @fragment
 fn fragment(in: VOut) -> @location(0) vec4<f32> {
+    // UV derivatives up front, while control flow is still uniform: the samples
+    // below sit in per-particle branches, where WebGPU forbids implicit-LOD
+    // textureSample, so they use textureSampleGrad with these.
+    let ddx = dpdx(in.uv);
+    let ddy = dpdy(in.uv);
     let kind = i32(in.b.x + 0.5);
     let size = in.b.y;
     let glow = in.b.z;
@@ -155,8 +160,8 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
         let across = in.uv.x * 2.0 - 1.0;
         let along = in.uv.y;
         let profile = sqrt(clamp(1.0 - across * across, 0.0, 1.0));
-        let nz = textureSample(noise_tex, noise_sampler, vec2(along * 0.012 + seed, in.uv.x * 0.35 + seed * 3.1));
-        let nz2 = textureSample(noise_tex, noise_sampler, vec2(along * 0.045, in.uv.x * 0.9 + seed * 1.3 + t * 0.01));
+        let nz = textureSampleGrad(noise_tex, noise_sampler, vec2(along * 0.012 + seed, in.uv.x * 0.35 + seed * 3.1), vec2(ddx.y * 0.012, ddx.x * 0.35), vec2(ddy.y * 0.012, ddy.x * 0.35));
+        let nz2 = textureSampleGrad(noise_tex, noise_sampler, vec2(along * 0.045, in.uv.x * 0.9 + seed * 1.3 + t * 0.01), vec2(ddx.y * 0.045, ddx.x * 0.9), vec2(ddy.y * 0.045, ddy.x * 0.9));
         let lumpy = 0.55 + 0.9 * (nz.r * 0.6 + nz2.b * 0.4) - 0.45;
         let erosion = dissolve * (0.6 + 0.8 * nz2.g);
         density = clamp((profile * lumpy - erosion) * 2.2, 0.0, 1.0) * profile;
@@ -164,12 +169,12 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
         thick = profile;
     } else {
         // puff: atlas tile, gently churned by scrolling noise
-        let nz = textureSample(noise_tex, noise_sampler, in.uv * 0.45 + vec2(seed * 7.0, seed * 3.0) + vec2(0.0, -t * 0.04));
+        let nz = textureSampleGrad(noise_tex, noise_sampler, in.uv * 0.45 + vec2(seed * 7.0, seed * 3.0) + vec2(0.0, -t * 0.04), ddx * 0.45, ddy * 0.45);
         let warp = (nz.rg - 0.5) * (0.07 + heat * 0.06);
         let tile_index = floor(in.a.z);
         let tile = vec2(tile_index % TILES, floor(tile_index / TILES));
         let tuv = (tile + clamp(in.uv + warp, vec2(0.0), vec2(1.0))) / TILES;
-        let s = textureSample(atlas, atlas_sampler, tuv);
+        let s = textureSampleGrad(atlas, atlas_sampler, tuv, ddx / TILES, ddy / TILES);
         // dissolve from the thin rims inward, unevenly
         let erosion = dissolve * (0.55 + 0.9 * nz.b);
         density = clamp((s.a - erosion) / max(1.0 - erosion, 0.05), 0.0, 1.0) * (1.0 - dissolve * 0.35);
@@ -188,7 +193,7 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
     // fire: hottest in the thick core of the puff, flickering with the noise
     var emission = vec3(0.0);
     if heat > 0.01 {
-        let flick = textureSample(noise_tex, noise_sampler, in.uv * 0.8 + vec2(seed * 5.0, -t * 0.35 - seed)).a;
+        let flick = textureSampleGrad(noise_tex, noise_sampler, in.uv * 0.8 + vec2(seed * 5.0, -t * 0.35 - seed), ddx * 0.8, ddy * 0.8).a;
         let temp = heat * (0.45 + 0.55 * thick) * (0.8 + 0.4 * flick);
         emission = fire_color(temp) * glow;
     }

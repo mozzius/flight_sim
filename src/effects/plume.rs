@@ -13,8 +13,34 @@ use bevy::{
         AsBindGroup, CompareFunction, Face, RenderPipelineDescriptor, ShaderType,
         SpecializedMeshPipelineError,
     },
-    shader::ShaderRef,
+    asset::uuid_handle,
+    shader::{ShaderImport, ShaderRef},
 };
+
+/// The plume and haze shaders import `mesh_functions`, which needs
+/// `mesh_bindings`. That module is registered when the renderer starts, which
+/// on the web is async and can land after our own shader files: compose them
+/// too early and the pipelines are broken for good. So they're embedded and
+/// only added once `mesh_bindings` exists (`install_shaders`).
+const PLUME_SHADER: Handle<Shader> = uuid_handle!("6c0f4d0e-3c1b-4f53-9d8e-2a9a7e1f5b01");
+const HAZE_SHADER: Handle<Shader> = uuid_handle!("6c0f4d0e-3c1b-4f53-9d8e-2a9a7e1f5b02");
+
+pub fn install_shaders(mut shaders: ResMut<Assets<Shader>>, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let ready = shaders.iter().any(|(_, s)| {
+        matches!(&s.import_path, ShaderImport::Custom(p) if p == "bevy_pbr::render::mesh_bindings")
+    });
+    if !ready {
+        return;
+    }
+    *done = true;
+    let plume = Shader::from_wesl(include_str!("../../assets/shaders/fx_plume.wesl"), "shaders/fx_plume.wesl");
+    let haze = Shader::from_wesl(include_str!("../../assets/shaders/fx_haze.wesl"), "shaders/fx_haze.wesl");
+    let _ = shaders.insert(PLUME_SHADER.id(), plume);
+    let _ = shaders.insert(HAZE_SHADER.id(), haze);
+}
 
 pub const HALF_LENGTH: f32 = 7.0;
 pub const RADIUS: f32 = 1.15;
@@ -40,10 +66,10 @@ pub struct PlumeMaterial {
 
 impl Material for PlumeMaterial {
     fn vertex_shader() -> ShaderRef {
-        "shaders/fx_plume.wesl".into()
+        PLUME_SHADER.into()
     }
     fn fragment_shader() -> ShaderRef {
-        "shaders/fx_plume.wesl".into()
+        PLUME_SHADER.into()
     }
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Add
@@ -84,10 +110,10 @@ pub struct HazeMaterial {
 
 impl Material for HazeMaterial {
     fn vertex_shader() -> ShaderRef {
-        "shaders/fx_haze.wesl".into()
+        HAZE_SHADER.into()
     }
     fn fragment_shader() -> ShaderRef {
-        "shaders/fx_haze.wesl".into()
+        HAZE_SHADER.into()
     }
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Blend

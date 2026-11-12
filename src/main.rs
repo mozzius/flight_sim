@@ -38,9 +38,17 @@ fn main() {
             std::time::Duration::from_secs_f64(1.0 / 120.0),
         ));
     } else {
-        app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        app.add_plugins(DefaultPlugins.set(AssetPlugin {
+            // no .meta files: skip probing for them (on the web each is a 404 request)
+            meta_check: bevy::asset::AssetMetaCheck::Never,
+            ..default()
+        }).set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Flight Sim".to_string(),
+                // web build: draw into the page's canvas and keep keys away from the browser
+                canvas: Some("#bevy".to_string()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: true,
                 ..default()
             }),
             ..default()

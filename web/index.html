@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flight Sim</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0f14; overflow: hidden; }
+    #bevy { display: block; width: 100%; height: 100%; outline: none; }
+    #overlay {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 14px;
+      color: #9fe6a0; font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #0b0f14; text-align: center; padding: 16px; letter-spacing: .04em;
+    }
+    #overlay h1 { margin: 0; font-size: 28px; letter-spacing: .3em; }
+    #overlay .dim { color: #5f8c63; font-size: 13px; }
+    #overlay button {
+      font: inherit; color: #0b0f14; background: #9fe6a0; border: 0;
+      padding: 10px 28px; letter-spacing: .2em; cursor: pointer;
+    }
+    #overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="bevy" tabindex="0"></canvas>
+  <div id="overlay">
+    <h1>FLIGHT SIM</h1>
+    <div id="status">LOADING…</div>
+    <div class="dim">Mouse aims · A/D roll · Shift/Ctrl throttle · click guns · right click missile · Tab target · Esc pause</div>
+    <div class="dim">Needs a WebGPU browser (recent Chrome, Edge or Safari). Best with a keyboard and mouse.</div>
+  </div>
+  <script type="module">
+    // Browsers keep audio suspended until the page is clicked: remember every
+    // AudioContext the game makes and resume them all on the first gesture.
+    const contexts = [];
+    for (const name of ["AudioContext", "webkitAudioContext"]) {
+      const Orig = window[name];
+      if (!Orig) continue;
+      window[name] = new Proxy(Orig, {
+        construct(target, args) { const c = new target(...args); contexts.push(c); return c; },
+      });
+    }
+    const resume = () => contexts.forEach((c) => c.state !== "running" && c.resume());
+    for (const ev of ["pointerdown", "keydown", "touchstart"]) addEventListener(ev, resume, { capture: true });
+
+    const overlay = document.getElementById("overlay");
+    const status = document.getElementById("status");
+    const canvas = document.getElementById("bevy");
+
+    // The terrain is generated on startup and blocks the page for a few seconds:
+    // paint the status first, then start the game.
+    status.textContent = "GENERATING TERRAIN… (about 15 s, the page will freeze)";
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
+    try {
+      const { default: init } = await import("./flight_sim.js");
+      await init();
+    } catch (e) {
+      // winit throws a control-flow exception to hand the loop to the browser; that one is fine
+      if (!String(e).includes("Using exceptions for control flow")) {
+        status.textContent = "FAILED TO START: " + e;
+        console.error(e);
+        throw e;
+      }
+    }
+    // init returns before the first frame; the first frame then generates the terrain
+    // and blocks for a while. Hide the overlay once frames start flowing after that stall.
+    let last = performance.now(), stalled = false;
+    const started = last;
+    const watch = (now) => {
+      if (now - last > 400) stalled = true;
+      last = now;
+      if ((stalled && now - started > 0) || now - started > 60000) {
+        overlay.classList.add("hidden");
+        canvas.focus();
+      } else requestAnimationFrame(watch);
+    };
+    requestAnimationFrame(watch);
+  </script>
+</body>
+</html>

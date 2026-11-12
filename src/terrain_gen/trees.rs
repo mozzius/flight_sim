@@ -294,15 +294,23 @@ pub(super) fn stream_trees(
     wanted.sort_by(|a, b| a.1.total_cmp(&b.1));
     let batch: Vec<(i32, i32)> = wanted.into_iter().take(CHUNKS_PER_FRAME).map(|(k, _)| k).collect();
     // plant and mesh this frame's chunks on worker threads
+    let (field_ref, terrain_ref) = (&*field, &*terrain);
+    let build = |key| {
+        let trees = plant_chunk(key, field_ref, terrain_ref);
+        (!trees.is_empty()).then(|| chunk_meshes(&trees))
+    };
+    // the web build is single-threaded: a couple of chunks a frame on the main thread
+    #[cfg(target_arch = "wasm32")]
+    let built: Vec<Option<(Mesh, Mesh)>> = batch.iter().take(2).map(|&k| build(k)).collect();
+    #[cfg(target_arch = "wasm32")]
+    let batch: Vec<(i32, i32)> = batch.into_iter().take(2).collect();
+    #[cfg(not(target_arch = "wasm32"))]
     let built: Vec<Option<(Mesh, Mesh)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = batch
             .iter()
             .map(|&key| {
-                let (field, terrain) = (&*field, &*terrain);
-                scope.spawn(move || {
-                    let trees = plant_chunk(key, field, terrain);
-                    (!trees.is_empty()).then(|| chunk_meshes(&trees))
-                })
+                let build = &build;
+                scope.spawn(move || build(key))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()

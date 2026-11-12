@@ -393,7 +393,7 @@ fn synth_kill_chime() -> Vec<f32> {
 }
 
 fn synthesise(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
-    let start = std::time::Instant::now();
+    let start = bevy::platform::time::Instant::now();
     let mut add = |s: Vec<f32>| sources.add(wav(&s));
     commands.insert_resource(Sounds {
         engine: add(synth_engine()),

@@ -27,7 +27,7 @@
 //! Debug: `TERRAIN_DEBUG_CAM=<n>` overrides the `Camera3d` transform with one of a few fixed
 //! viewpoints (or `x,y,z,tx,ty,tz`) for looking at the terrain.
 
-use std::time::Instant;
+use bevy::platform::time::Instant;
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -180,9 +180,12 @@ const COARSE_SPACING: f32 = 256.0;
 const COARSE_CELLS: usize = 600; // ±76.8 km
 const CHUNK_CELLS: usize = 100;
 /// Colour / normal map resolution for each grid (the erosion detail lives in these).
-const NEAR_TEXTURE_RES: usize = 4096; // 6 m per texel
-const FINE_TEXTURE_RES: usize = 2048; // 25 m per texel
-const COARSE_TEXTURE_RES: usize = 1024; // 150 m per texel
+// The texture bake is most of the startup time. The web build is single-threaded,
+// so it bakes at half resolution (a quarter of the work).
+const TEXTURE_DIV: usize = if cfg!(target_arch = "wasm32") { 2 } else { 1 };
+const NEAR_TEXTURE_RES: usize = 4096 / TEXTURE_DIV; // 6 m per texel
+const FINE_TEXTURE_RES: usize = 2048 / TEXTURE_DIV; // 25 m per texel
+const COARSE_TEXTURE_RES: usize = 1024 / TEXTURE_DIV; // 150 m per texel
 const SKIRT_DEPTH: f32 = 400.0;
 
 // ---------------------------------------------------------------------------------------------
@@ -675,6 +678,13 @@ fn par_map<T: Send + Clone + Default>(
     f: impl Fn(usize, usize) -> T + Sync,
 ) -> Vec<T> {
     let mut out = vec![T::default(); width * height];
+    // the web build is single-threaded
+    if cfg!(target_arch = "wasm32") {
+        for (k, v) in out.iter_mut().enumerate() {
+            *v = f(k % width, k / width);
+        }
+        return out;
+    }
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let rows_per_band = height.div_ceil(threads * 4).max(1);
     // Hand out bands of rows to worker threads; each band is a disjoint slice of `out`.

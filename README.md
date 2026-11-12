@@ -48,3 +48,18 @@ map again. The round opens with a short fly-by shot: any key, click or gamepad A
 resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FLIGHT_SIM_PAUSE_TEST=1`, `FLIGHT_SIM_KILL_TEST=1`,
 `FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_SEED=<n>` (fixed map; otherwise random).
 Screenshot runs are headless (no window) and silent.
+
+## Web build
+
+Live at <https://flight.mozzius.dev> (needs a WebGPU browser). Build and deploy:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.130  # match wasm-bindgen in Cargo.lock
+./scripts/build-web.sh                            # -> dist/
+vercel deploy dist --prod --scope samuel-newmans-projects --project flight-sim
+```
+
+The web build is single-threaded, so it bakes the terrain textures at half
+resolution and plants trees a couple of chunks per frame; startup still freezes
+the page for ~15 s while the terrain generates.

@@ -92,7 +92,7 @@ impl Plugin for CloudsPlugin {
         }
         settings.enabled = !disabled;
 
-        let t0 = std::time::Instant::now();
+        let t0 = bevy::platform::time::Instant::now();
         let weather = Arc::new(noise::weather_map(WEATHER_SIZE, settings.coverage_bias));
         app.insert_resource(CloudField::new(weather.clone(), &settings))
             .add_systems(Update, update_field_time);

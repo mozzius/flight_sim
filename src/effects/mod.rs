@@ -53,6 +53,7 @@ impl Plugin for EffectsPlugin {
             Update,
             (
                 particles::enable_depth_prepass,
+                plume::install_shaders,
                 attach_aircraft_effects,
                 spawn_explosions,
                 update_flashes,

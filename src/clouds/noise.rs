@@ -219,6 +219,13 @@ fn parallel_slices(
     f: impl Fn(usize, &mut [u8]) + Sync,
 ) -> Vec<u8> {
     let mut data = vec![0u8; slices * bytes_per_slice];
+    // the web build is single-threaded
+    if cfg!(target_arch = "wasm32") {
+        for (i, slice) in data.chunks_mut(bytes_per_slice).enumerate() {
+            f(i, slice);
+        }
+        return data;
+    }
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .min(slices);

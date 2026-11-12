@@ -16,3 +16,16 @@ opt-level = 1
 # Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
 opt-level = 3
+
+# Web build: WebGPU (with a WebGL2 fallback), and a browser-backed RNG.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { version = "0.20.1", features = ["wav", "webgpu", "webgl2"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+debug = false
