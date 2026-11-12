@@ -41,6 +41,7 @@
     <div id="status">LOADING…</div>
     <div class="dim">Mouse aims · A/D roll · Shift/Ctrl throttle · click guns · right click missile · Tab target · Esc pause</div>
     <div class="dim">On a phone or tablet: hold it sideways. Left stick rolls, drag anywhere to aim, hold GUN (and drag) to fire, slider on the right is throttle.</div>
+    <div class="dim">build __BUILD__</div>
     <div class="dim">Needs a WebGPU browser (recent Chrome, Edge or Safari). </div>
   </div>
   <div id="errors"></div>
@@ -69,7 +70,18 @@
       if (window.GPUDevice) {
         const csm = GPUDevice.prototype.createShaderModule;
         GPUDevice.prototype.createShaderModule = function (desc) {
+          // an error scope catches the creation error itself, with its message
+          this.pushErrorScope("validation");
           const m = csm.call(this, desc);
+          this.popErrorScope().then((err) => {
+            if (!err) return;
+            const lines = String(desc.code).split("\n");
+            const at = /(?:line |:)(\d+)(?::\d+)?/.exec(err.message);
+            const n = at ? Number(at[1]) : 0;
+            const around = n ? lines.slice(Math.max(0, n - 2), n + 1).map((l) => l.trim()).join(" ⏎ ") : "";
+            const tags = ["valley_mist", "atlas_sampler", "plume", "haze", "cloud", "terrain", "scenery", "detail"].filter((t) => desc.code.includes(t));
+            show("WGSL error [" + tags.join(",") + "]: " + err.message.slice(0, 600) + (around ? "\n  line " + n + ": " + around.slice(0, 400) : ""));
+          });
           m.getCompilationInfo?.().then((info) => {
             for (const e of info.messages) {
               if (e.type !== "error") continue;
@@ -138,7 +150,7 @@
         const feats = a ? [...a.features].join(",") : "";
         const c = document.getElementById("bevy");
         setInterval(() => {
-          status = "adapter " + info + " " + lim + "\nfeatures " + feats + "\ncanvas " + c.width + "x" + c.height + " css " + c.clientWidth + "x" + c.clientHeight +
+          status = "build __BUILD__ · adapter " + info + " " + lim + "\nfeatures " + feats + "\ncanvas " + c.width + "x" + c.height + " css " + c.clientWidth + "x" + c.clientHeight +
             " dpr " + devicePixelRatio + "\nsubmits " + submits + " frames " + textures;
           render();
         }, 1000);

@@ -17,5 +17,8 @@ cp -R assets dist/assets
 # the built-in map, pre-baked so the browser doesn't have to generate it
 mkdir -p dist/assets/maps
 FLIGHT_SIM_BAKE_MAP="$PWD/dist/assets/maps/builtin.map" cargo run --release
-cp web/index.html web/vercel.json dist/
+cp web/vercel.json dist/
+# stamp the build so a stale cached page is easy to spot
+BUILD="$(git rev-parse --short HEAD)$(git diff --quiet || echo +)-$(date +%H%M)"
+sed "s/__BUILD__/$BUILD/g" web/index.html > dist/index.html
 du -sh dist/flight_sim_bg.wasm dist
