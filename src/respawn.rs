@@ -72,6 +72,7 @@ fn spawn_prompt(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
         .spawn((
             PromptRoot,
+            crate::intro::KeepDuringIntro,
             Node {
                 position_type: PositionType::Absolute,
                 width: percent(100),

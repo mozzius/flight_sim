@@ -75,6 +75,8 @@ fn hash(i: u32, j: u32, seed: u32) -> u32 {
 }
 
 fn rand01(i: u32, j: u32, seed: u32) -> f32 {
+    // different maps scatter their trees differently too
+    let seed = seed ^ super::terrain_seed().rotate_left(7);
     (hash(i, j, seed) >> 8) as f32 / (1u32 << 24) as f32
 }
 

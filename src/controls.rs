@@ -164,9 +164,10 @@ fn gather_actions(
     gamepads: Query<&Gamepad>,
     mode: Res<ControlMode>,
     paused: Res<crate::pause::Paused>,
+    intro: Res<crate::intro::Intro>,
     mut actions: ResMut<PlayerActions>,
 ) {
-    if paused.0 {
+    if paused.0 || intro.playing() {
         *actions = PlayerActions::default();
         return;
     }
@@ -198,12 +199,17 @@ fn update_mouse_aim(
     paused: Res<crate::pause::Paused>,
     mode: Res<ControlMode>,
     mut aim: ResMut<MouseAim>,
+    intro: Res<crate::intro::Intro>,
     player: Query<&Transform, With<Player>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
 ) {
     let Ok(transform) = player.single() else {
         return;
     };
+    // the aim stays on the nose until the intro hands over control
+    if intro.playing() {
+        aim.reset = true;
+    }
     if aim.reset {
         aim.dir = transform.forward().as_vec3();
         aim.reset = false;
@@ -291,6 +297,7 @@ fn player_flight_input(
     mode: Res<ControlMode>,
     aim: Res<MouseAim>,
     mut lever: ResMut<ThrottleLever>,
+    intro: Res<crate::intro::Intro>,
     mut player: Query<
         (&mut ControlInput, &Transform, &FlightState),
         (With<Player>, Without<crate::ai::Pilot>),
@@ -299,6 +306,13 @@ fn player_flight_input(
     let Ok((mut input, transform, state)) = player.single_mut() else {
         return;
     };
+    // hands off during the opening shot: fly straight and level
+    if intro.playing() {
+        input.pitch = 0.0;
+        input.roll = 0.0;
+        input.yaw = 0.0;
+        return;
+    }
     let dt = time.delta_secs();
     let pad = first_gamepad(&gamepads);
 

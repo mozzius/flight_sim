@@ -87,6 +87,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
         .spawn((
             PauseMenu,
+            crate::intro::KeepDuringIntro,
             Node {
                 position_type: PositionType::Absolute,
                 width: percent(100),
@@ -184,7 +185,7 @@ fn update_menu(
         .unwrap_or(0.0);
     if let Ok(mut text) = stats.single_mut() {
         text.0 = format!(
-            "WAVE {}   KILLS {}   DEATHS {}      control: {}      {fps:.0} fps",
+            "WAVE {}   KILLS {}   DEATHS {}      control: {}      map {}      {fps:.0} fps",
             score.wave,
             score.kills,
             score.deaths,
@@ -192,6 +193,7 @@ fn update_menu(
                 ControlMode::MouseAim => "mouse aim",
                 ControlMode::Direct => "direct",
             },
+            crate::terrain_gen::terrain_seed(),
         );
     }
 }

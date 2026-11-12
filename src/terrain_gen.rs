@@ -162,7 +162,13 @@ const EROSION_GAIN: f32 = 0.5;
 const EROSION_LACUNARITY: f32 = 2.0;
 const EROSION_NORMALIZATION: f32 = 0.5;
 
-const SEED: u32 = 1337;
+/// The map's seed: random each launch (see `generate_terrain`), or `FLIGHT_SIM_SEED`.
+static SEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1337);
+
+/// The current map's seed.
+pub fn terrain_seed() -> u32 {
+    SEED.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 // Grids. Each grid's extent is a whole number of the next coarser grid's chunks, so their
 // vertices line up and covered chunks can be skipped.
@@ -482,7 +488,7 @@ fn erosion_filter(
             EROSION_CELL_SCALE,
             0.25,
             EROSION_NORMALIZATION,
-            SEED.wrapping_add(1000 + i * 31),
+            terrain_seed().wrapping_add(1000 + i * 31),
         );
         // Multiply with freq since p was multiplied with freq; negate since slope directions
         // point down.
@@ -582,13 +588,13 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
         TERRAIN_OCTAVES,
         TERRAIN_LACUNARITY,
         TERRAIN_GAIN,
-        SEED,
+        terrain_seed(),
     );
 
     // Spawn valley mask: 0 on the valley floor, 1 in the mountains, with a wobbly edge.
     // Everything carries derivatives, since the erosion filter is driven by the slope.
     let (dist, ddist) = spawn_valley_distance(x, z);
-    let wobble = noised(p * 6.0, SEED ^ 0xBEEF);
+    let wobble = noised(p * 6.0, terrain_seed() ^ 0xBEEF);
     let wobble_amt = wobble.x * 0.5 + 0.5;
     let (wobble_amt, dwobble) = if (0.0..=1.0).contains(&wobble_amt) {
         (wobble_amt, Vec2::new(wobble.y, wobble.z) * 0.5)
@@ -603,7 +609,7 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
 
     // The valley floor itself gently undulates, so water still has somewhere to flow.
     // It also tilts gently (down towards +Z), like a river valley.
-    let floor = fractal_noise(p, 2.0, 2, 2.0, 0.5, SEED ^ 0xF100) * 0.08
+    let floor = fractal_noise(p, 2.0, 2, 2.0, 0.5, terrain_seed() ^ 0xF100) * 0.08
         + Vec3::new(VALLEY_LEVEL + p.y * VALLEY_TILT, 0.0, VALLEY_TILT);
 
     // shaped = floor + m * (mountains - floor)
@@ -985,6 +991,13 @@ pub(crate) fn generate_terrain(
     mut images: ResMut<Assets<Image>>,
 ) {
     let start = Instant::now();
+    // a new map every launch, unless one is asked for
+    let seed = std::env::var("FLIGHT_SIM_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(rand::random::<u32>);
+    SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+    info!("terrain: map seed {seed} (FLIGHT_SIM_SEED={seed} to fly it again)");
 
     let mut near = bake_grid(NEAR_SPACING, NEAR_CELLS);
     // roads level the ground under them, so they come before the meshes

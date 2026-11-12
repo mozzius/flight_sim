@@ -87,6 +87,7 @@ fn follow_player(
     mode: Res<ControlMode>,
     aim: Res<MouseAim>,
     look: Res<LookAround>,
+    intro: Res<crate::intro::Intro>,
     player: Query<&Transform, (With<Player>, Without<MainCamera>)>,
     mut camera: Query<&mut Transform, With<MainCamera>>,
     mut boom: Local<Option<Quat>>,
@@ -100,6 +101,13 @@ fn follow_player(
         return;
     };
     let dt = time.delta_secs();
+
+    if intro.playing() {
+        intro_shot(&intro, plane, &mut cam);
+        // hand over to the chase camera already settled on its target
+        *boom = Some(Transform::IDENTITY.looking_to(plane.forward().as_vec3(), Vec3::Y).rotation);
+        return;
+    }
 
     // The camera hangs off a "boom" whose *orientation* is smoothed, but whose
     // pivot is exactly the plane's (interpolated) position. Smoothing the
@@ -123,4 +131,25 @@ fn follow_player(
     cam.translation = plane.translation + smoothed * offset;
     // tilt down a touch so the plane sits below the centre of the screen
     cam.rotation = smoothed * Quat::from_rotation_x(-0.06);
+}
+
+/// The intro camera: starts low off the jet's nose and swings round (over the
+/// top of the wing, a little to the side) to exactly the mouse-aim chase pose.
+fn intro_shot(intro: &crate::intro::Intro, plane: &Transform, cam: &mut Transform) {
+    use std::f32::consts::PI;
+    let u = intro.sweep();
+    // the chase camera's frame: the plane's heading, without its roll
+    let frame = Transform::IDENTITY.looking_to(plane.forward().as_vec3(), Vec3::Y).rotation;
+    // orbit angle around the plane's up axis: front three-quarter to dead astern
+    let yaw = (PI * 0.88) * (1.0 - u);
+    let lerp = |a: f32, b: f32| a + (b - a) * u;
+    // boom: low and close in front, the chase offset (0, 7, 32) at the end;
+    // it rises in the middle of the swing so it passes over the wing
+    let lift = (u * PI).sin() * 6.0;
+    let offset = Quat::from_rotation_y(yaw) * Vec3::new(0.0, lerp(1.5, 7.0) + lift, lerp(20.0, 32.0));
+    cam.translation = plane.translation + frame * offset;
+    // look at the jet, ending on the chase camera's aim point (which makes the
+    // final rotation identical to `follow_player`'s, so there's no snap)
+    let aim = plane.translation + frame * Vec3::new(0.0, lerp(0.8, 7.0 - 32.0 * 0.06f32.tan()), 0.0);
+    cam.look_at(aim, frame * Vec3::Y);
 }

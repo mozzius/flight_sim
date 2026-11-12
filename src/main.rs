@@ -11,6 +11,7 @@ mod effects;
 mod flight;
 mod game;
 mod hud;
+mod intro;
 mod pause;
 mod respawn;
 mod terrain_gen;
@@ -70,6 +71,7 @@ fn main() {
             hud::HUDPlugin,
             pause::PausePlugin,
             respawn::RespawnPlugin,
+            intro::IntroPlugin,
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
