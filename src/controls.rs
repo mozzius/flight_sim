@@ -37,7 +37,7 @@ impl Plugin for ControlsPlugin {
             .init_resource::<LookAround>()
             .add_systems(
                 Update,
-                (toggle_mode, gather_actions, update_mouse_aim, update_look_around),
+                (toggle_mode, manage_cursor, gather_actions, update_mouse_aim, update_look_around),
             )
             .add_systems(
                 FixedUpdate,
@@ -104,11 +104,13 @@ fn first_gamepad<'a>(gamepads: &'a Query<&Gamepad>) -> Option<&'a Gamepad> {
 fn toggle_mode(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
+    paused: Res<crate::pause::Paused>,
     mut mode: ResMut<ControlMode>,
     mut aim: ResMut<MouseAim>,
-    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
 ) {
+    if paused.0 {
+        return;
+    }
     let pad_toggle = gamepads
         .iter()
         .any(|g| g.just_pressed(GamepadButton::Select));
@@ -121,22 +123,36 @@ fn toggle_mode(
         info!("control mode: {:?}", *mode);
     }
 
-    // grab the cursor in mouse-aim mode; Esc lets go, clicking grabs again
-    let Ok(mut cursor) = cursor.single_mut() else {
+}
+
+/// Keep the cursor locked (hidden, and every click goes to the game) whenever
+/// we're flying in mouse-aim mode with the window focused and not paused.
+///
+/// macOS drops the lock whenever the window loses focus, while Bevy still
+/// thinks it's locked, so on regaining focus the lock is forcibly re-applied.
+fn manage_cursor(
+    mode: Res<ControlMode>,
+    paused: Res<crate::pause::Paused>,
+    mut focus_events: MessageReader<bevy::window::WindowFocused>,
+    mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
+) {
+    let Ok((window, mut cursor)) = windows.single_mut() else {
+        focus_events.clear();
         return;
     };
-    // automated screenshot runs shouldn't steal the mouse from whoever's at the desk
-    let want_grab =
-        *mode == ControlMode::MouseAim && std::env::var("FLIGHT_SIM_SCREENSHOT").is_err();
-    if keys.just_pressed(KeyCode::Escape) {
-        cursor.grab_mode = CursorGrabMode::None;
-        cursor.visible = true;
-    } else if want_grab && (mouse.just_pressed(MouseButton::Left) || mode.is_changed()) {
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
-    } else if !want_grab && mode.is_changed() {
-        cursor.grab_mode = CursorGrabMode::None;
-        cursor.visible = true;
+    let regained_focus = focus_events.read().any(|e| e.focused);
+    let want = *mode == ControlMode::MouseAim && !paused.0 && window.focused;
+    let (grab, visible) = if want {
+        (CursorGrabMode::Locked, false)
+    } else {
+        (CursorGrabMode::None, true)
+    };
+    if cursor.grab_mode != grab || cursor.visible != visible {
+        cursor.grab_mode = grab;
+        cursor.visible = visible;
+    } else if want && regained_focus {
+        // same values, but the OS forgot: make Bevy push them to the window again
+        cursor.set_changed();
     }
 }
 
@@ -145,8 +161,13 @@ fn gather_actions(
     mouse: Res<ButtonInput<MouseButton>>,
     gamepads: Query<&Gamepad>,
     mode: Res<ControlMode>,
+    paused: Res<crate::pause::Paused>,
     mut actions: ResMut<PlayerActions>,
 ) {
+    if paused.0 {
+        *actions = PlayerActions::default();
+        return;
+    }
     let pad = first_gamepad(&gamepads);
     let pad_pressed = |b| pad.is_some_and(|g| g.pressed(b));
     let pad_just = |b| pad.is_some_and(|g| g.just_pressed(b));
@@ -172,6 +193,7 @@ fn gather_actions(
 
 fn update_mouse_aim(
     motion: Res<AccumulatedMouseMotion>,
+    paused: Res<crate::pause::Paused>,
     mode: Res<ControlMode>,
     mut aim: ResMut<MouseAim>,
     player: Query<&Transform, With<Player>>,
@@ -184,7 +206,7 @@ fn update_mouse_aim(
         aim.dir = transform.forward().as_vec3();
         aim.reset = false;
     }
-    if *mode != ControlMode::MouseAim {
+    if *mode != ControlMode::MouseAim || paused.0 {
         return;
     }
     let nose = transform.forward().as_vec3();

@@ -11,6 +11,7 @@ mod effects;
 mod flight;
 mod game;
 mod hud;
+mod pause;
 mod terrain_gen;
 mod weapons;
 mod world;
@@ -66,6 +67,7 @@ fn main() {
             weapons::WeaponsPlugin,
             ai::AIPlugin,
             hud::HUDPlugin,
+            pause::PausePlugin,
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
