@@ -2687,6 +2687,7 @@ dependencies = [
  "bevy_transform_interpolation",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
+ "js-sys",
  "miniz_oxide 0.8.9",
  "rand",
 ]

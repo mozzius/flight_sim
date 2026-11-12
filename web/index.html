@@ -188,7 +188,7 @@
         const feats = a ? [...a.features].join(",") : "";
         const c = document.getElementById("bevy");
         setInterval(() => {
-          status = "build __BUILD__ · adapter " + info + " " + lim + "\nfeatures " + feats + "\ncanvas " + c.width + "x" + c.height + " css " + c.clientWidth + "x" + c.clientHeight +
+          status = "build __BUILD__" + (window.FLIGHT_SIM_LOW_MEMORY ? " LOW" : "") + " · adapter " + info + " " + lim + "\nfeatures " + feats + "\ncanvas " + c.width + "x" + c.height + " css " + c.clientWidth + "x" + c.clientHeight +
             " dpr " + devicePixelRatio + "\nsubmits " + submits + " frames " + textures;
           render();
         }, 1000);
@@ -217,6 +217,12 @@
       const real = window.devicePixelRatio || 1;
       const cap = navigator.maxTouchPoints > 0 ? 1.5 : 2;
       if (real > cap) Object.defineProperty(window, "devicePixelRatio", { get: () => cap, configurable: true });
+    }
+
+    // Phones and tablets: the low-memory mode (see src/platform.rs)
+    {
+      const q = new URLSearchParams(location.search);
+      window.FLIGHT_SIM_LOW_MEMORY = q.has("low") || (navigator.maxTouchPoints > 0 && !q.has("high"));
     }
 
     const overlay = document.getElementById("overlay");

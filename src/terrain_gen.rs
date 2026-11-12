@@ -894,7 +894,9 @@ impl TextureBake {
     /// The colour and normal images with full mip chains. Level 0 goes straight
     /// from the stored bytes; only the (quarter-size) levels below are worked
     /// in floats, to keep the peak memory down (wasm memory never shrinks).
-    fn images(&self) -> (Image, Image) {
+    ///
+    /// `half_res` drops the top level (a quarter of the memory).
+    fn images(&self, half_res: bool) -> (Image, Image) {
         let res = self.res;
         let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
         let srgb_to_linear: Vec<f32> =
@@ -921,8 +923,10 @@ impl TextureBake {
         };
 
         let mut color_data = Vec::with_capacity(res * res * 4 * 4 / 3 + 16);
-        for c in self.color.chunks_exact(3) {
-            color_data.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        if !half_res {
+            for c in self.color.chunks_exact(3) {
+                color_data.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
         }
         for level in mip_chain(level1(&color_at, false), half, false) {
             for v in level {
@@ -931,19 +935,21 @@ impl TextureBake {
             }
         }
         let mut normal_data = Vec::with_capacity(res * res * 4 * 4 / 3 + 16);
-        for k in 0..res * res {
-            let v = normal_at(k);
-            normal_data.extend_from_slice(&[self.normal[k * 2], self.normal[k * 2 + 1], to_u8(v.z * 0.5 + 0.5), 255]);
+        if !half_res {
+            for k in 0..res * res {
+                let v = normal_at(k);
+                normal_data.extend_from_slice(&[self.normal[k * 2], self.normal[k * 2 + 1], to_u8(v.z * 0.5 + 0.5), 255]);
+            }
         }
         for level in mip_chain(level1(&normal_at, true), half, true) {
             for v in level {
                 normal_data.extend_from_slice(&[to_u8(v.x * 0.5 + 0.5), to_u8(v.y * 0.5 + 0.5), to_u8(v.z * 0.5 + 0.5), 255]);
             }
         }
-        let mips = res.ilog2() + 1;
+        let (top, mips) = if half_res { (half, res.ilog2()) } else { (res, res.ilog2() + 1) };
         (
-            make_image(color_data, res, mips, TextureFormat::Rgba8UnormSrgb),
-            make_image(normal_data, res, mips, TextureFormat::Rgba8Unorm),
+            make_image(color_data, top, mips, TextureFormat::Rgba8UnormSrgb),
+            make_image(normal_data, top, mips, TextureFormat::Rgba8Unorm),
         )
     }
 }
@@ -1090,16 +1096,23 @@ pub fn spawn_map(
     let near_half = NEAR_SPACING * NEAR_CELLS as f32 * 0.5;
     let fine_half = FINE_SPACING * FINE_CELLS as f32 * 0.5;
 
-    // (grid, cells, texture resolution, half-extent of the finer grid covering its middle)
+    // Low-memory devices skip the 32 m near mesh (the 64 m one covers the
+    // middle instead; collision still uses the near heights) and take the
+    // textures at half resolution.
+    let low = crate::platform::low_memory();
+    // (grid, cells, half-extent of the finer grid covering its middle)
     for ((grid, cells, hole), texture) in [
         (&near, NEAR_CELLS, 0.0),
-        (&fine, FINE_CELLS, near_half),
+        (&fine, FINE_CELLS, if low { 0.0 } else { near_half }),
         (&coarse, COARSE_CELLS, fine_half),
     ]
     .into_iter()
     .zip(&textures)
     {
-        let (color, normal) = texture.images();
+        if low && std::ptr::eq(grid, &near) {
+            continue;
+        }
+        let (color, normal) = texture.images(low);
         let material = materials.add(ExtendedMaterial {
             base: StandardMaterial {
                 base_color_texture: Some(images.add(color)),

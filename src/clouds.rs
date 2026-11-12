@@ -90,6 +90,9 @@ impl Plugin for CloudsPlugin {
         {
             settings.temporal_blend = b;
         }
+        if crate::platform::low_memory() {
+            settings.divisor = settings.divisor.max(4);
+        }
         settings.enabled = !disabled;
 
         let t0 = bevy::platform::time::Instant::now();

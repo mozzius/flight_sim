@@ -70,6 +70,9 @@ impl Terrain {
 
 
 fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<ScatteringMedium>>) {
+    if crate::platform::low_memory() {
+        commands.insert_resource(bevy::light::DirectionalLightShadowMap { size: 1024 });
+    }
     // sun
     commands.spawn((
         DirectionalLight {

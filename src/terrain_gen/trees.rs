@@ -23,17 +23,28 @@ use super::{
 };
 use crate::{camera::MainCamera, world::Terrain};
 
-const CANDIDATE_SPACING: f32 = 13.0;
 const CHUNK: f32 = 512.0;
-/// Chunks are built within this (horizontal) distance of the camera, and dropped beyond the second.
-const LOAD_RADIUS: f32 = 6_400.0;
-const UNLOAD_RADIUS: f32 = 7_200.0;
 const CHUNKS_PER_FRAME: usize = 16;
-/// Detailed trees out to here, simple ones beyond, none past `FAR_END`. Hard
-/// switches (zero-width margins): Bevy's dithered crossfade renders chunks
-/// black mid-fade with this custom material, and stipples from above anyway.
-const LOD_SWITCH: std::ops::Range<f32> = 1_800.0..1_800.0;
-const FAR_END: std::ops::Range<f32> = 6_200.0..6_200.0;
+
+/// Tree density and view distances; smaller on low-memory devices (where the
+/// full forest alone is a few hundred MB of GPU memory).
+struct Reach {
+    candidate_spacing: f32,
+    /// Chunks are built within this (horizontal) distance of the camera, and dropped beyond `unload`.
+    load: f32,
+    unload: f32,
+    /// Detailed trees out to here, simple ones beyond, none past `far_end`.
+    lod_switch: f32,
+    far_end: f32,
+}
+
+fn reach() -> Reach {
+    if crate::platform::low_memory() {
+        Reach { candidate_spacing: 17.0, load: 3_600.0, unload: 4_200.0, lod_switch: 1_100.0, far_end: 3_400.0 }
+    } else {
+        Reach { candidate_spacing: 13.0, load: 6_400.0, unload: 7_200.0, lod_switch: 1_800.0, far_end: 6_200.0 }
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 struct Tree {
@@ -109,14 +120,14 @@ fn plant_chunk(key: (i32, i32), field: &TreeField, terrain: &Terrain) -> Vec<Tre
     let c = chunk_center(key);
     let lo = c - CHUNK * 0.5;
     // global lattice indices, so neighbouring chunks agree
-    let (i0, j0) = ((lo.x / CANDIDATE_SPACING).floor() as i32, (lo.y / CANDIDATE_SPACING).floor() as i32);
-    let per_side = (CHUNK / CANDIDATE_SPACING).ceil() as i32 + 1;
+    let (i0, j0) = ((lo.x / reach().candidate_spacing).floor() as i32, (lo.y / reach().candidate_spacing).floor() as i32);
+    let per_side = (CHUNK / reach().candidate_spacing).ceil() as i32 + 1;
     let mut trees = Vec::new();
     for j in j0..j0 + per_side {
         for i in i0..i0 + per_side {
             let (iu, ju) = (i as u32, j as u32);
             let jit = Vec2::new(rand01(iu, ju, 1), rand01(iu, ju, 2)) - 0.5;
-            let xz = (Vec2::new(i as f32, j as f32) + 0.5 + jit * 0.9) * CANDIDATE_SPACING;
+            let xz = (Vec2::new(i as f32, j as f32) + 0.5 + jit * 0.9) * reach().candidate_spacing;
             if chunk_key(xz) != key || xz.cmplt(field.min).any() || xz.cmpgt(field.max).any() {
                 continue;
             }
@@ -267,7 +278,7 @@ pub(super) fn stream_trees(
     let cam = cam.translation().xz();
 
     loaded.0.retain(|&key, entities| {
-        if chunk_center(key).distance(cam) > UNLOAD_RADIUS {
+        if chunk_center(key).distance(cam) > reach().unload {
             for e in entities.iter() {
                 commands.entity(*e).despawn();
             }
@@ -277,16 +288,16 @@ pub(super) fn stream_trees(
         }
     });
 
-    let reach = (LOAD_RADIUS / CHUNK).ceil() as i32;
+    let reach_chunks = (reach().load / CHUNK).ceil() as i32;
     let center = chunk_key(cam);
     let mut wanted: Vec<((i32, i32), f32)> = Vec::new();
-    for dj in -reach..=reach {
-        for di in -reach..=reach {
+    for dj in -reach_chunks..=reach_chunks {
+        for di in -reach_chunks..=reach_chunks {
             let key = (center.0 + di, center.1 + dj);
             let d = chunk_center(key).distance(cam);
             let (lo, hi) = (chunk_center(key) - CHUNK * 0.5, chunk_center(key) + CHUNK * 0.5);
             let overlaps = hi.cmpgt(field.min).all() && lo.cmplt(field.max).all();
-            if d <= LOAD_RADIUS && overlaps && !loaded.0.contains_key(&key) {
+            if d <= reach().load && overlaps && !loaded.0.contains_key(&key) {
                 wanted.push((key, d));
             }
         }
@@ -330,7 +341,9 @@ pub(super) fn stream_trees(
                 transform,
                 VisibilityRange {
                     start_margin: 0.0..0.0,
-                    end_margin: LOD_SWITCH,
+                    // hard switches (zero-width margins): Bevy's dithered crossfade renders
+                    // chunks black mid-fade with this custom material
+                    end_margin: reach().lod_switch..reach().lod_switch,
                     use_aabb: true,
                 },
             ))
@@ -341,8 +354,8 @@ pub(super) fn stream_trees(
                 MeshMaterial3d(field.material.clone()),
                 transform,
                 VisibilityRange {
-                    start_margin: LOD_SWITCH,
-                    end_margin: FAR_END,
+                    start_margin: reach().lod_switch..reach().lod_switch,
+                    end_margin: reach().far_end..reach().far_end,
                     use_aabb: true,
                 },
                 // far trees only receive shadows (casting them is costly and invisible out here)

@@ -22,6 +22,7 @@ opt-level = 3
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 bevy = { version = "0.20.1", features = ["wav", "webgpu", "webgl2"] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
+js-sys = "0.3"
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [profile.web]

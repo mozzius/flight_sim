@@ -13,6 +13,7 @@ mod game;
 mod hud;
 mod intro;
 mod pause;
+mod platform;
 mod respawn;
 mod terrain_gen;
 mod title;
