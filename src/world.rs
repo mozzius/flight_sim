@@ -1,5 +1,5 @@
 //! The static world: procedurally eroded mountains (see `terrain_gen`), sun
-//! and sky, and the [`Terrain`] collision queries everything else uses
+//! and sky (set by the round's `environment`), and the [`Terrain`] collision queries everything else uses
 //! (aircraft crashes, bullets, missiles, AI terrain avoidance, PULL UP).
 
 use bevy::{
@@ -10,7 +10,10 @@ use bevy::{
     prelude::*,
 };
 
-use crate::terrain_gen::{GeneratedTerrain, TerrainGenPlugin};
+use crate::{
+    environment::{Environment, Look},
+    terrain_gen::{GeneratedTerrain, TerrainGenPlugin},
+};
 
 pub struct WorldPlugin;
 
@@ -72,6 +75,7 @@ impl Terrain {
 
 fn setup(
     mut commands: Commands,
+    env: Res<Environment>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -79,14 +83,24 @@ fn setup(
     if crate::platform::low_memory() {
         commands.insert_resource(bevy::light::DirectionalLightShadowMap { size: 1024 });
     }
-    // sun
+    let look = env.look();
+    // sun: with the atmosphere, the GPU dims and reddens it by elevation; the
+    // fallback sky gets an approximation of that baked into its colour
+    let (color, illuminance) = if crate::platform::atmosphere() {
+        (Color::WHITE, look.sun_illuminance)
+    } else {
+        let s = look.fallback_sun;
+        let peak = s.max_element().max(1e-4);
+        (Color::linear_rgb(s.x / peak, s.y / peak, s.z / peak), lux::RAW_SUNLIGHT * peak)
+    };
     commands.spawn((
         DirectionalLight {
             shadow_maps_enabled: true,
-            illuminance: lux::RAW_SUNLIGHT,
+            illuminance,
+            color,
             ..default()
         },
-        Transform::from_xyz(4.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(look.sun_dir).looking_at(Vec3::ZERO, Vec3::Y),
         CascadeShadowConfigBuilder {
             num_cascades: 3,
             maximum_distance: 3_000.0,
@@ -98,11 +112,10 @@ fn setup(
 
     if crate::platform::atmosphere() {
         // the planet's atmosphere (centered below the origin by default)
-        commands.spawn(Atmosphere::earth(
-            scattering_mediums.add(ScatteringMedium::default()),
-        ));
+        // (with more aerosol in haze and under cloud)
+        commands.spawn(Atmosphere::earth(scattering_mediums.add(look.scattering_medium())));
     } else {
-        spawn_sky_dome(&mut commands, &mut meshes, &mut materials);
+        spawn_sky_dome(&look, &mut commands, &mut meshes, &mut materials);
     }
 }
 
@@ -114,24 +127,31 @@ struct SkyDome;
 
 const SKY_DOME_RADIUS: f32 = 100_000.0;
 
-fn spawn_sky_dome(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
+fn spawn_sky_dome(look: &Look, commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
     let mut mesh = Sphere::new(1.0).mesh().uv(48, 24);
+    // sRGB-authored colours (see `environment::Look`), mixed in linear
+    let lin = |v: Vec3| LinearRgba::from(Color::srgb(v.x, v.y, v.z));
+    let (horizon, zenith, below, glow) =
+        (lin(look.sky_horizon), lin(look.sky_zenith), lin(look.sky_below), lin(look.sky_glow));
+    let sun = look.sun_dir;
     let colors: Vec<[f32; 4]> = mesh
         .attribute(Mesh::ATTRIBUTE_POSITION)
         .and_then(|a| a.as_float3())
         .unwrap_or_default()
         .iter()
         .map(|p| {
-            // pale at the horizon, deep blue overhead, grey-blue below
-            let horizon = LinearRgba::from(Color::srgb(0.72, 0.8, 0.9));
-            let zenith = LinearRgba::from(Color::srgb(0.2, 0.38, 0.7));
-            let below = LinearRgba::from(Color::srgb(0.45, 0.52, 0.6));
+            // pale at the horizon, deep blue overhead, grey-blue below, and a
+            // glow around the sun (wider and warmer when it's low)
             let y = p[1];
-            let c = if y >= 0.0 {
+            let mut c = if y >= 0.0 {
                 horizon.mix(&zenith, y.powf(0.6))
             } else {
                 horizon.mix(&below, (-y * 4.0).min(1.0))
             };
+            let toward_sun = Vec3::from(*p).normalize_or_zero().dot(sun).max(0.0);
+            let near_horizon = 1.0 - y.abs().min(1.0);
+            let g = toward_sun.powf(6.0) * (0.4 + 0.6 * near_horizon) + toward_sun.powf(64.0);
+            c = c + glow * g;
             [c.red, c.green, c.blue, 1.0]
         })
         .collect();
@@ -150,15 +170,13 @@ fn spawn_sky_dome(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials:
         bevy::light::NotShadowCaster,
         bevy::light::NotShadowReceiver,
     ));
+    let a = look.ambient_color;
     commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.7, 0.8, 1.0),
-        brightness: SKY_AMBIENT,
+        color: Color::srgb(a.x, a.y, a.z),
+        brightness: look.ambient_brightness,
         ..default()
     });
 }
-
-/// Sky light (cd/m²) on the fallback path, roughly what the atmosphere's environment light gives.
-const SKY_AMBIENT: f32 = 12_000.0;
 
 fn follow_sky_dome(
     camera: Query<&Transform, (With<crate::camera::MainCamera>, Without<SkyDome>)>,

@@ -34,7 +34,7 @@ use bevy::{
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     mesh::{Indices, PrimitiveTopology},
     pbr::{ExtendedMaterial, MaterialExtension},
-    render::render_resource::AsBindGroup,
+    render::render_resource::{AsBindGroup, ShaderType},
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
@@ -49,9 +49,18 @@ pub type SceneryMaterial = ExtendedMaterial<StandardMaterial, SceneryExt>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct SceneryExt {
-    /// x: mist brightness
     #[uniform(100)]
+    pub params: SceneryParams,
+}
+
+#[derive(ShaderType, Reflect, Debug, Clone, Default)]
+pub struct SceneryParams {
+    /// x: mist brightness
     pub params: Vec4,
+    /// rgb: mist colour (post-exposure), a: mist density multiplier (see `environment`)
+    pub mist: Vec4,
+    /// xyz: direction to the sun
+    pub sun: Vec4,
 }
 
 impl MaterialExtension for SceneryExt {
@@ -69,9 +78,18 @@ pub type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainDetail>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct TerrainDetail {
-    /// x: normal detail strength, y: snow line (m), z: rock slope threshold, w: mist brightness
     #[uniform(100)]
+    pub params: TerrainParams,
+}
+
+#[derive(ShaderType, Reflect, Debug, Clone, Default)]
+pub struct TerrainParams {
+    /// x: normal detail strength, y: snow line (m), z: rock slope threshold, w: mist brightness
     pub params: Vec4,
+    /// rgb: mist colour (post-exposure), a: mist density multiplier (see `environment`)
+    pub mist: Vec4,
+    /// xyz: direction to the sun
+    pub sun: Vec4,
 }
 
 impl MaterialExtension for TerrainDetail {
@@ -1208,6 +1226,7 @@ impl MapBaker {
 /// returns the heightfield for collision queries.
 pub fn spawn_map(
     bake: MapBake,
+    look: &crate::environment::Look,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<TerrainMaterial>,
@@ -1257,8 +1276,12 @@ pub fn spawn_map(
                 ..default()
             },
             extension: TerrainDetail {
-                // normal detail strength, snow line (m), rock slope threshold
-                params: Vec4::new(1.0, 2350.0, 0.36, 1.0),
+                params: TerrainParams {
+                    // normal detail strength, snow line (m), rock slope threshold, mist brightness
+                    params: Vec4::new(1.0, 2350.0, 0.36, 1.0),
+                    mist: look.mist,
+                    sun: look.sun_dir.extend(0.0),
+                },
             },
         });
 
@@ -1295,7 +1318,13 @@ pub fn spawn_map(
             depth_bias,
             ..default()
         },
-        extension: SceneryExt { params: Vec4::new(1.0, 0.0, 0.0, 0.0) },
+        extension: SceneryExt {
+            params: SceneryParams {
+                params: Vec4::new(1.0, 0.0, 0.0, 0.0),
+                mist: look.mist,
+                sun: look.sun_dir.extend(0.0),
+            },
+        },
     };
     let road_material = scenery_materials.add(scenery(16.0, 0.85));
     let road_km: f32 = road_lines

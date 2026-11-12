@@ -31,8 +31,10 @@ crosshair, right stick look around.
 Guns: put the boresight cross on the red lead pipper; it turns white with
 SHOOT when you have a firing solution.
 
-Every round flies a freshly generated map (mountains, roads and forests); its seed is in
-the pause menu and `FLIGHT_SIM_SEED=<n>` flies it again. The round opens with a short
+Every round flies a freshly generated map (mountains, roads and forests) under a time of
+day (dawn, morning, midday, afternoon, golden hour) and weather (clear, broken cloud,
+overcast, hazy) rolled from the same seed; the seed is in the pause menu and
+`FLIGHT_SIM_SEED=<n>` flies it again. The round opens with a short
 fly-by shot: any key, click, tap or gamepad A skips it.
 
 On a touchscreen: swipe anywhere to aim and an autopilot flies there (banking into turns,
@@ -52,7 +54,10 @@ tablets get a lighter scene (fewer trees, half-res terrain textures).
 (staged effects), `CLOUDS_DEBUG_CAM=above|below|inside|sun|horizon`, `CLOUDS_DIV=2..4` (cloud
 resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FLIGHT_SIM_PAUSE_TEST=1`, `FLIGHT_SIM_KILL_TEST=1`,
 `FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_SEED=<n>` (fly that map; screenshot runs default to
-seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene).
+seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene), `FLIGHT_SIM_NO_ATMOSPHERE=1`
+(the plain gradient sky), `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
+`FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` (pin the environment; screenshot runs
+default to clear midday).
 Screenshot runs are headless (no window) and silent.
 
 ## Web build
@@ -69,4 +74,5 @@ vercel deploy dist --prod --scope samuel-newmans-projects --project flight-sim
 The web build is single-threaded, so it bakes the terrain textures at half
 resolution, a slice per frame under a loading bar, and plants trees a couple of
 chunks per frame. `?debug` shows the log and GPU state on the page; `?low` /
-`?high` force the phone/tablet scene on or off.
+`?high` force the phone/tablet scene on or off; `?noatmo` forces the plain sky;
+`?weather=` and `?time=` pin the environment (same values as the env vars above).

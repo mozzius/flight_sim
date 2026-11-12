@@ -3,11 +3,13 @@
 //! then spawned, and the round starts (`GameState::Playing`, the intro shot).
 //!
 //! `FLIGHT_SIM_SEED=<n>` flies a given map again. Screenshot runs default to
-//! seed 1337 so they're comparable.
+//! seed 1337 so they're comparable. The round's time of day and weather
+//! (`environment`) are rolled from the same seed.
 
 use bevy::prelude::*;
 
 use crate::{
+    environment::Environment,
     intro::KeepDuringIntro,
     terrain_gen::{self, MapBaker, SceneryMaterial, TerrainMaterial},
     world::Terrain,
@@ -17,13 +19,9 @@ pub struct LoadingPlugin;
 
 impl Plugin for LoadingPlugin {
     fn build(&self, app: &mut App) {
-        let seed = std::env::var("FLIGHT_SIM_SEED")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .or_else(|| crate::dev::headless().then_some(SCREENSHOT_SEED))
-            .unwrap_or_else(rand::random);
         app.init_state::<GameState>()
-            .insert_resource(MapSeed(seed))
+            .insert_resource(MapSeed(map_seed()))
+            .insert_resource(Environment::current())
             .add_systems(OnEnter(GameState::Loading), spawn_loading)
             .add_systems(OnExit(GameState::Loading), despawn_loading)
             .add_systems(Update, load_map.run_if(in_state(GameState::Loading)));
@@ -35,6 +33,19 @@ pub enum GameState {
     #[default]
     Loading,
     Playing,
+}
+
+/// This session's map seed: `FLIGHT_SIM_SEED`, else random (fixed for
+/// screenshot runs). Chosen once; the environment is rolled from it too.
+pub fn map_seed() -> u32 {
+    static SEED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *SEED.get_or_init(|| {
+        std::env::var("FLIGHT_SIM_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| crate::dev::headless().then_some(SCREENSHOT_SEED))
+            .unwrap_or_else(rand::random)
+    })
 }
 
 /// The seed of the map being flown.
@@ -107,6 +118,7 @@ fn load_map(
     mut scenery: ResMut<Assets<SceneryMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut terrain: ResMut<Terrain>,
+    env: Res<Environment>,
     mut next: ResMut<NextState<GameState>>,
 ) {
     // let the loading screen draw before the first slice
@@ -123,7 +135,7 @@ fn load_map(
     }
     let Some(bake) = done else { return };
     let generated =
-        terrain_gen::spawn_map(bake, &mut commands, &mut meshes, &mut materials, &mut scenery, &mut images);
+        terrain_gen::spawn_map(bake, &env.look(), &mut commands, &mut meshes, &mut materials, &mut scenery, &mut images);
     terrain.set(generated);
     *baker = None;
     *frames = 0;

@@ -8,6 +8,7 @@ mod clouds;
 mod controls;
 mod dev;
 mod effects;
+mod environment;
 mod flight;
 mod game;
 mod hud;

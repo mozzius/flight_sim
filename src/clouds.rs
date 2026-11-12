@@ -94,9 +94,26 @@ impl Plugin for CloudsPlugin {
             settings.divisor = settings.divisor.max(4);
         }
         settings.enabled = !disabled;
+        // the round's weather and time of day
+        let look = crate::environment::Environment::current().look().cloud;
+        settings.coverage_bias = look.coverage_bias;
+        if let Some((bottom, top)) = look.layer {
+            settings.layer_bottom = bottom;
+            settings.layer_top = top;
+        }
+        settings.extinction *= look.extinction_mult;
+        settings.fade_distance = look.fade_distance;
+        settings.ambient_top = look.ambient_top;
+        settings.ambient_bottom = look.ambient_bottom;
+        settings.sun_tint = if crate::platform::atmosphere() {
+            look.sun_tint
+        } else {
+            look.fallback_sun_tint
+        };
 
         let t0 = bevy::platform::time::Instant::now();
-        let weather = Arc::new(noise::weather_map(WEATHER_SIZE, settings.coverage_bias));
+        // baked unbiased: the shader and `CloudField` add the bias
+        let weather = Arc::new(noise::weather_map(WEATHER_SIZE, 0.0));
         app.insert_resource(CloudField::new(weather.clone(), &settings))
             .add_systems(Update, update_field_time);
         if disabled {
@@ -403,7 +420,7 @@ fn debug_pose(
     terrain: &crate::world::Terrain,
 ) -> (Vec3, Vec3) {
     let (bottom, top) = (settings.layer_bottom, settings.layer_top);
-    let sun = Vec3::new(4.0, 10.0, 10.0).normalize();
+    let sun = crate::environment::Environment::current().sun_dir();
     // for the sun shot, find a spot with thick cloud between the camera and the sun
     let sun_spot = || {
         let mut best = (0.0, Vec3::new(0.0, 1_000.0, 0.0));

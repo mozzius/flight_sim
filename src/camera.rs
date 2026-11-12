@@ -32,7 +32,12 @@ impl Plugin for CameraPlugin {
 #[derive(Component)]
 pub struct MainCamera;
 
-fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn spawn_camera(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    env: Res<crate::environment::Environment>,
+) {
+    let look = env.look();
     let mut camera = commands.spawn((
         Camera3d::default(),
         MainCamera,
@@ -42,22 +47,15 @@ fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             far: 120_000.0,
             ..default()
         }),
-        Exposure::SUNLIGHT,
+        Exposure {
+            ev100: if crate::platform::atmosphere() { look.exposure } else { look.fallback_exposure },
+        },
         Tonemapping::AcesFitted,
         Bloom::NATURAL,
         Transform::from_xyz(0.0, 1510.0, 6030.0),
         // distance haze on top of the atmosphere's aerial perspective: far ridges
-        // fade into blue-grey
-        bevy::pbr::DistanceFog {
-            color: Color::srgb(0.55, 0.64, 0.76),
-            directional_light_color: Color::srgba(1.0, 0.92, 0.78, 0.6),
-            directional_light_exponent: 24.0,
-            falloff: bevy::pbr::FogFalloff::from_visibility_colors(
-                55_000.0,
-                Color::srgb(0.4, 0.5, 0.62),
-                Color::srgb(0.7, 0.77, 0.86),
-            ),
-        },
+        // fade into blue-grey (or grey, or warm haze: see `environment`)
+        look.distance_fog(),
         // the HUD draws onto whatever this camera renders to (window or offscreen image)
         bevy::ui::IsDefaultUiCamera,
     ));
@@ -71,7 +69,7 @@ fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 aerial_view_lut_max_distance: 6.0e4,
                 ..default()
             },
-            AtmosphereEnvironmentMapLight::default(),
+            AtmosphereEnvironmentMapLight { intensity: look.env_light, ..default() },
         ));
     }
     // web: no MSAA. Its multisampled colour, depth and prepass targets cost a

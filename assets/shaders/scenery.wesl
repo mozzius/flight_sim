@@ -24,6 +24,10 @@ import bevy_pbr::render::{
 struct Scenery {
     // x: mist brightness
     params: vec4<f32>,
+    // rgb: mist colour, a: mist density multiplier (src/environment.rs)
+    mist: vec4<f32>,
+    // xyz: direction to the sun
+    sun: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
@@ -34,15 +38,15 @@ const MIST_FLOOR: f32 = 250.0;
 const MIST_SCALE: f32 = 220.0;
 const MIST_DENSITY: f32 = 0.00035;
 
-fn valley_mist(cam: vec3<f32>, p: vec3<f32>) -> f32 {
+fn valley_mist(cam: vec3<f32>, p: vec3<f32>, density: f32) -> f32 {
     let d = distance(cam, p);
     let k = (p.y - cam.y) / max(d, 1.0);
     let at_cam = exp(-(cam.y - MIST_FLOOR) / MIST_SCALE);
     var depth: f32;
     if (abs(k) < 1e-3) {
-        depth = MIST_DENSITY * at_cam * d;
+        depth = MIST_DENSITY * density * at_cam * d;
     } else {
-        depth = MIST_DENSITY * at_cam * MIST_SCALE / k * (1.0 - exp(-k * d / MIST_SCALE));
+        depth = MIST_DENSITY * density * at_cam * MIST_SCALE / k * (1.0 - exp(-k * d / MIST_SCALE));
     }
     return clamp(1.0 - exp(-depth), 0.0, 0.85);
 }
@@ -69,11 +73,11 @@ fn fragment(
     out.color = apply_pbr_lighting(pbr_input);
     let pos = in.world_position.xyz;
     let cam = view.world_position;
-    let mist = valley_mist(cam, pos);
+    let mist = valley_mist(cam, pos, scenery.mist.a);
     let to_frag = normalize(pos - cam);
-    let sun_dir = normalize(vec3<f32>(4.0, 10.0, 10.0));
+    let sun_dir = scenery.sun.xyz;
     let toward_sun = pow(max(dot(to_frag, -sun_dir) * -1.0, 0.0), 6.0);
-    let mist_col = vec3<f32>(0.62, 0.68, 0.76) * (1.0 + 0.6 * toward_sun) * scenery.params.x;
+    let mist_col = scenery.mist.rgb * (1.0 + 0.6 * toward_sun) * scenery.params.x;
     out.color = vec4<f32>(mix(out.color.rgb, mist_col, mist), out.color.a);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 }
