@@ -18,19 +18,31 @@ const BULLET_LIFE: f32 = 2.2;
 const BULLET_DAMAGE: f32 = 5.0;
 const GUN_RATE: f32 = 25.0; // tracer entities per second (each stands for a few rounds)
 
-const MISSILE_THRUST: f32 = 280.0; // m/s^2
-const MISSILE_BURN: f32 = 3.5;
-const MISSILE_LIFE: f32 = 16.0;
+const MISSILE_THRUST: f32 = 300.0; // m/s^2
+const MISSILE_BURN: f32 = 3.0;
+const MISSILE_LIFE: f32 = 14.0;
 const MISSILE_DRAG: f32 = 2.6e-4;
-const MISSILE_NAV_GAIN: f32 = 4.0;
-const MISSILE_MAX_G: f32 = 35.0;
-const MISSILE_FUSE: f32 = 16.0;
+/// Proportional navigation gain.
+const MISSILE_NAV_GAIN: f32 = 3.0;
+/// Peak lateral acceleration (G) at full dynamic pressure.
+const MISSILE_MAX_G: f32 = 30.0;
+/// How quickly the missile's airframe follows its guidance commands (s).
+/// This lag is what lets a well-timed last-second break make it overshoot.
+const MISSILE_AUTOPILOT_LAG: f32 = 0.75;
+/// Energy cost of turning: forward deceleration per unit of lateral accel.
+/// Augmented PN strength (0 = plain PN, 0.5 = classic APN).
+const MISSILE_APN: f32 = 0.5;
+/// How long the seeker's tracker takes to notice the target's acceleration (s).
+const MISSILE_TRACKER_LAG: f32 = 1.0;
+const MISSILE_TURN_DRAG: f32 = 0.05;
+const MISSILE_FUSE: f32 = 9.0;
 const MISSILE_DAMAGE: f32 = 95.0;
+/// How far off its nose the seeker can look before it loses the target.
+const SEEKER_GIMBAL: f32 = 0.87; // ~50 degrees
 
 pub const LOCK_CONE: f32 = 0.6; // radians off the nose (~34°)
 pub const LOCK_RANGE: f32 = 5_500.0;
 const LOCK_TIME: f32 = 1.2;
-const SEEKER_GIMBAL: f32 = 1.05;
 
 pub struct WeaponsPlugin;
 
@@ -115,6 +127,13 @@ pub struct Missile {
     pub owner: Entity,
     pub team: Team,
     pub age: f32,
+    /// Lateral acceleration the airframe is currently pulling (lags the command).
+    pub lateral: Vec3,
+    /// Target velocity seen last step, to estimate how hard it's turning.
+    pub last_target_velocity: Option<Vec3>,
+    /// Filtered estimate of the target's acceleration (the seeker's tracker
+    /// takes time to notice a sudden break: that's the window to dodge in).
+    pub target_accel: Vec3,
 }
 
 impl Missile {
@@ -356,6 +375,9 @@ fn fire_weapons(
                         owner: entity,
                         team: *team,
                         age: 0.0,
+                        lateral: Vec3::ZERO,
+                        last_target_velocity: None,
+                        target_accel: Vec3::ZERO,
                     },
                     Mesh3d(assets.missile_mesh.clone()),
                     MeshMaterial3d(assets.missile_material.clone()),
@@ -482,16 +504,7 @@ fn guide_missiles(
     for (entity, mut missile, mut transform) in &mut missiles {
         missile.age += dt;
         let pos = transform.translation;
-        let speed = missile.velocity.length();
-        let dir = missile.velocity.normalize_or(Vec3::NEG_Z);
 
-        // ---- motor, drag, gravity ----
-        let mut accel = Vec3::NEG_Y * GRAVITY - missile.velocity * speed * MISSILE_DRAG;
-        if missile.motor_burning() && missile.age > 0.25 {
-            accel += dir * MISSILE_THRUST;
-        }
-
-        // ---- proportional navigation ----
         let target_state = missile.target.and_then(|t| {
             aircraft
                 .get(t)
@@ -499,26 +512,9 @@ fn guide_missiles(
                 .map(|(_, tt, fs, _, _)| (tt.translation, fs.velocity))
                 .or_else(|| flares.get(t).ok().map(|(ft, f)| (ft.translation, f.velocity)))
         });
-        if missile.age > 0.25 {
-            if let Some((tpos, tvel)) = target_state {
-                let los = tpos - pos;
-                let los_hat = los.normalize_or_zero();
-                if los_hat.angle_between(dir) > SEEKER_GIMBAL {
-                    missile.target = None; // target left the seeker's view
-                } else {
-                    let rel_v = tvel - missile.velocity;
-                    let omega = los.cross(rel_v) / los.length_squared().max(1.0);
-                    let closing = -rel_v.dot(los_hat);
-                    let mut cmd = MISSILE_NAV_GAIN * closing.max(100.0) * omega.cross(los_hat);
-                    cmd += Vec3::Y * GRAVITY;
-                    // only lateral acceleration, limited by available lift
-                    cmd -= dir * cmd.dot(dir);
-                    let lift = (speed / 500.0).powi(2).min(1.0);
-                    accel += cmd.clamp_length_max(MISSILE_MAX_G * GRAVITY * lift);
-                }
-            } else if missile.target.is_some() {
-                missile.target = None;
-            }
+        let (accel, lost) = missile_guidance(&mut missile, pos, target_state, dt);
+        if lost {
+            missile.target = None;
         }
 
         missile.velocity += accel * dt;
@@ -565,6 +561,72 @@ fn guide_missiles(
     }
 }
 
+/// One step of missile flight: motor, drag, gravity and proportional
+/// navigation toward `target` (position, velocity). Returns the acceleration
+/// to apply and whether the seeker lost the target.
+pub fn missile_guidance(
+    missile: &mut Missile,
+    pos: Vec3,
+    target: Option<(Vec3, Vec3)>,
+    dt: f32,
+) -> (Vec3, bool) {
+    let speed = missile.velocity.length();
+    let dir = missile.velocity.normalize_or(Vec3::NEG_Z);
+
+    // motor, drag, gravity
+    let mut accel = Vec3::NEG_Y * GRAVITY - missile.velocity * speed * MISSILE_DRAG;
+    if missile.motor_burning() && missile.age > 0.25 {
+        accel += dir * MISSILE_THRUST;
+    }
+
+    // guidance command
+    let mut lost = false;
+    let mut command = Vec3::ZERO;
+    if missile.age > 0.25 {
+        match target {
+            Some((tpos, tvel)) => {
+                let los = tpos - pos;
+                let los_hat = los.normalize_or_zero();
+                if los_hat.angle_between(dir) > SEEKER_GIMBAL {
+                    lost = true; // target left the seeker's field of view
+                } else {
+                    let rel_v = tvel - missile.velocity;
+                    let omega = los.cross(rel_v) / los.length_squared().max(1.0);
+                    let closing = -rel_v.dot(los_hat);
+                    command = MISSILE_NAV_GAIN * closing.max(100.0) * omega.cross(los_hat)
+                        + Vec3::Y * GRAVITY;
+                    // augmented PN: lead a target that's pulling a sustained turn,
+                    // so turning early doesn't help; only a sharp late break does
+                    if let Some(last) = missile.last_target_velocity {
+                        let measured = (tvel - last) / dt.max(1e-4);
+                        let k = 1.0 - (-dt / MISSILE_TRACKER_LAG).exp();
+                        missile.target_accel += (measured - missile.target_accel) * k;
+                        let a = missile.target_accel;
+                        let perp = a - los_hat * a.dot(los_hat);
+                        command += perp * (MISSILE_NAV_GAIN * MISSILE_APN);
+                    }
+                    missile.last_target_velocity = Some(tvel);
+                }
+            }
+            None => lost = true,
+        }
+    }
+    // only lateral, limited by the lift available at this speed
+    command -= dir * command.dot(dir);
+    let lift = (speed / 600.0).powi(2).min(1.0);
+    let command = command.clamp_length_max(MISSILE_MAX_G * GRAVITY * lift);
+
+    // the airframe follows the command with a lag
+    let k = 1.0 - (-dt / MISSILE_AUTOPILOT_LAG).exp();
+    missile.lateral += (command - missile.lateral) * k;
+    missile.lateral -= dir * missile.lateral.dot(dir);
+    accel += missile.lateral;
+    // turning costs energy
+    accel -= dir * missile.lateral.length() * MISSILE_TURN_DRAG;
+
+    (accel, lost)
+}
+
 fn move_flares(
     mut commands: Commands,
     time: Res<Time>,
@@ -605,4 +667,130 @@ pub fn gun_lead_point(
         t = shooter_pos.distance(aim) / BULLET_SPEED;
     }
     aim
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How the simulated target flies.
+    #[derive(Clone, Copy, Debug)]
+    enum Evasion {
+        Straight,
+        /// Max-G break perpendicular to the missile, starting when the
+        /// missile is this many seconds from impact.
+        BreakAt(f32),
+    }
+
+    /// Fly one engagement; returns the closest approach in metres.
+    fn engage(range: f32, aspect_deg: f32, evasion: Evasion, break_up: bool) -> f32 {
+        let dt = 1.0 / 60.0;
+        let target_speed = 270.0;
+        let break_g = 8.0 * GRAVITY;
+        // target flies -Z; the launcher sits `range` away at `aspect` from the target's tail
+        let mut tpos = Vec3::new(0.0, 3_000.0, 0.0);
+        let mut tvel = Vec3::NEG_Z * target_speed;
+        let a = aspect_deg.to_radians();
+        let mpos0 = tpos + Vec3::new(a.sin(), 0.0, a.cos()) * range;
+        let mut mpos = mpos0;
+        let launch_dir = (tpos - mpos).normalize();
+        let mut missile = Missile {
+            velocity: launch_dir * 270.0,
+            target: None,
+            owner: Entity::PLACEHOLDER,
+            team: Team::Red,
+            age: 0.0,
+            lateral: Vec3::ZERO,
+            last_target_velocity: None,
+            target_accel: Vec3::ZERO,
+        };
+        let mut breaking: Option<Vec3> = None;
+        let mut closest = f32::MAX;
+        for _ in 0..(MISSILE_LIFE / dt) as usize {
+            missile.age += dt;
+            let (accel, lost) = missile_guidance(&mut missile, mpos, Some((tpos, tvel)), dt);
+            if lost {
+                // keeps flying, unguided
+            }
+            missile.velocity += accel * dt;
+            let next = mpos + missile.velocity * dt;
+            closest = closest.min(segment_sphere_distance(mpos, next, tpos));
+            mpos = next;
+
+            // target
+            let to_missile = mpos - tpos;
+            let closing = (missile.velocity - tvel).dot(-to_missile.normalize_or_zero()).max(1.0);
+            let tti = to_missile.length() / closing;
+            if let Evasion::BreakAt(t) = evasion {
+                if breaking.is_none() && tti < t {
+                    // turn across the missile's line of sight
+                    let side = to_missile.cross(Vec3::Y).normalize_or(Vec3::X);
+                    breaking = Some(if break_up { Vec3::Y } else { side });
+                }
+            }
+            if let Some(dir) = breaking {
+                let lateral = (dir - tvel.normalize() * dir.dot(tvel.normalize())).normalize_or_zero();
+                tvel = (tvel + lateral * break_g * dt).normalize() * target_speed;
+            }
+            tpos += tvel * dt;
+            if closest < 1.0 || missile.age > 2.0 && (mpos - tpos).dot(missile.velocity) > 400.0 {
+                break; // hit, or flew well past
+            }
+        }
+        closest
+    }
+
+    const SHOTS: [(f32, f32); 6] = [
+        (2_500.0, 0.0),   // tail chase
+        (4_000.0, 0.0),
+        (2_500.0, 60.0),  // off the tail quarter
+        (3_500.0, 90.0),  // beam
+        (3_000.0, 150.0), // front quarter
+        (5_000.0, 180.0), // head on
+    ];
+
+    fn hit_rate(evasion: Evasion, up: bool) -> (usize, Vec<f32>) {
+        let misses: Vec<f32> = SHOTS.iter().map(|(r, a)| engage(*r, *a, evasion, up)).collect();
+        (misses.iter().filter(|m| **m < MISSILE_FUSE).count(), misses)
+    }
+
+    #[test]
+    fn missiles_hit_targets_that_fly_straight() {
+        let (hits, misses) = hit_rate(Evasion::Straight, false);
+        println!("straight: {hits}/{} hit, miss distances {misses:.0?}", SHOTS.len());
+        assert!(hits >= SHOTS.len() - 1, "a non-manoeuvring target should be hit");
+    }
+
+    #[test]
+    fn a_well_timed_break_usually_defeats_a_missile() {
+        // breaks 1-2 s before impact, sideways and up, over every launch geometry
+        let mut total_hits = 0;
+        let mut total = 0;
+        for t in [1.0, 1.5, 2.0] {
+            for up in [false, true] {
+                let (hits, misses) = hit_rate(Evasion::BreakAt(t), up);
+                println!("break {} at {t}s: {hits}/{} hit, miss distances {misses:.0?}", if up { "up" } else { "sideways" }, SHOTS.len());
+                total_hits += hits;
+                total += SHOTS.len() - 1; // the 4 km tail chase is out of range anyway
+            }
+        }
+        println!("late breaks: {total_hits}/{total} hit");
+        assert!(total_hits * 4 <= total, "a well-timed break should work at least ~75% of the time");
+    }
+
+    /// Not a pass/fail test: prints how the evasion window looks.
+    #[test]
+    fn evasion_window_report() {
+        for t in [0.3, 0.6, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0] {
+            let (hits, _) = hit_rate(Evasion::BreakAt(t), false);
+            println!("window: break {t:.1}s before impact -> {hits}/{} hit", SHOTS.len());
+        }
+    }
+
+    #[test]
+    fn breaking_too_early_does_not_work() {
+        let (hits, misses) = hit_rate(Evasion::BreakAt(6.0), false);
+        println!("break at 6s: {hits}/{} hit, miss distances {misses:.0?}", SHOTS.len());
+        assert!(hits >= SHOTS.len() / 2, "an early break gives the missile time to correct: {hits} hits");
+    }
 }

@@ -3,7 +3,7 @@
 //! off-screen target arrow).
 
 use bevy::{
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    diagnostic::FrameTimeDiagnosticsPlugin,
     prelude::*,
 };
 
@@ -11,7 +11,7 @@ use crate::{
     camera::MainCamera,
     controls::{ControlMode, MouseAim},
     flight::{Aircraft, ControlInput, Disabled, FlightState},
-    game::{Health, Player, Score, Team},
+    game::{Health, Player, Team},
     weapons::{LOCK_RANGE, Missile, Targeting, Weapons, gun_lead_point},
     world::Terrain,
 };
@@ -20,12 +20,27 @@ const HUD_GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
 const HOSTILE: Color = Color::srgb(1.0, 0.3, 0.25);
 const FRIENDLY: Color = Color::srgb(0.35, 0.8, 1.0);
 const WARNING: Color = Color::srgb(1.0, 0.75, 0.2);
+/// Missiles coming for *you* get their own colour, distinct from hostile jets.
+const INCOMING: Color = Color::srgb(1.0, 0.3, 0.95);
+
+/// Break 1-3 s before impact: the missile's airframe can't follow a sudden
+/// hard turn that late (see the missile tests in weapons.rs).
+pub const BREAK_WINDOW: (f32, f32) = (0.7, 3.0);
+
+/// Range and seconds-to-impact of a missile chasing the player.
+fn time_to_impact(missile_pos: Vec3, missile_vel: Vec3, player_pos: Vec3, player_vel: Vec3) -> (f32, f32) {
+    let to_player = player_pos - missile_pos;
+    let dist = to_player.length();
+    let closing = (missile_vel - player_vel).dot(to_player / dist.max(1.0));
+    (dist, if closing > 1.0 { dist / closing } else { f32::INFINITY })
+}
 
 pub struct HUDPlugin;
 
 impl Plugin for HUDPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+            // the HUD is plane-related only; score etc. live in the pause menu
             .add_systems(Startup, setup)
             .add_systems(
                 PostUpdate,
@@ -49,16 +64,12 @@ impl Plugin for HUDPlugin {
 /// Which readout a text element shows.
 #[derive(Component, Clone, Copy)]
 enum Readout {
-    Fps,
     Speed,
     Altitude,
     Throttle,
     GLoad,
     Weapons,
     Health,
-    Score,
-    Event,
-    Mode,
 }
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +77,7 @@ enum Warning {
     Stall,
     PullUp,
     Missile,
+    Break,
     Locked,
     Respawn,
 }
@@ -142,7 +154,6 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         ..default()
     };
 
-    readout(Readout::Fps, at(None, Some(px(8)), Some(px(6)), None), 14.0, Justify::Right);
     // either side of the centre: speed + G on the left, altitude + throttle on the right
     readout(Readout::Speed, at(None, Some(percent(66)), Some(percent(42)), None), 20.0, Justify::Right);
     readout(Readout::GLoad, at(None, Some(percent(66)), Some(percent(52)), None), 16.0, Justify::Right);
@@ -151,29 +162,6 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // bottom left: weapons and health
     readout(Readout::Weapons, at(Some(px(24)), None, None, Some(px(52))), 18.0, Justify::Left);
     readout(Readout::Health, at(Some(px(24)), None, None, Some(px(24))), 18.0, Justify::Left);
-
-    // top centre: score, mode and events
-    commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: px(10),
-            width: percent(100),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: px(4),
-            ..default()
-        })
-        .with_children(|p| {
-            for (kind, size) in [(Readout::Score, 16.0), (Readout::Mode, 13.0), (Readout::Event, 26.0)] {
-                p.spawn((
-                    Text::new(""),
-                    text(&font, size, HUD_GREEN),
-                    TextLayout::justify(Justify::Center),
-                    shadow(),
-                    kind,
-                ));
-            }
-        });
 
     // centre warnings
     commands
@@ -189,7 +177,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .with_children(|p| {
             for (w, label, color) in [
                 (Warning::Respawn, "", WARNING),
-                (Warning::Missile, "MISSILE", HOSTILE),
+                (Warning::Break, "BREAK!", INCOMING),
+                (Warning::Missile, "MISSILE", INCOMING),
                 (Warning::PullUp, "PULL UP", HOSTILE),
                 (Warning::Stall, "STALL", WARNING),
                 (Warning::Locked, "LOCKED", HOSTILE),
@@ -522,31 +511,12 @@ fn update_center_symbols(
 
 #[allow(clippy::type_complexity)]
 fn update_readouts(
-    diagnostics: Res<DiagnosticsStore>,
-    score: Res<Score>,
-    mode: Res<ControlMode>,
     player: Query<(&Transform, &FlightState, &Weapons, &Health, &ControlInput), With<Player>>,
     mut readouts: Query<(&Readout, &mut Text, &mut TextColor)>,
 ) {
     let player = player.single().ok();
     for (kind, mut text, mut color) in &mut readouts {
         let value = match (kind, player) {
-            (Readout::Fps, _) => diagnostics
-                .get(&FrameTimeDiagnosticsPlugin::FPS)
-                .and_then(|d| d.smoothed())
-                .map_or(String::new(), |fps| format!("{fps:.0} FPS")),
-            (Readout::Score, _) => format!(
-                "WAVE {}   KILLS {}   DEATHS {}",
-                score.wave, score.kills, score.deaths
-            ),
-            (Readout::Mode, _) => match *mode {
-                ControlMode::MouseAim => "MOUSE AIM · M to switch".into(),
-                ControlMode::Direct => "DIRECT · M to switch".into(),
-            },
-            (Readout::Event, _) => score
-                .last_event
-                .as_ref()
-                .map_or(String::new(), |(s, _)| s.clone()),
             (_, None) => String::new(),
             (Readout::Speed, Some((_, s, ..))) => {
                 format!("{:>4.0} km/h\nM {:.2}", s.airspeed * 3.6, s.mach)
@@ -596,7 +566,7 @@ fn update_warnings(
     terrain: Res<Terrain>,
     player: Query<(Entity, &Transform, &FlightState, &Aircraft, &Targeting), With<Player>>,
     targets: Query<&Transform, With<Aircraft>>,
-    missiles: Query<&Missile>,
+    missiles: Query<(&GlobalTransform, &Missile)>,
     mut warnings: Query<(&Warning, &mut Node, &mut Text)>,
     mut dead_timer: Local<f32>,
 ) {
@@ -624,8 +594,28 @@ fn update_warnings(
                 let ahead = p + s.velocity * 4.0;
                 blink && s.velocity.y < -5.0 && ahead.y < terrain.max_height_along(p, ahead) + 50.0
             }
-            (Warning::Missile, Some((e, ..))) => {
-                blink && missiles.iter().any(|m| m.target == Some(e))
+            (Warning::Missile | Warning::Break, Some((e, t, s, ..))) => {
+                // the most urgent missile chasing us
+                let soonest = missiles
+                    .iter()
+                    .filter(|(_, m)| m.target == Some(e))
+                    .map(|(gt, m)| time_to_impact(gt.translation(), m.velocity, t.translation, s.velocity).1)
+                    .fold(f32::INFINITY, f32::min);
+                let incoming = missiles.iter().any(|(_, m)| m.target == Some(e));
+                let in_window = (BREAK_WINDOW.0..BREAK_WINDOW.1).contains(&soonest);
+                if *warning == Warning::Missile {
+                    let value = if soonest.is_finite() {
+                        format!("MISSILE {soonest:.1}s")
+                    } else {
+                        "MISSILE".to_string()
+                    };
+                    if text.0 != value {
+                        text.0 = value;
+                    }
+                    incoming && !in_window
+                } else {
+                    in_window && blink
+                }
             }
             (Warning::Locked, Some((_, t, _, _, tg))) => {
                 tg.locked()
@@ -826,13 +816,13 @@ fn spawn_missile_markers(
             ))
             .with_child((
                 Text::new(""),
-                text(&font.0, 13.0, HOSTILE),
+                text(&font.0, 14.0, INCOMING),
                 shadow(),
                 Node {
                     position_type: PositionType::Absolute,
-                    top: px(14),
-                    left: px(14),
-                    width: px(70),
+                    top: px(16),
+                    left: px(16),
+                    width: px(110),
                     ..default()
                 },
                 // undo the diamond's rotation for the label
@@ -847,7 +837,7 @@ fn update_missile_markers(
     mut commands: Commands,
     time: Res<Time>,
     camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-    player: Query<(Entity, &Transform, &Team), With<Player>>,
+    player: Query<(Entity, &Transform, &Team, &FlightState), With<Player>>,
     missiles: Query<(&GlobalTransform, &Missile)>,
     mut markers: Query<(Entity, &MissileMarker, &mut Node, &mut BorderColor, &Children), Without<TargetMarker>>,
     mut labels: Query<&mut Text, With<MarkerLabel>>,
@@ -863,32 +853,53 @@ fn update_missile_markers(
             continue;
         };
         let pos = gt.translation();
-        let (threat, hostile, dist) = match player {
-            Some((me, t, team)) => (
-                missile.target == Some(me),
-                missile.team != *team,
-                pos.distance(t.translation),
-            ),
-            None => (false, true, f32::MAX),
+        let (threat, hostile, dist, tti) = match player {
+            Some((me, t, team, state)) => {
+                let (dist, tti) = time_to_impact(pos, missile.velocity, t.translation, state.velocity);
+                (missile.target == Some(me), missile.team != *team, dist, tti)
+            }
+            None => (false, true, f32::MAX, f32::INFINITY),
         };
-        // our own missiles don't need markers; distant hostile ones neither
-        let screen = in_front(cam_gt, pos)
-            .then(|| camera.world_to_viewport(cam_gt, pos).ok())
-            .flatten();
-        let (Some(screen), true) = (screen, hostile && (threat || dist < 5_000.0)) else {
+        if !hostile || !(threat || dist < 5_000.0) {
             node.display = Display::None;
             continue;
+        }
+        let viewport = camera.logical_viewport_size().unwrap_or(Vec2::new(1280.0, 720.0));
+        let on_screen = in_front(cam_gt, pos)
+            .then(|| camera.world_to_viewport(cam_gt, pos).ok())
+            .flatten()
+            .filter(|s| s.x > 0.0 && s.y > 0.0 && s.x < viewport.x && s.y < viewport.y);
+        let screen = match (on_screen, threat) {
+            (Some(s), _) => s,
+            // missiles chasing you are usually behind: pin them to the screen edge
+            (None, true) => {
+                let rel = cam_gt.affine().inverse().transform_point3(pos);
+                let dir = Vec2::new(rel.x, -rel.y).normalize_or(Vec2::Y);
+                viewport / 2.0 + dir * (viewport.min_element() * 0.44)
+            }
+            (None, false) => {
+                node.display = Display::None;
+                continue;
+            }
         };
-        let size = if threat { 18.0 } else { 11.0 };
-        node.display = if threat && !blink && dist < 1_500.0 { Display::None } else { Display::Flex };
+        let in_window = (BREAK_WINDOW.0..BREAK_WINDOW.1).contains(&tti);
+        let size = if threat { 22.0 } else { 11.0 };
+        node.display = if threat && in_window && !blink { Display::None } else { Display::Flex };
         node.width = px(size);
         node.height = px(size);
         node.left = px(screen.x - size / 2.0);
         node.top = px(screen.y - size / 2.0);
-        *border = BorderColor::all(if threat { HOSTILE } else { WARNING.with_alpha(0.7) });
+        node.border = UiRect::all(px(if threat { 3.0 } else { 2.0 }));
+        *border = BorderColor::all(if threat { INCOMING } else { WARNING.with_alpha(0.7) });
         for child in children.iter() {
             if let Ok(mut label) = labels.get_mut(child) {
-                let value = if threat { format!("MSL {:.1}", dist / 1000.0) } else { String::new() };
+                let value = if threat && tti.is_finite() {
+                    format!("{:.1} km {:.1}s", dist / 1000.0, tti)
+                } else if threat {
+                    format!("{:.1} km", dist / 1000.0)
+                } else {
+                    String::new()
+                };
                 if label.0 != value {
                     label.0 = value;
                 }

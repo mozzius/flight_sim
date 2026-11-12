@@ -61,7 +61,8 @@ impl Plugin for DevPlugin {
 fn auto_screenshot(
     mut commands: Commands,
     target: Option<Res<HeadlessTarget>>,
-    time: Res<Time>,
+    // real time: game time stops while paused
+    time: Res<Time<Real>>,
     mut state: ResMut<AutoScreenshot>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -135,7 +136,7 @@ fn force_afterburner(mut player: Query<&mut crate::flight::ControlInput, With<cr
 }
 
 fn fx_test_explosion(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     shot: Option<Res<AutoScreenshot>>,
     player: Query<&Transform, With<crate::game::Player>>,
     mut explosions: MessageWriter<crate::game::Explosion>,

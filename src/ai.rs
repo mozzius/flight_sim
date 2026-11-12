@@ -182,19 +182,28 @@ fn ai_pilots(
             // climb away, keeping heading
             let flat = Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z);
             (flat + Vec3::Y * 1.2).normalize()
-        } else if let Some((mpos, _)) = incoming.filter(|(mp, _)| mp.distance(pos) < 4_500.0) {
+        } else if let Some((mpos, mvel)) = incoming.filter(|(mp, _)| mp.distance(pos) < 4_500.0) {
             pilot.mode = Mode::Evade;
             afterburner = true;
             aggression = 1.0;
             let to_missile = (mpos - pos).normalize_or_zero();
+            let closing = (mvel - state.velocity).dot(-to_missile).max(1.0);
+            let tti = mpos.distance(pos) / closing;
             if mpos.distance(pos) < 1_800.0 && rng.random_bool((dt * 4.0 * pilot.skill) as f64) {
                 weapons.drop_flares = true;
             }
-            // beam the missile: fly perpendicular to it, and down if there's room
             let side = to_missile.cross(Vec3::Y).normalize_or(Vec3::X);
             let side = if side.dot(fwd) > 0.0 { side } else { -side };
-            let dive = if clearance > 900.0 { -0.35 } else { 0.15 };
-            (side + Vec3::Y * dive).normalize()
+            // good pilots time a hard break for the last couple of seconds;
+            // until then, beam it (and dive if there's room)
+            let break_at = 1.2 + 1.3 * pilot.skill;
+            if tti < break_at {
+                aggression = 1.2;
+                (side + Vec3::Y * if clearance > 700.0 { -0.2 } else { 0.4 }).normalize()
+            } else {
+                let dive = if clearance > 900.0 { -0.35 } else { 0.15 };
+                (side * 0.8 + fwd * 0.2 + Vec3::Y * dive).normalize()
+            }
         } else if let Some(threat) = tail_threat {
             pilot.mode = Mode::Defend;
             afterburner = speed < 260.0;
@@ -253,9 +262,13 @@ fn ai_pilots(
             }
 
             // missiles: when locked and in a sensible envelope
+            // missile range depends on aspect: a tail chase needs to be close,
+            // a head-on shot works from much further out
+            let head_on = (-target.vel.normalize_or_zero().dot(to / dist.max(1.0))).clamp(0.0, 1.0);
+            let max_range = (2_500.0 + 2_500.0 * head_on).min(LOCK_RANGE * 0.9);
             if targeting.locked()
                 && pilot.missile_cooldown <= 0.0
-                && (700.0..LOCK_RANGE * 0.85).contains(&dist)
+                && (900.0..max_range).contains(&dist)
             {
                 weapons.fire_missile = true;
                 pilot.missile_cooldown = rng.random_range(7.0..14.0) / pilot.skill;
