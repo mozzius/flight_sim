@@ -48,7 +48,7 @@ struct Clouds {
     frame: u32,
     history_valid: u32,
     temporal_blend: f32,
-    _pad: f32,
+    fade_start: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Clouds;
@@ -159,7 +159,7 @@ fn sample_weather(p: vec3<f32>) -> vec2<f32> {
 /// (type 0) stops low, cumulus (type 1) towers to the top of the layer.
 fn height_gradient(h: f32, cloud_type: f32) -> f32 {
     let top = mix(0.28, 1.0, cloud_type);
-    return smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(top * 0.5, top, h));
+    return smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(top * 0.65, top, h));
 }
 
 /// `detail` is how much erosion to apply (0 = none); it is faded out with
@@ -190,7 +190,7 @@ fn density(p: vec3<f32>, h: f32, w: vec2<f32>, detail: f32) -> f32 {
         let dfbm = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
         // wispy near the base, billowy higher up
         let dmod = mix(dfbm, 1.0 - dfbm, saturate(h * 6.0));
-        d = remap(d, dmod * 0.4 * detail, 1.0, 0.0, 1.0);
+        d = remap(d, dmod * 0.42 * detail, 1.0, 0.0, 1.0);
     }
     return saturate(d);
 }
@@ -264,8 +264,8 @@ fn sun_optical_depth(p: vec3<f32>, jitter: f32, detail: f32) -> f32 {
     var tau = 0.0;
     var t = 0.0;
     var step = thickness * 0.03;
-    for (var i = 0; i < 5; i++) {
-        t += step * (0.4 + 0.6 * jitter + f32(i) * 0.4);
+    for (var i = 0; i < 4; i++) {
+        t += step * (0.4 + 0.6 * jitter + f32(i) * 0.5);
         let sp = p + u.sun_dir * t;
         let h = height_frac(sp);
         if h > 1.0 || h < 0.0 {
@@ -273,8 +273,8 @@ fn sun_optical_depth(p: vec3<f32>, jitter: f32, detail: f32) -> f32 {
         }
         let w = sample_weather(sp);
         let d = density(sp, h, w, select(0.0, detail, i < 2));
-        tau += d * u.extinction * step * (1.0 + f32(i) * 0.4);
-        step *= 1.25;
+        tau += d * u.extinction * step * (1.0 + f32(i) * 0.5);
+        step *= 1.3;
     }
     let far = p + u.sun_dir * thickness * 0.75;
     let hf = height_frac(far);
@@ -366,7 +366,7 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
     var empty_run = 0;
     var i = 0u;
     loop {
-        if i >= u.max_steps || t >= span.y || transmittance < 0.01 {
+        if i >= u.max_steps || t >= span.y || transmittance < 0.02 {
             break;
         }
         i += 1u;
@@ -417,14 +417,20 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
         t += ds;
     }
 
+    // the march stops at 2% transmittance; treat that as opaque, otherwise
+    // the sun disc (tens of thousands of times brighter than cloud) still
+    // burns through thick cloud
+    transmittance = saturate((transmittance - 0.02) / 0.98);
     var alpha = 1.0 - transmittance;
     if alpha <= 0.0005 {
         return out;
     }
     let mean_dist = dist_sum / max(weight_sum, 1e-5);
     // aerial perspective: distant clouds dissolve into the sky behind them,
-    // and are fully gone before the march limit so the layer has no edge
-    let fade = exp(-mean_dist / u.fade_distance)
+    // and are fully gone before the march limit so the layer has no edge.
+    // Nothing within fade_start is touched, so nearby cloud stays fully
+    // opaque (the sun disc would show through even a few percent).
+    let fade = exp(-max(mean_dist - u.fade_start, 0.0) / u.fade_distance)
         * (1.0 - smoothstep(0.7 * u.max_distance, u.max_distance, mean_dist));
     radiance *= u.exposure * fade;
     alpha *= fade;
@@ -546,6 +552,12 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
         if e10 < best { best = e10; color = k10; }
         if e01 < best { best = e01; color = k01; }
         if e11 < best { best = e11; color = k11; }
+    }
+
+    // the bilinear and temporal blends leave a sliver of transmittance on
+    // solid cloud; the sun disc is bright enough to shine through even that
+    if color.a > 0.995 {
+        color.a = 1.0;
     }
 
     if u.debug == 1u {

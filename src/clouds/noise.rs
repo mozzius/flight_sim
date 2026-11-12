@@ -213,9 +213,15 @@ pub fn remap(v: f32, lo: f32, hi: f32, nlo: f32, nhi: f32) -> f32 {
 
 /// Runs `f(z)` for every slice of a volume (or row of an image) on all cores,
 /// returning the bytes in order.
-fn parallel_slices(slices: usize, bytes_per_slice: usize, f: impl Fn(usize, &mut [u8]) + Sync) -> Vec<u8> {
+fn parallel_slices(
+    slices: usize,
+    bytes_per_slice: usize,
+    f: impl Fn(usize, &mut [u8]) + Sync,
+) -> Vec<u8> {
     let mut data = vec![0u8; slices * bytes_per_slice];
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(slices);
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(slices);
     let per_thread = slices.div_ceil(threads);
     std::thread::scope(|scope| {
         for (t, chunk) in data.chunks_mut(per_thread * bytes_per_slice).enumerate() {
@@ -295,7 +301,9 @@ pub fn weather_map(size: u32, coverage_bias: f32) -> Vec<Weather> {
         }
     });
     bytes
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|c| Weather {
             coverage: f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
             cloud_type: f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
@@ -315,7 +323,7 @@ pub fn weather_at(p: Vec2, coverage_bias: f32) -> Weather {
     // tall cumulus vs flat strato-cumulus: a regional trend plus per-bank variation
     let regional = perlin2_fbm(p + Vec2::new(0.37, 0.61), 2, 2, 43);
     let local = perlin2_fbm(p + Vec2::new(0.11, 0.83), 7, 3, 44);
-    let cloud_type = smoothstep(0.3, 0.72, regional * 0.55 + local * 0.45);
+    let cloud_type = smoothstep(0.28, 0.66, regional * 0.55 + local * 0.45);
     Weather {
         coverage: coverage.clamp(0.0, 1.0),
         cloud_type: cloud_type.clamp(0.0, 1.0),

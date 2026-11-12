@@ -69,13 +69,22 @@ impl Plugin for CloudsPlugin {
     fn build(&self, app: &mut App) {
         let disabled = std::env::var("FLIGHT_SIM_NO_CLOUDS").is_ok();
         let mut settings = CloudSettings::default();
-        if let Some(div) = std::env::var("CLOUDS_DIV").ok().and_then(|s| s.parse().ok()) {
+        if let Some(div) = std::env::var("CLOUDS_DIV")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
             settings.divisor = div;
         }
-        if let Some(d) = std::env::var("CLOUDS_DEBUG").ok().and_then(|s| s.parse().ok()) {
+        if let Some(d) = std::env::var("CLOUDS_DEBUG")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
             settings.debug = d;
         }
-        if let Some(b) = std::env::var("CLOUDS_BLEND").ok().and_then(|s| s.parse().ok()) {
+        if let Some(b) = std::env::var("CLOUDS_BLEND")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
             settings.temporal_blend = b;
         }
         settings.enabled = !disabled;
@@ -169,7 +178,9 @@ pub struct CloudSettings {
     pub extinction: f32,
     /// Clouds beyond this distance aren't marched.
     pub max_distance: f32,
-    /// e-folding distance of the fade into the sky.
+    /// Clouds nearer than this are not faded at all.
+    pub fade_start: f32,
+    /// e-folding distance of the fade into the sky beyond `fade_start`.
     pub fade_distance: f32,
     /// Fudge on the single-scattering sun term (real clouds bounce a lot more
     /// light around than three octaves capture).
@@ -209,22 +220,23 @@ impl Default for CloudSettings {
             base_scale: 6_000.0,
             detail_scale: 700.0,
             coverage_bias: 0.0,
-            extinction: 0.05,
-            max_distance: 70_000.0,
-            fade_distance: 30_000.0,
+            extinction: 0.07,
+            max_distance: 60_000.0,
+            fade_start: 6_000.0,
+            fade_distance: 22_000.0,
             sun_mult: 1.3,
             ambient_mult: 0.85,
             ms_albedo: 0.3,
-            detail_fade_start: 8_000.0,
-            detail_fade_end: 20_000.0,
+            detail_fade_start: 10_000.0,
+            detail_fade_end: 30_000.0,
             ambient_top: Vec3::new(0.55, 0.7, 1.0) * 6_500.0,
-            ambient_bottom: Vec3::new(0.75, 0.75, 0.78) * 6_500.0,
+            ambient_bottom: Vec3::new(0.62, 0.68, 0.82) * 6_500.0,
             sun_tint: Vec3::new(1.0, 0.95, 0.88),
             wind: Vec2::new(6.0, 2.0),
             divisor: 4,
-            max_steps: 160,
+            max_steps: 128,
             step_min: 32.0,
-            step_scale: 0.02,
+            step_scale: 0.025,
             temporal_blend: 0.12,
             debug: 0,
         }
@@ -324,7 +336,7 @@ impl CloudField {
 #[allow(dead_code)] // used by CloudField
 fn height_gradient(h: f32, cloud_type: f32) -> f32 {
     let top = 0.28 + (1.0 - 0.28) * cloud_type;
-    noise::smoothstep(0.0, 0.08, h) * (1.0 - noise::smoothstep(top * 0.5, top, h))
+    noise::smoothstep(0.0, 0.08, h) * (1.0 - noise::smoothstep(top * 0.65, top, h))
 }
 
 fn update_field_time(time: Res<Time>, mut field: ResMut<CloudField>) {
@@ -335,6 +347,7 @@ fn update_field_time(time: Res<Time>, mut field: ResMut<CloudField>) {
 #[derive(Component)]
 struct CloudsCamera;
 
+#[allow(clippy::type_complexity)]
 fn mark_camera(
     mut commands: Commands,
     mut cameras: Query<(Entity, &mut Camera3d), (Added<MainCamera>, Without<CloudsCamera>)>,
@@ -359,6 +372,7 @@ fn debug_camera(
     mut camera: Query<(&mut Transform, &mut GlobalTransform), With<MainCamera>>,
     settings: Res<CloudSettings>,
     field: Res<CloudField>,
+    terrain: Res<crate::world::Terrain>,
     mut preset: Local<Option<Option<String>>>,
 ) {
     let preset = preset.get_or_insert_with(|| std::env::var("CLOUDS_DEBUG_CAM").ok());
@@ -369,15 +383,20 @@ fn debug_camera(
     let sun = Vec3::new(4.0, 10.0, 10.0).normalize();
     // for the sun shot, find a spot with thick cloud between the camera and the sun
     let sun_spot = || {
-        let eye = 1_000.0;
-        let t = ((bottom + top) * 0.5 - eye) / sun.y;
-        let mut best = (0.0, Vec3::new(0.0, eye, 0.0));
+        let mut best = (0.0, Vec3::new(0.0, 1_000.0, 0.0));
         for ix in -25..=25 {
             for iz in -25..=25 {
-                let cam = Vec3::new(ix as f32 * 1_000.0, eye, iz as f32 * 1_000.0);
+                let (x, z) = (ix as f32 * 1_000.0, iz as f32 * 1_000.0);
+                // low ground only, so the camera sits well clear of the mountains
+                let ground = terrain.height_at(x, z);
+                if ground > 600.0 {
+                    continue;
+                }
+                let eye = ground + 500.0;
+                let t = ((bottom + top) * 0.5 - eye) / sun.y;
+                let cam = Vec3::new(x, eye, z);
                 let p = cam + sun * t;
-                let score = field.coverage_at(p.x, p.z)
-                    - 0.5 * field.coverage_at(cam.x, cam.z).max(0.0);
+                let score = field.coverage_at(p.x, p.z) - 0.5 * field.coverage_at(x, z);
                 if score > best.0 {
                     best = (score, cam);
                 }
@@ -390,10 +409,22 @@ fn debug_camera(
             Vec3::new(0.0, top + 1_200.0, 0.0),
             Vec3::new(0.3, -0.28, 0.9).normalize(),
         ),
-        "inside" => (
-            Vec3::new(0.0, (bottom + top) * 0.5, 0.0),
-            Vec3::new(0.2, 0.05, 1.0).normalize(),
-        ),
+        "inside" => {
+            // in the layer at the edge of a bank, looking into its wall
+            let mut best = (0.0, Vec3::new(0.0, bottom + 500.0, 0.0));
+            for ix in -25..=25 {
+                for iz in -25..=25 {
+                    let (x, z) = (ix as f32 * 1_000.0, iz as f32 * 1_000.0);
+                    let here = field.coverage_at(x, z);
+                    let ahead = field.coverage_at(x, z - 2_500.0);
+                    let score = ahead - here - (here - 0.35).abs();
+                    if score > best.0 {
+                        best = (score, Vec3::new(x, bottom + 500.0, z));
+                    }
+                }
+            }
+            (best.1, Vec3::new(0.0, 0.08, -1.0).normalize())
+        }
         "below" => (
             Vec3::new(0.0, 900.0, 0.0),
             Vec3::new(0.0, 0.55, -1.0).normalize(),
@@ -506,7 +537,7 @@ struct CloudsUniform {
     frame: u32,
     history_valid: u32,
     temporal_blend: f32,
-    _pad: f32,
+    fade_start: f32,
 }
 
 /// The shader is embedded so the two depth-texture variants can be stamped
@@ -531,10 +562,15 @@ struct CloudsPipelines {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum CloudsPipelineKey {
-    Linearize { msaa_samples: u32 },
+    Linearize {
+        msaa_samples: u32,
+    },
     Raymarch,
     Resolve,
-    Composite { msaa_samples: u32, target_format: TextureFormat },
+    Composite {
+        msaa_samples: u32,
+        target_format: TextureFormat,
+    },
 }
 
 fn init_clouds_pipelines(
@@ -568,7 +604,10 @@ fn init_clouds_pipelines(
                 (2, texture_3d(TextureSampleType::Float { filterable: true })),
                 (3, texture_2d(TextureSampleType::Float { filterable: true })),
                 (4, sampler(SamplerBindingType::Filtering)),
-                (6, texture_2d(TextureSampleType::Float { filterable: false })),
+                (
+                    6,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
             ),
         ),
     );
@@ -578,8 +617,14 @@ fn init_clouds_pipelines(
             ShaderStages::FRAGMENT,
             (
                 (0, uniform_buffer::<CloudsUniform>(false)),
-                (1, texture_2d(TextureSampleType::Float { filterable: false })),
-                (2, texture_2d(TextureSampleType::Float { filterable: false })),
+                (
+                    1,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
+                (
+                    2,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
                 (7, texture_2d(TextureSampleType::Float { filterable: true })),
                 (8, texture_2d(TextureSampleType::Float { filterable: true })),
                 (9, sampler(SamplerBindingType::Filtering)),
@@ -592,9 +637,18 @@ fn init_clouds_pipelines(
             ShaderStages::FRAGMENT,
             (
                 (0, uniform_buffer::<CloudsUniform>(false)),
-                (1, texture_2d(TextureSampleType::Float { filterable: false })),
-                (2, texture_2d(TextureSampleType::Float { filterable: false })),
-                (6, texture_2d(TextureSampleType::Float { filterable: false })),
+                (
+                    1,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
+                (
+                    2,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
+                (
+                    6,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
             ),
         ),
     );
@@ -852,6 +906,7 @@ struct CloudsViewBindGroups {
 
 /// Specialises both pipelines for the view and queues the composite draw as
 /// the farthest transparent item.
+#[allow(clippy::too_many_arguments)]
 fn queue_clouds(
     mut commands: Commands,
     draw_functions: Res<DrawFunctions<Transparent3d>>,
@@ -892,13 +947,11 @@ fn queue_clouds(
                 target_format: view.target_format,
             },
         );
-        commands
-            .entity(entity)
-            .insert(CloudsViewPipelines {
-                linearize,
-                raymarch,
-                resolve,
-            });
+        commands.entity(entity).insert(CloudsViewPipelines {
+            linearize,
+            raymarch,
+            resolve,
+        });
         phase.add_transient(Transparent3d {
             sorting_info: TransparentSortingInfo3d::Sorted {
                 mesh_center: Vec3::ZERO,
@@ -945,19 +998,45 @@ fn prepare_clouds_textures(
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         };
-        let dist = texture_cache.get(&device, desc("clouds_dist", TextureFormat::R32Float, full_size));
+        let dist = texture_cache.get(
+            &device,
+            desc("clouds_dist", TextureFormat::R32Float, full_size),
+        );
         let color = texture_cache.get(
             &device,
             desc("clouds_color", TextureFormat::Rgba16Float, low_size),
         );
-        let data = texture_cache.get(&device, desc("clouds_data", TextureFormat::Rg16Float, low_size));
+        let data = texture_cache.get(
+            &device,
+            desc("clouds_data", TextureFormat::Rg16Float, low_size),
+        );
         let resolved_color = [
-            texture_cache.get(&device, desc("clouds_resolved_color_a", TextureFormat::Rgba16Float, low_size)),
-            texture_cache.get(&device, desc("clouds_resolved_color_b", TextureFormat::Rgba16Float, low_size)),
+            texture_cache.get(
+                &device,
+                desc(
+                    "clouds_resolved_color_a",
+                    TextureFormat::Rgba16Float,
+                    low_size,
+                ),
+            ),
+            texture_cache.get(
+                &device,
+                desc(
+                    "clouds_resolved_color_b",
+                    TextureFormat::Rgba16Float,
+                    low_size,
+                ),
+            ),
         ];
         let resolved_data = [
-            texture_cache.get(&device, desc("clouds_resolved_data_a", TextureFormat::Rg16Float, low_size)),
-            texture_cache.get(&device, desc("clouds_resolved_data_b", TextureFormat::Rg16Float, low_size)),
+            texture_cache.get(
+                &device,
+                desc("clouds_resolved_data_a", TextureFormat::Rg16Float, low_size),
+            ),
+            texture_cache.get(
+                &device,
+                desc("clouds_resolved_data_b", TextureFormat::Rg16Float, low_size),
+            ),
         ];
         commands.entity(entity).insert(CloudsViewTextures {
             dist,
@@ -984,6 +1063,7 @@ fn prepare_clouds_textures(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn prepare_clouds_uniforms(
     mut commands: Commands,
     device: Res<RenderDevice>,
@@ -1050,7 +1130,7 @@ fn prepare_clouds_uniforms(
             frame: history.frame,
             history_valid: u32::from(history.valid),
             temporal_blend: s.temporal_blend,
-            _pad: 0.0,
+            fade_start: s.fade_start,
         };
         match existing {
             Some(mut uniform) => {
@@ -1067,6 +1147,7 @@ fn prepare_clouds_uniforms(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn prepare_clouds_bind_groups(
     mut commands: Commands,
     device: Res<RenderDevice>,
