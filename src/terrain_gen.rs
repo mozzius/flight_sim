@@ -39,7 +39,30 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
+mod roads;
+mod trees;
+
 pub struct TerrainGenPlugin;
+
+/// Trees and roads: StandardMaterial plus the valley mist (`assets/shaders/scenery.wesl`).
+pub type SceneryMaterial = ExtendedMaterial<StandardMaterial, SceneryExt>;
+
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+pub struct SceneryExt {
+    /// x: mist brightness
+    #[uniform(100)]
+    pub params: Vec4,
+}
+
+impl MaterialExtension for SceneryExt {
+    fn fragment_shader() -> bevy::shader::ShaderRef {
+        "shaders/scenery.wesl".into()
+    }
+
+    fn deferred_fragment_shader() -> bevy::shader::ShaderRef {
+        "shaders/scenery.wesl".into()
+    }
+}
 
 /// Baked macro textures plus per-pixel detail (see `assets/shaders/terrain.wesl`).
 pub type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainDetail>;
@@ -63,8 +86,13 @@ impl MaterialExtension for TerrainDetail {
 
 impl Plugin for TerrainGenPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
-            .add_systems(Startup, generate_terrain);
+        app.add_plugins((
+            MaterialPlugin::<TerrainMaterial>::default(),
+            MaterialPlugin::<SceneryMaterial>::default(),
+        ))
+        .init_resource::<trees::LoadedTrees>()
+        .add_systems(Startup, generate_terrain)
+        .add_systems(Update, trees::stream_trees);
         if let Some(cam) = std::env::var("TERRAIN_DEBUG_CAM")
             .ok()
             .and_then(|s| DebugCam::from_env(&s))
@@ -211,9 +239,13 @@ impl HeightGrid {
         let h10 = self.heights[row0 + 1];
         let h01 = self.heights[row1];
         let h11 = self.heights[row1 + 1];
-        let a = h00 + (h10 - h00) * tx;
-        let b = h01 + (h11 - h01) * tx;
-        a + (b - a) * tz
+        // Follow the mesh's triangles exactly (split along the (1,0)-(0,1) diagonal, see
+        // `build_chunk`), so things placed on the ground sit on what's rendered.
+        if tx + tz <= 1.0 {
+            h00 + (h10 - h00) * tx + (h01 - h00) * tz
+        } else {
+            h11 + (h01 - h11) * (1.0 - tx) + (h10 - h11) * (1.0 - tz)
+        }
     }
 
     #[inline]
@@ -949,11 +981,14 @@ pub(crate) fn generate_terrain(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
+    mut scenery_materials: ResMut<Assets<SceneryMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let start = Instant::now();
 
-    let near = bake_grid(NEAR_SPACING, NEAR_CELLS);
+    let mut near = bake_grid(NEAR_SPACING, NEAR_CELLS);
+    // roads level the ground under them, so they come before the meshes
+    let road_lines = roads::build_roads(&mut near);
     let fine = bake_grid(FINE_SPACING, FINE_CELLS);
     let coarse = bake_grid(COARSE_SPACING, COARSE_CELLS);
     let grids_done = start.elapsed();
@@ -1014,6 +1049,46 @@ pub(crate) fn generate_terrain(
                 chunks += 1;
             }
         }
+    }
+
+    // ---- roads and trees
+    let scenery = |depth_bias: f32, roughness: f32| SceneryMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: roughness,
+            reflectance: 0.2,
+            depth_bias,
+            ..default()
+        },
+        extension: SceneryExt { params: Vec4::new(1.0, 0.0, 0.0, 0.0) },
+    };
+    let road_material = scenery_materials.add(scenery(16.0, 0.85));
+    let road_km: f32 = road_lines
+        .iter()
+        .map(|r| r.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>())
+        .sum::<f32>()
+        / 1000.0;
+    for road in &road_lines {
+        let child = commands
+            .spawn((
+                Mesh3d(meshes.add(roads::road_mesh(road))),
+                MeshMaterial3d(road_material.clone()),
+                Transform::default(),
+                bevy::light::NotShadowCaster,
+            ))
+            .id();
+        commands.entity(root).add_child(child);
+    }
+    let road_index = roads::RoadIndex::new(&road_lines, 20.0);
+    commands.insert_resource(trees::TreeField::new(
+        road_index,
+        scenery_materials.add(scenery(0.0, 0.95)),
+        NEAR_SPACING * NEAR_CELLS as f32 * 0.5,
+    ));
+    info!("terrain: {} roads ({road_km:.0} km)", road_lines.len());
+    for road in &road_lines {
+        let mid = road[road.len() / 2];
+        debug!("road from {:.0} via {:.0} to {:.0}", road[0], mid, road[road.len() - 1]);
     }
 
     let (mut min_h, mut max_h) = (f32::MAX, f32::MIN);
