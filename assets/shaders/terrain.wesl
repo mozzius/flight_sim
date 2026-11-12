@@ -11,6 +11,7 @@
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
+    mesh_view_bindings::view,
 };
 
 @if(PREPASS_PIPELINE)
@@ -25,7 +26,7 @@ import bevy_pbr::render::{
 };
 
 struct TerrainDetail {
-    // x: normal detail strength, y: snow line (m), z: rock slope threshold, w: unused
+    // x: normal detail strength, y: snow line (m), z: rock slope threshold, w: mist brightness
     params: vec4<f32>,
 }
 
@@ -79,6 +80,25 @@ fn detail_height(p: vec2<f32>, wavelength: f32, amplitude: f32, footprint: f32) 
         basis = rot * basis;
     }
     return sum;
+}
+
+// Valley mist: exponential height fog that pools in the valleys.
+const MIST_FLOOR: f32 = 250.0;     // where it's densest (valley floors are ~200-400 m)
+const MIST_SCALE: f32 = 220.0;     // e-folding height: mostly gone ~700 m up
+const MIST_DENSITY: f32 = 0.00035; // extinction per metre at the floor
+
+/// Fraction of the view to `p` hidden by mist (integrated along the ray).
+fn valley_mist(cam: vec3<f32>, p: vec3<f32>) -> f32 {
+    let d = distance(cam, p);
+    let k = (p.y - cam.y) / max(d, 1.0); // vertical component of the view ray
+    let at_cam = exp(-(cam.y - MIST_FLOOR) / MIST_SCALE);
+    var depth: f32;
+    if (abs(k) < 1e-3) {
+        depth = MIST_DENSITY * at_cam * d;
+    } else {
+        depth = MIST_DENSITY * at_cam * MIST_SCALE / k * (1.0 - exp(-k * d / MIST_SCALE));
+    }
+    return clamp(1.0 - exp(-depth), 0.0, 0.85);
 }
 
 fn smoothstep1(a: f32, b: f32, x: f32) -> f32 {
@@ -148,6 +168,14 @@ fn fragment(
     out = deferred_output(in, pbr_input);
 } @else {
     out.color = apply_pbr_lighting(pbr_input);
+    // mist settles in the valleys; lit a soft blue-white, brighter toward the sun
+    let cam = view.world_position;
+    let mist = valley_mist(cam, pos);
+    let to_frag = normalize(pos - cam);
+    let sun_dir = normalize(vec3<f32>(4.0, 10.0, 10.0));
+    let toward_sun = pow(max(dot(to_frag, -sun_dir) * -1.0, 0.0), 6.0);
+    let mist_col = vec3<f32>(0.62, 0.68, 0.76) * (1.0 + 0.6 * toward_sun) * terrain.params.w;
+    out.color = vec4<f32>(mix(out.color.rgb, mist_col, mist), out.color.a);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 }
     return out;

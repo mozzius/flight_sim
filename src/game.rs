@@ -20,6 +20,7 @@ impl Plugin for GamePlugin {
             .init_resource::<RespawnQueue>()
             .add_message::<Explosion>()
             .add_message::<AircraftDestroyed>()
+            .add_message::<PlayerKill>()
             .add_systems(Startup, load_models)
             .add_systems(PostStartup, initial_spawn)
             .add_systems(
@@ -63,6 +64,13 @@ impl Health {
 pub struct Explosion {
     pub position: Vec3,
     pub size: f32,
+}
+
+/// The player got a kill (drives the HUD banner and the kill chime).
+#[derive(Message, Clone, Copy)]
+pub struct PlayerKill {
+    pub total: u32,
+    pub friendly: bool,
 }
 
 /// An aircraft was shot down (it still falls until it hits the ground).
@@ -227,6 +235,7 @@ fn handle_crashes(
     mut queue: ResMut<RespawnQueue>,
     aircraft: Query<(&Team, Has<Player>, Has<Disabled>, &Health)>,
     players: Query<(), With<Player>>,
+    mut kills: MessageWriter<PlayerKill>,
 ) {
     // kills and deaths are counted when a plane is shot down
     for d in destroyed_reader.read() {
@@ -242,6 +251,10 @@ fn handle_crashes(
                 if *team == Team::Red { "TARGET DESTROYED" } else { "FRIENDLY FIRE!" }.into(),
                 2.5,
             ));
+            kills.write(PlayerKill {
+                total: score.kills,
+                friendly: *team != Team::Red,
+            });
         }
     }
 
@@ -265,6 +278,10 @@ fn handle_crashes(
             // chased into the ground counts
             score.kills += 1;
             score.last_event = Some(("TARGET DESTROYED".into(), 2.5));
+            kills.write(PlayerKill {
+                total: score.kills,
+                friendly: *team != Team::Red,
+            });
         }
         commands.entity(crash.entity).despawn();
         if is_player {

@@ -40,6 +40,12 @@ const MISSILE_DAMAGE: f32 = 95.0;
 /// How far off its nose the seeker can look before it loses the target.
 const SEEKER_GIMBAL: f32 = 0.87; // ~50 degrees
 
+pub const MAX_MISSILES: u32 = 6;
+const MAX_FLARES: u32 = 40;
+/// Seconds to regenerate one missile / one flare salvo's worth.
+pub const MISSILE_RELOAD_TIME: f32 = 12.0;
+const FLARE_RELOAD_TIME: f32 = 2.5;
+
 pub const LOCK_CONE: f32 = 0.6; // radians off the nose (~34°)
 pub const LOCK_RANGE: f32 = 5_500.0;
 const LOCK_TIME: f32 = 1.2;
@@ -48,7 +54,8 @@ pub struct WeaponsPlugin;
 
 impl Plugin for WeaponsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_assets)
+        app.add_message::<HitConfirmed>()
+            .add_systems(Startup, setup_assets)
             .add_systems(
                 FixedUpdate,
                 (
@@ -65,12 +72,21 @@ impl Plugin for WeaponsPlugin {
     }
 }
 
+/// Someone's bullet or missile hurt an aircraft (for the hit marker).
+#[derive(Message, Clone, Copy)]
+pub struct HitConfirmed {
+    pub attacker: Entity,
+}
+
 /// Weapon loadout and the pilot's intents for this tick.
 #[derive(Component)]
 pub struct Weapons {
     pub gun_ammo: u32,
     pub missiles: u32,
     pub flares: u32,
+    /// Progress (0..1) toward the next missile being reloaded.
+    pub missile_reload: f32,
+    flare_reload: f32,
     gun_cooldown: f32,
     missile_cooldown: f32,
     flare_cooldown: f32,
@@ -86,8 +102,10 @@ impl Weapons {
     pub fn fighter() -> Self {
         Weapons {
             gun_ammo: 600,
-            missiles: 6,
-            flares: 40,
+            missiles: MAX_MISSILES,
+            flares: MAX_FLARES,
+            missile_reload: 0.0,
+            flare_reload: 0.0,
             gun_cooldown: 0.0,
             missile_cooldown: 0.0,
             flare_cooldown: 0.0,
@@ -315,6 +333,23 @@ fn fire_weapons(
         weapons.gun_cooldown -= dt;
         weapons.missile_cooldown -= dt;
         weapons.flare_cooldown -= dt;
+        // missiles and flares regenerate over time
+        if weapons.missiles < MAX_MISSILES {
+            weapons.missile_reload += dt / MISSILE_RELOAD_TIME;
+            if weapons.missile_reload >= 1.0 {
+                weapons.missile_reload = 0.0;
+                weapons.missiles += 1;
+            }
+        } else {
+            weapons.missile_reload = 0.0;
+        }
+        if weapons.flares < MAX_FLARES {
+            weapons.flare_reload += dt / FLARE_RELOAD_TIME;
+            if weapons.flare_reload >= 1.0 {
+                weapons.flare_reload = 0.0;
+                weapons.flares += 1;
+            }
+        }
         if disabled {
             continue;
         }
@@ -444,6 +479,7 @@ fn move_bullets(
     mut bullets: Query<(Entity, &mut Bullet, &mut Transform), Without<Aircraft>>,
     mut aircraft: Query<(Entity, &Transform, &Aircraft, &Team, &mut Health)>,
     mut explosions: MessageWriter<Explosion>,
+    mut hits: MessageWriter<HitConfirmed>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut bullet, mut transform) in &mut bullets {
@@ -460,6 +496,7 @@ fn move_bullets(
             if segment_sphere_distance(from, to, t.translation) < ac.radius {
                 health.current -= BULLET_DAMAGE;
                 health.last_attacker = Some(bullet.owner);
+                hits.write(HitConfirmed { attacker: bullet.owner });
                 explosions.write(Explosion {
                     position: t.translation + (from - t.translation).normalize_or_zero() * 3.0,
                     size: 1.5,
@@ -499,6 +536,7 @@ fn guide_missiles(
     mut aircraft: Query<(Entity, &Transform, &FlightState, &Team, &mut Health), With<Aircraft>>,
     flares: Query<(&Transform, &Flare), (Without<Missile>, Without<Aircraft>)>,
     mut explosions: MessageWriter<Explosion>,
+    mut hits: MessageWriter<HitConfirmed>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut missile, mut transform) in &mut missiles {
@@ -543,6 +581,7 @@ fn guide_missiles(
                 if d < MISSILE_FUSE * 1.5 {
                     health.current -= MISSILE_DAMAGE * (1.0 - d / (MISSILE_FUSE * 2.0)).max(0.3);
                     health.last_attacker = Some(missile.owner);
+                    hits.write(HitConfirmed { attacker: missile.owner });
                 }
             }
             explosions.write(Explosion {

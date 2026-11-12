@@ -55,6 +55,18 @@ fn spawn_camera(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         Tonemapping::AcesFitted,
         Bloom::NATURAL,
         Transform::from_xyz(0.0, 1510.0, 6030.0),
+        // distance haze on top of the atmosphere's aerial perspective: far ridges
+        // fade into blue-grey
+        bevy::pbr::DistanceFog {
+            color: Color::srgb(0.55, 0.64, 0.76),
+            directional_light_color: Color::srgba(1.0, 0.92, 0.78, 0.6),
+            directional_light_exponent: 24.0,
+            falloff: bevy::pbr::FogFalloff::from_visibility_colors(
+                55_000.0,
+                Color::srgb(0.4, 0.5, 0.62),
+                Color::srgb(0.7, 0.77, 0.86),
+            ),
+        },
         // the HUD draws onto whatever this camera renders to (window or offscreen image)
         bevy::ui::IsDefaultUiCamera,
     ));

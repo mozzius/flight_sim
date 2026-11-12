@@ -46,6 +46,7 @@ impl Plugin for AudioFxPlugin {
                     remote_loops,
                     one_shots,
                     play_delayed,
+                    feedback_sounds,
                 ),
             );
     }
@@ -67,6 +68,8 @@ struct Sounds {
     lock: Handle<AudioSource>,
     warning: Handle<AudioSource>,
     stall: Handle<AudioSource>,
+    hit_tick: Handle<AudioSource>,
+    kill_chime: Handle<AudioSource>,
 }
 
 // ---------------------------------------------------------------- synthesis
@@ -364,6 +367,31 @@ fn synth_stall() -> Vec<f32> {
     finish(s, 0.5, None)
 }
 
+/// Confirmation tick when your rounds land.
+fn synth_hit_tick() -> Vec<f32> {
+    let s = (0..samples(0.06))
+        .map(|i| {
+            let t = t_of(i);
+            ((t * TAU * 2_600.0).sin() * 0.7 + (t * TAU * 5_200.0).sin() * 0.3) * (-t * 70.0).exp()
+        })
+        .collect();
+    finish(s, 0.5, None)
+}
+
+/// Kill confirmed: two quick rising tones.
+fn synth_kill_chime() -> Vec<f32> {
+    let s = (0..samples(0.45))
+        .map(|i| {
+            let t = t_of(i);
+            let (f, t0) = if t < 0.12 { (880.0, 0.0) } else { (1_320.0, 0.12) };
+            let local = t - t0;
+            let env = (local / 0.01).min(1.0) * (-local * 9.0).exp();
+            ((t * TAU * f).sin() * 0.8 + (t * TAU * f * 2.0).sin() * 0.2) * env
+        })
+        .collect();
+    finish(s, 0.5, None)
+}
+
 fn synthesise(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) {
     let start = std::time::Instant::now();
     let mut add = |s: Vec<f32>| sources.add(wav(&s));
@@ -382,6 +410,8 @@ fn synthesise(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
         lock: add(synth_lock()),
         warning: add(synth_warning()),
         stall: add(synth_stall()),
+        hit_tick: add(synth_hit_tick()),
+        kill_chime: add(synth_kill_chime()),
     });
     info!("synthesised sounds in {:.0?}", start.elapsed());
 }
@@ -723,4 +753,42 @@ fn play_delayed(
         ));
         false
     });
+}
+
+/// Hit ticks and the kill chime (cockpit sounds, not spatial).
+fn feedback_sounds(
+    mut commands: Commands,
+    sounds: Res<Sounds>,
+    muted: Res<Muted>,
+    mut hits: MessageReader<crate::weapons::HitConfirmed>,
+    mut kills: MessageReader<crate::game::PlayerKill>,
+    player: Query<Entity, With<Player>>,
+    time: Res<Time>,
+    mut tick_cooldown: Local<f32>,
+) {
+    *tick_cooldown -= time.delta_secs();
+    let me = player.single().ok();
+    let hit = hits.read().any(|h| Some(h.attacker) == me);
+    let killed = kills.read().count() > 0;
+    if muted.0 {
+        return;
+    }
+    let mut play = |handle: &Handle<AudioSource>, volume: f32| {
+        commands.spawn((
+            AudioPlayer(handle.clone()),
+            PlaybackSettings {
+                mode: PlaybackMode::Despawn,
+                volume: Volume::Linear(volume),
+                ..default()
+            },
+        ));
+    };
+    // rate-limit ticks so a long burst doesn't machine-gun them
+    if hit && *tick_cooldown <= 0.0 {
+        *tick_cooldown = 0.07;
+        play(&sounds.hit_tick, 0.35);
+    }
+    if killed {
+        play(&sounds.kill_chime, 0.45);
+    }
 }

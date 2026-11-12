@@ -46,7 +46,7 @@ pub type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainDetail>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct TerrainDetail {
-    /// x: normal detail strength, y: snow line (m), z: rock slope threshold
+    /// x: normal detail strength, y: snow line (m), z: rock slope threshold, w: mist brightness
     #[uniform(100)]
     pub params: Vec4,
 }
@@ -973,7 +973,7 @@ pub(crate) fn generate_terrain(
             },
             extension: TerrainDetail {
                 // normal detail strength, snow line (m), rock slope threshold
-                params: Vec4::new(1.0, 2350.0, 0.36, 0.0),
+                params: Vec4::new(1.0, 2350.0, 0.36, 1.0),
             },
         });
 

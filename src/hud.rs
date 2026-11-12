@@ -54,6 +54,8 @@ impl Plugin for HUDPlugin {
                     target_panel,
                     spawn_missile_markers,
                     update_missile_markers,
+                    kill_banner,
+                    hit_marker,
                 )
                     .chain()
                     .after(TransformSystems::Propagate),
@@ -269,6 +271,37 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         Node { display: Display::None, ..abs_node(px(0), px(0), Val::Auto, Val::Auto) },
         GunCue::Shoot,
     ));
+    // kill banner, above centre
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: percent(24),
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: px(2),
+                display: Display::None,
+                ..default()
+            },
+            KillBanner,
+        ))
+        .with_children(|p| {
+            p.spawn((Text::new("SPLASH"), text(&font, 44.0, HUD_GREEN), shadow(), KillBannerText::Title));
+            p.spawn((Text::new(""), text(&font, 18.0, HUD_GREEN), shadow(), KillBannerText::Detail));
+        });
+    // hit marker: four short ticks around the boresight
+    commands
+        .spawn((
+            Node { display: Display::None, ..abs_node(px(0), px(0), px(40), px(40)) },
+            UiTransform::from_rotation(Rot2::degrees(45.0)),
+            HitMarker,
+        ))
+        .with_children(|p| {
+            for (l, t, w, h) in [(0.0, 19.0, 12.0, 2.0), (28.0, 19.0, 12.0, 2.0), (19.0, 0.0, 2.0, 12.0), (19.0, 28.0, 2.0, 12.0)] {
+                p.spawn((abs_node(px(l), px(t), px(w), px(h)), BackgroundColor(Color::WHITE)));
+            }
+        });
     // target info, bottom right
     commands.spawn((
         Text::new(""),
@@ -537,10 +570,19 @@ fn update_readouts(
                 };
                 format!("THR {:>3.0}%{extra}", s.spool * 100.0)
             }
-            (Readout::Weapons, Some((_, _, w, ..))) => format!(
-                "GUN {:>3}   MSL {}   FLR {}",
-                w.gun_ammo, w.missiles, w.flares
-            ),
+            (Readout::Weapons, Some((_, _, w, ..))) => {
+                // reload progress for the next missile as a little bar
+                let reload = if w.missiles < crate::weapons::MAX_MISSILES {
+                    let filled = (w.missile_reload * 5.0).floor() as usize;
+                    format!(" [{}{}]", "=".repeat(filled), " ".repeat(5 - filled))
+                } else {
+                    String::new()
+                };
+                format!(
+                    "GUN {:>3}   MSL {}{reload}   FLR {}",
+                    w.gun_ammo, w.missiles, w.flares
+                )
+            }
             (Readout::Health, Some((_, _, _, h, _))) => {
                 let frac = (h.current / h.max).clamp(0.0, 1.0);
                 let bars = (frac * 20.0).round() as usize;
@@ -905,5 +947,88 @@ fn update_missile_markers(
                 }
             }
         }
+    }
+}
+
+#[derive(Component)]
+struct KillBanner;
+
+#[derive(Component, PartialEq, Eq)]
+enum KillBannerText {
+    Title,
+    Detail,
+}
+
+#[derive(Component)]
+struct HitMarker;
+
+const KILL_BANNER_TIME: f32 = 2.5;
+
+/// "SPLASH" when the player gets a kill: pops in big, settles, fades out.
+fn kill_banner(
+    time: Res<Time>,
+    mut kills: MessageReader<crate::game::PlayerKill>,
+    mut banner: Query<(&mut Node, &mut UiTransform), With<KillBanner>>,
+    mut texts: Query<(&KillBannerText, &mut Text, &mut TextColor)>,
+    mut timer: Local<f32>,
+) {
+    if let Some(kill) = kills.read().last() {
+        *timer = KILL_BANNER_TIME;
+        for (kind, mut text, _) in &mut texts {
+            text.0 = match (kind, kill.friendly) {
+                (KillBannerText::Title, false) => "SPLASH".into(),
+                (KillBannerText::Title, true) => "FRIENDLY FIRE".into(),
+                (KillBannerText::Detail, _) => format!("KILL {}", kill.total),
+            };
+        }
+    }
+    *timer = (*timer - time.delta_secs()).max(0.0);
+    let Ok((mut node, mut transform)) = banner.single_mut() else {
+        return;
+    };
+    if *timer <= 0.0 {
+        node.display = Display::None;
+        return;
+    }
+    node.display = Display::Flex;
+    let age = KILL_BANNER_TIME - *timer;
+    // quick pop: 1.4x shrinking to 1x over 0.15 s
+    transform.scale = Vec2::splat(1.0 + 0.4 * (1.0 - (age / 0.15).min(1.0)));
+    let alpha = (*timer / 0.6).min(1.0);
+    for (kind, _, mut color) in &mut texts {
+        let base = if *kind == KillBannerText::Title { HUD_GREEN } else { HUD_GREEN.with_alpha(0.85) };
+        color.0 = base.with_alpha(base.alpha() * alpha);
+    }
+}
+
+/// Brief X around the boresight whenever the player's bullets or missiles hit.
+fn hit_marker(
+    time: Res<Time>,
+    mut hits: MessageReader<crate::weapons::HitConfirmed>,
+    camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    player: Query<(Entity, &Transform), With<Player>>,
+    mut marker: Query<&mut Node, With<HitMarker>>,
+    mut timer: Local<f32>,
+) {
+    let player = player.single().ok();
+    if hits.read().any(|h| Some(h.attacker) == player.map(|(e, _)| e)) {
+        *timer = 0.18;
+    }
+    *timer = (*timer - time.delta_secs()).max(0.0);
+    let Ok(mut node) = marker.single_mut() else {
+        return;
+    };
+    let (Some((_, t)), Ok((camera, cam_gt)), true) = (player, camera.single(), *timer > 0.0) else {
+        node.display = Display::None;
+        return;
+    };
+    let nose = t.translation + t.forward() * 1_000.0;
+    match in_front(cam_gt, nose).then(|| camera.world_to_viewport(cam_gt, nose).ok()).flatten() {
+        Some(p) => {
+            node.display = Display::Flex;
+            node.left = px(p.x - 20.0);
+            node.top = px(p.y - 20.0);
+        }
+        None => node.display = Display::None,
     }
 }

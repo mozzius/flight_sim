@@ -48,6 +48,9 @@ impl Plugin for DevPlugin {
                     .before(crate::effects::EffectsSystems),
             );
         }
+        if std::env::var("FLIGHT_SIM_KILL_TEST").is_ok() {
+            app.add_systems(Update, kill_test);
+        }
         if std::env::var("FLIGHT_SIM_AUTOPILOT").is_ok() {
             app.add_systems(Update, autopilot_player);
         }
@@ -268,4 +271,24 @@ fn orbit_camera(
     // runs after propagation (so it wins over the chase camera): the camera
     // has no parent, so its global transform is just its transform
     *global = GlobalTransform::from(*cam);
+}
+
+/// `FLIGHT_SIM_KILL_TEST=1`: fake a hit and a kill just before the screenshot.
+fn kill_test(
+    time: Res<Time<Real>>,
+    shot: Option<Res<AutoScreenshot>>,
+    player: Query<Entity, With<crate::game::Player>>,
+    mut kills: MessageWriter<crate::game::PlayerKill>,
+    mut hits: MessageWriter<crate::weapons::HitConfirmed>,
+    mut done: Local<bool>,
+) {
+    let (Some(shot), Ok(me)) = (shot, player.single()) else { return };
+    let t = time.elapsed_secs();
+    if t > shot.after - 0.4 && !*done {
+        *done = true;
+        kills.write(crate::game::PlayerKill { total: 3, friendly: false });
+    }
+    if t > shot.after - 0.1 {
+        hits.write(crate::weapons::HitConfirmed { attacker: me });
+    }
 }
