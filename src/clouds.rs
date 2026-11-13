@@ -12,9 +12,12 @@
 //! * `CLOUDS_DIV=<n>` renders the clouds at 1/n resolution per axis.
 //! * `CLOUDS_BLEND=<0..1>` weight of the new frame in the temporal
 //!   accumulation (1 disables it).
-//! * `CLOUDS_DEBUG=1` shows cloud opacity instead of colour.
-//! * `CLOUDS_DEBUG_CAM=<above|inside|below|sun|horizon>` parks the camera at a
-//!   cloud-viewing spot (for screenshots).
+//! * `CLOUDS_DEBUG=1` shows cloud opacity instead of colour; `CLOUDS_DEBUG=2`
+//!   shows the march (red: out of steps, green: opacity, blue: steps used).
+//! * `CLOUDS_DEBUG_CAM=<above|inside|band|below|sun|horizon>` parks the camera at a
+//!   cloud-viewing spot (for screenshots); `CLOUDS_DEBUG_CAM_SPEED=<m/s>`
+//!   flies it level along its heading; `CLOUDS_DEBUG_CAM_H=<0..1>` sets the
+//!   `band` preset's height in the layer.
 //! * `CLOUDS_NOVSYNC=1` disables vsync in windowed runs, for timing.
 //!
 //! The CPU-side [`CloudField`] mirrors the coverage map and height profile so
@@ -419,15 +422,20 @@ fn debug_camera(
     field: Res<CloudField>,
     terrain: Res<crate::world::Terrain>,
     env: Res<crate::environment::Environment>,
+    time: Res<Time>,
     mut pose: Local<Option<Option<(Vec3, Vec3)>>>,
 ) {
     let pose = pose.get_or_insert_with(|| {
         let preset = std::env::var("CLOUDS_DEBUG_CAM").ok()?;
         Some(debug_pose(&preset, &settings, &field, &terrain, &env))
     });
-    let Some((pos, dir)) = *pose else {
+    let Some((mut pos, dir)) = *pose else {
         return;
     };
+    // `CLOUDS_DEBUG_CAM_SPEED=<m/s>` flies the camera level along its heading
+    if let Some(speed) = std::env::var("CLOUDS_DEBUG_CAM_SPEED").ok().and_then(|s| s.parse::<f32>().ok()) {
+        pos += Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero() * speed * time.elapsed_secs();
+    }
     for (mut transform, mut global) in &mut camera {
         *transform = Transform::from_translation(pos).looking_to(dir, Vec3::Y);
         *global = GlobalTransform::from(*transform);
@@ -487,6 +495,23 @@ fn debug_pose(
                 }
             }
             (best.1, Vec3::new(0.0, 0.08, -1.0).normalize())
+        }
+        "band" => {
+            // in a gap low in the layer (strato-cumulus tops out at about
+            // 28% of it), looking level at the far clouds
+            let frac = std::env::var("CLOUDS_DEBUG_CAM_H").ok().and_then(|s| s.parse().ok()).unwrap_or(0.15);
+            let mid = bottom + (top - bottom) * frac;
+            let mut best = (f32::MAX, Vec3::new(0.0, mid, 0.0));
+            for ix in -25..=25 {
+                for iz in -25..=25 {
+                    let (x, z) = (ix as f32 * 1_000.0, iz as f32 * 1_000.0);
+                    let score = field.coverage_at(x, z) + field.coverage_at(x, z - 1_500.0);
+                    if score < best.0 {
+                        best = (score, Vec3::new(x, mid, z));
+                    }
+                }
+            }
+            (best.1, Vec3::new(0.0, 0.02, -1.0).normalize())
         }
         "below" => (
             Vec3::new(0.0, 900.0, 0.0),

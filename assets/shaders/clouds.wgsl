@@ -361,7 +361,7 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
     var dist_sum = 0.0;
     var weight_sum = 0.0;
 
-    var t = span.x + u.step_min * jitter;
+    var t = span.x;
     var in_cloud = false;
     var empty_run = 0;
     var i = 0u;
@@ -370,24 +370,49 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
             break;
         }
         i += 1u;
-        let p = u.camera_pos + rd * t;
-        let h = saturate(height_frac(p));
-        let ds = clamp(t * u.step_scale, u.step_min, u.step_min * 24.0);
-        let w = sample_weather(p);
-        let detail = 1.0 - smoothstep(u.detail_fade_start, u.detail_fade_end, t);
+        // Steps grow with distance, but never so short that the rest of the
+        // span can't be covered with the steps left. Inside the layer a
+        // level ray stays in it for 100+ km, mostly through thin cloud that
+        // needs fine steps; without this floor the budget ran out partway and
+        // everything beyond vanished, and where that happened shifted with
+        // the wind and the camera (far clouds flickering out in stripes).
+        // Above or below the layer the spans are short and it never kicks in.
+        // The floor is geometric (each of the steps left a fixed fraction of
+        // the distance so far, just reaching the end), so nearby cloud keeps
+        // its fine steps. A few steps are held back for re-entering cloud.
+        let t_eff = max(t, u.step_min);
+        let n_left = max(f32(u.max_steps - i) - 8.0, 1.0);
+        let floor = t_eff * (pow(max(span.y / t_eff, 1.0), 1.0 / n_left) - 1.0);
+        let ds = max(clamp(t * u.step_scale, u.step_min, u.step_min * 24.0), floor);
 
         if !in_cloud {
             // coarse probe: skip empty air in big strides
-            if density(p, h, w, 0.0) > 0.0 {
+            let stride = max(ds * 4.0, floor);
+            // sample somewhere in the stride, differently every frame, so
+            // the strides don't slice far clouds into stripes
+            let ts = t + stride * jitter;
+            let p = u.camera_pos + rd * ts;
+            if ts < span.y && density(p, saturate(height_frac(p)), sample_weather(p), 0.0) > 0.0 {
+                // march this stride again in fine steps from its start, so
+                // the cloud's near edge isn't skipped by however far into
+                // the stride the probe landed
                 in_cloud = true;
                 empty_run = 0;
-                t = max(t - ds, span.x);
                 continue;
             }
-            t += ds * 4.0;
+            t += stride;
             continue;
         }
 
+        // (the last step can stick out past the scene or the layer)
+        let seg = min(ds, span.y - t);
+        let ts = t + seg * jitter;
+        let p = u.camera_pos + rd * ts;
+        let h = saturate(height_frac(p));
+        let w = sample_weather(p);
+        // erosion detail is only resolvable with steps well under its size
+        let detail = (1.0 - smoothstep(u.detail_fade_start, u.detail_fade_end, ts))
+            * (1.0 - smoothstep(0.5, 1.0, ds / u.detail_scale));
         let d = density(p, h, w, detail);
         if d <= 0.002 {
             empty_run += 1;
@@ -400,7 +425,7 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
         empty_run = 0;
 
         let sigma_t = d * u.extinction;
-        let step_t = exp(-sigma_t * ds);
+        let step_t = exp(-sigma_t * seg);
         let tau_sun = sun_optical_depth(p, jitter, detail);
         // "powder": dark creases where the sun first enters dense cloud
         let powder = 1.0 - 0.6 * exp(-sigma_t * 180.0) * saturate(cos_theta * 0.5 + 0.5);
@@ -411,7 +436,7 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
         let s_int = (s - s * step_t) / sigma_t;
         radiance += transmittance * s_int;
         let wgt = transmittance * (1.0 - step_t);
-        dist_sum += wgt * t;
+        dist_sum += wgt * ts;
         weight_sum += wgt;
         transmittance *= step_t;
         t += ds;
@@ -420,8 +445,14 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
     // the march stops at 2% transmittance; treat that as opaque, otherwise
     // the sun disc (tens of thousands of times brighter than cloud) still
     // burns through thick cloud
+    let exhausted = i >= u.max_steps && t < span.y && transmittance >= 0.02;
     transmittance = saturate((transmittance - 0.02) / 0.98);
     var alpha = 1.0 - transmittance;
+    if u.debug == 2u {
+        // red: the march ran out of steps before the end of its span
+        out.color = vec4(select(0.0, 1.0, exhausted), alpha * 0.5, f32(i) / f32(u.max_steps), 1.0);
+        return out;
+    }
     if alpha <= 0.0005 {
         return out;
     }
@@ -560,6 +591,9 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
         color.a = 1.0;
     }
 
+    if u.debug == 2u {
+        return vec4(color.rgb, 1.0);
+    }
     if u.debug == 1u {
         // visualise opacity
         return vec4(color.a, color.a, color.a, 1.0);
