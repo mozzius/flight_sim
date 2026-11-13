@@ -4,7 +4,10 @@
 //!
 //! Binary WebSocket frames, one postcard-encoded [`ClientMsg`] or
 //! [`ServerMsg`] each. The first client frame is [`ClientMsg::Hello`] with a
-//! service-auth token; then `Create` or `Join`.
+//! service-auth token. Once welcomed the connection counts as online
+//! (presence): the server pushes the player's online mutuals ([`Friend`]s)
+//! whether or not they're in a room. Then `Create` / `Join` / `Invite` put
+//! them in one, and `Leave` takes them out again (the connection stays up).
 //!
 //! Authority: each client flies its own jet and simulates its own bullets and
 //! missiles; the server relays states and events, and decides damage, kills
@@ -16,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the messages change shape.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Service-auth audience and method the server checks tokens against.
 pub const AUTH_AUDIENCE: &str = "did:web:flight.mozzius.dev";
@@ -143,6 +146,11 @@ pub enum ClientMsg {
     Respawn,
     /// Keeps the connection alive while not flying (menus, loading).
     Ping,
+    /// Out of the room, still online.
+    Leave,
+    /// Invite an online mutual (by DID) to our room. Not in one: the server
+    /// creates one on `map` first and puts us in it.
+    Invite { to: String, map: RoomMap },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -150,6 +158,25 @@ pub struct PlayerInfo {
     pub id: PlayerId,
     pub did: String,
     pub handle: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FriendStatus {
+    /// Online, not in a room (menus, single player).
+    Online,
+    InRoom,
+    /// In a room with no seat left.
+    RoomFull,
+}
+
+/// An online mutual (they follow us and we follow them on Bluesky).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Friend {
+    pub did: String,
+    pub handle: String,
+    pub display_name: Option<String>,
+    pub avatar: Option<String>,
+    pub status: FriendStatus,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +217,16 @@ pub enum ServerMsg {
     Respawned(PlayerId),
     /// (id, kills, deaths) for everyone in the room.
     Scores(Vec<(PlayerId, u16, u16)>),
+    /// Every online mutual (sent on sign-in; then updates).
+    Friends(Vec<Friend>),
+    /// A mutual came online or changed status.
+    FriendUpdate(Friend),
+    /// A mutual went offline (or isn't a mutual any more), by DID.
+    FriendGone(String),
+    /// A mutual asks us to their room.
+    Invited { from: Friend, code: String },
+    /// The invite didn't go (they're gone, or too many invites), by DID.
+    InviteFailed(String),
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> Vec<u8> {
@@ -228,6 +265,24 @@ mod tests {
             players: vec![PlayerInfo { id: 1, did: "did:dev:a".into(), handle: "a".into() }],
         };
         assert_eq!(decode::<ServerMsg>(&encode(&msg)), Some(msg));
+        let friend = Friend {
+            did: "did:plc:b".into(),
+            handle: "b.test".into(),
+            display_name: Some("Bee".into()),
+            avatar: None,
+            status: FriendStatus::InRoom,
+        };
+        for msg in [
+            ServerMsg::Friends(vec![friend.clone()]),
+            ServerMsg::FriendUpdate(friend.clone()),
+            ServerMsg::FriendGone("did:plc:b".into()),
+            ServerMsg::Invited { from: friend, code: "ABCD".into() },
+            ServerMsg::InviteFailed("did:plc:b".into()),
+        ] {
+            assert_eq!(decode::<ServerMsg>(&encode(&msg)), Some(msg));
+        }
+        let msg = ClientMsg::Invite { to: "did:plc:b".into(), map: RoomMap { seed: 1, biome: 0, time: 0, weather: 0 } };
+        assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
         assert_eq!(decode::<ServerMsg>(&[0xff, 0xff, 0xff]), None);
     }
 

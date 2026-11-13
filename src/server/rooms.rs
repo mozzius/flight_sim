@@ -119,22 +119,11 @@ impl Server {
             // (auth is done by the connection before it gets here)
             ClientMsg::Hello { .. } | ClientMsg::Ping => {}
             ClientMsg::Create { map, code } => {
-                self.leave(conn, now, &mut out);
-                if self.rooms.len() >= MAX_ROOMS {
-                    out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::Full) });
-                    return out;
-                }
-                let requested = code.map(|c| normalize_code(&c)).filter(|c| self.dev_codes && valid_code(c));
-                let code = match requested {
-                    Some(c) if !self.rooms.contains_key(&c) => c,
-                    _ => self.fresh_code(),
-                };
-                self.rooms.insert(
-                    code.clone(),
-                    Room { code: code.clone(), map, players: BTreeMap::new(), next_id: 1, empty_since: Some(now) },
-                );
-                self.join(conn, &code, now, &mut out);
+                self.create_room(conn, map, code, now, &mut out);
             }
+            ClientMsg::Leave => self.leave(conn, now, &mut out),
+            // (the hub handles invites: they need presence)
+            ClientMsg::Invite { .. } => {}
             ClientMsg::Join { code } => {
                 let code = normalize_code(&code);
                 if !self.rooms.contains_key(&code) {
@@ -153,6 +142,34 @@ impl Server {
             }
         }
         out
+    }
+
+    /// A new room on `map` with `conn` in it (leaving any room it was in).
+    /// Returns the code, or None if the server is full.
+    pub fn create_room(&mut self, conn: ConnId, map: RoomMap, code: Option<String>, now: Instant, out: &mut Vec<Out>) -> Option<String> {
+        self.leave(conn, now, out);
+        if self.rooms.len() >= MAX_ROOMS {
+            out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::Full) });
+            return None;
+        }
+        let requested = code.map(|c| normalize_code(&c)).filter(|c| self.dev_codes && valid_code(c));
+        let code = match requested {
+            Some(c) if !self.rooms.contains_key(&c) => c,
+            _ => self.fresh_code(),
+        };
+        self.rooms.insert(
+            code.clone(),
+            Room { code: code.clone(), map, players: BTreeMap::new(), next_id: 1, empty_since: Some(now) },
+        );
+        self.join(conn, &code, now, out);
+        Some(code)
+    }
+
+    /// The room a connection is in: (code, whether it's full).
+    pub fn room_of(&self, conn: ConnId) -> Option<(&str, bool)> {
+        let (code, _) = self.conns.get(&conn)?.room.as_ref()?;
+        let room = self.rooms.get(code)?;
+        Some((code.as_str(), room.players.len() >= MAX_PLAYERS))
     }
 
     fn fresh_code(&self) -> String {
@@ -309,7 +326,12 @@ impl Room {
                     out.push(Out { to: self.all(), msg: ServerMsg::Respawned(id) });
                 }
             }
-            ClientMsg::Hello { .. } | ClientMsg::Create { .. } | ClientMsg::Join { .. } | ClientMsg::Ping => {}
+            ClientMsg::Hello { .. }
+            | ClientMsg::Create { .. }
+            | ClientMsg::Join { .. }
+            | ClientMsg::Ping
+            | ClientMsg::Leave
+            | ClientMsg::Invite { .. } => {}
         }
     }
 

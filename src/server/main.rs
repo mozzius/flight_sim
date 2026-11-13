@@ -6,7 +6,13 @@
 //! - `GET /health`: "ok"
 //!
 //! Env: `PORT` (default 8080), `FLIGHT_SIM_DEV_AUTH=1` (accept `dev:<handle>`
-//! tokens and honour requested room codes, for local testing).
+//! tokens and honour requested room codes, for local testing),
+//! `FLIGHT_SIM_DEV_MUTUALS=1` (dev users are all each other's mutuals),
+//! `FLIGHT_SIM_APPVIEW` (default the public Bluesky AppView).
+//!
+//! Presence and invites: see `presence` and `hub`. AppView lookups run on a
+//! tokio task, at most [`LOOKUPS_PER_SEC`], and come back to the game loop as
+//! events.
 //!
 //! Phase 1 needs no terrain: clients handle their own crashes. Phase 2's
 //! server-flown AI would add the flight model and terrain here (see README).
@@ -16,13 +22,15 @@ mod atproto;
 #[allow(dead_code)]
 #[path = "../net/protocol.rs"]
 mod protocol;
+mod hub;
+mod presence;
 mod rooms;
 
 use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -50,6 +58,8 @@ enum NetEvent {
     Connected { conn: ConnId, did: String, handle: String, out: UnboundedSender<Bytes> },
     Message(ConnId, ClientMsg),
     Disconnected(ConnId),
+    /// An AppView lookup came back.
+    Lookup(presence::JobResult),
 }
 
 #[derive(Resource)]
@@ -57,8 +67,9 @@ struct Inbox(Mutex<UnboundedReceiver<NetEvent>>);
 
 #[derive(Resource)]
 struct Game {
-    server: rooms::Server,
+    hub: hub::Hub,
     outs: HashMap<ConnId, UnboundedSender<Bytes>>,
+    jobs: UnboundedSender<presence::Job>,
     last_report: Instant,
 }
 
@@ -76,15 +87,23 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FRAME: usize = 16 * 1024;
 /// Per-connection message allowance (a flying client sends ~70/s).
 const MAX_MSGS_PER_SEC: f32 = 200.0;
+/// AppView calls (relationships and profiles), server-wide.
+const LOOKUPS_PER_SEC: f64 = 5.0;
 
 fn main() {
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
     let dev = std::env::var("FLIGHT_SIM_DEV_AUTH").as_deref() == Ok("1");
+    let dev_mutuals = std::env::var("FLIGHT_SIM_DEV_MUTUALS").as_deref() == Ok("1");
+    let appview = std::env::var("FLIGHT_SIM_APPVIEW").unwrap_or_else(|_| presence::PUBLIC_APPVIEW.to_string());
     let (events, inbox) = unbounded_channel();
-    let shared = Shared { events, next_conn: Default::default() };
+    let (jobs, jobs_rx) = unbounded_channel();
+    let shared = Shared { events: events.clone(), next_conn: Default::default() };
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+        let source: Arc<dyn presence::RelationshipSource> =
+            Arc::new(presence::DevAware { inner: presence::AppView::new(&appview), dev_mutuals });
+        rt.spawn(lookups(jobs_rx, source, events));
         rt.block_on(serve(port, shared));
         // (serve only returns if it can't listen)
         std::process::exit(1);
@@ -94,8 +113,11 @@ fn main() {
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / TICK_HZ))))
         .add_plugins(LogPlugin::default())
         .insert_resource(Inbox(Mutex::new(inbox)))
-        .insert_resource(Game { server: rooms::Server::new(dev), outs: HashMap::new(), last_report: Instant::now() })
-        .add_systems(Startup, move || info!("flight sim server on :{port}{}", if dev { " (dev auth)" } else { "" }))
+        .insert_resource(Game { hub: hub::Hub::new(dev), outs: HashMap::new(), jobs, last_report: Instant::now() })
+        .add_systems(Startup, move || {
+            let flags = [(dev, " (dev auth)"), (dev_mutuals, " (dev mutuals)")];
+            info!("flight sim server on :{port}{}", flags.iter().filter(|f| f.0).map(|f| f.1).collect::<String>());
+        })
         .add_systems(Update, pump)
         .run();
 }
@@ -103,35 +125,45 @@ fn main() {
 /// Runs the rooms on everything the sockets received, and sends the replies.
 fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
     let now = Instant::now();
-    let mut outgoing = vec![];
+    let mut step = hub::Step::default();
     let mut rx = inbox.0.lock().unwrap();
     while let Ok(event) = rx.try_recv() {
-        match event {
+        let s = match event {
             NetEvent::Connected { conn, did, handle, out } => {
                 info!("conn {conn}: {handle} ({did})");
                 game.outs.insert(conn, out);
-                outgoing.extend(game.server.connect(conn, did, handle));
+                game.hub.connect(conn, did, handle, now)
             }
             NetEvent::Message(conn, msg) => {
-                if let ClientMsg::Create { .. } | ClientMsg::Join { .. } = &msg {
+                if let ClientMsg::Create { .. } | ClientMsg::Join { .. } | ClientMsg::Leave | ClientMsg::Invite { .. } = &msg {
                     info!("conn {conn}: {msg:?}");
                 }
-                outgoing.extend(game.server.handle(conn, msg, now));
+                game.hub.handle(conn, msg, now)
             }
             NetEvent::Disconnected(conn) => {
                 info!("conn {conn}: gone");
                 game.outs.remove(&conn);
-                outgoing.extend(game.server.disconnect(conn, now));
+                game.hub.disconnect(conn, now)
             }
-        }
+            NetEvent::Lookup(result) => game.hub.apply(result, now),
+        };
+        step.out.extend(s.out);
+        step.jobs.extend(s.jobs);
     }
     drop(rx);
-    game.server.tick(now);
-    for o in outgoing {
+    let s = game.hub.tick(now);
+    step.jobs.extend(s.jobs);
+    for job in step.jobs {
+        let _ = game.jobs.send(job);
+    }
+    for o in step.out {
         match &o.msg {
             ServerMsg::Joined { code, you, players, .. } => info!("room {code}: player {you} joined ({} in the room)", players.len()),
             ServerMsg::Killed { victim, killer } => info!("player {victim} down, killer {killer:?}"),
             ServerMsg::Respawned(id) => info!("player {id} respawned"),
+            ServerMsg::Invited { from, code } => info!("invite from {} to room {code} -> conns {:?}", from.handle, o.to),
+            ServerMsg::InviteFailed(_) => info!("invite failed (conn {:?})", o.to),
+            ServerMsg::FriendUpdate(f) => info!("friend {} ({:?}) -> conns {:?}", f.handle, f.status, o.to),
             _ => {}
         }
         let bytes = Bytes::from(encode(&o.msg));
@@ -143,7 +175,30 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
     }
     if now.duration_since(game.last_report) > Duration::from_secs(60) {
         game.last_report = now;
-        info!("{} rooms, {} players", game.server.room_count(), game.server.player_count());
+        info!(
+            "{} rooms, {} players, {} online",
+            game.hub.rooms.room_count(),
+            game.hub.rooms.player_count(),
+            game.hub.presence.online_count()
+        );
+    }
+}
+
+/// Runs AppView lookups one at a time, at most `LOOKUPS_PER_SEC`.
+async fn lookups(
+    mut jobs: UnboundedReceiver<presence::Job>,
+    source: Arc<dyn presence::RelationshipSource>,
+    events: UnboundedSender<NetEvent>,
+) {
+    let gap = Duration::from_secs_f64(1.0 / LOOKUPS_PER_SEC);
+    let mut next = tokio::time::Instant::now();
+    while let Some(job) = jobs.recv().await {
+        tokio::time::sleep_until(next).await;
+        next = tokio::time::Instant::now() + gap;
+        let result = job.run(&*source).await;
+        if events.send(NetEvent::Lookup(result)).is_err() {
+            break;
+        }
     }
 }
 
