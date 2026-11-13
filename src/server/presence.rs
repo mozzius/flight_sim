@@ -369,9 +369,16 @@ impl Presence {
     /// Lookups for every online player whose relationship with `did` is
     /// unknown or stale (and not already being looked up).
     fn lookups_for(&mut self, did: &str, now: Instant) -> Vec<Job> {
-        let mut others: Vec<Did> = self
-            .users
-            .keys()
+        let online: Vec<Did> = self.users.keys().cloned().collect();
+        self.lookups_among(did, &online, now)
+    }
+
+    /// Lookups for whichever of `candidates` (online or not: the friends
+    /// leaderboard asks about everyone on the board) have an unknown or
+    /// stale relationship with `did`. The results land in the same cache.
+    pub fn lookups_among(&mut self, did: &str, candidates: &[Did], now: Instant) -> Vec<Job> {
+        let mut others: Vec<Did> = candidates
+            .iter()
             .filter(|o| o.as_str() != did)
             .filter(|o| {
                 let k = key(did, o);
@@ -387,6 +394,16 @@ impl Presence {
             .chunks(RELATIONSHIP_BATCH)
             .map(|c| Job::Mutuals { actor: did.to_string(), others: c.to_vec() })
             .collect()
+    }
+
+    /// Whether `a` and `b` are mutuals, as last looked up (None: never).
+    pub fn mutual(&self, a: &str, b: &str) -> Option<bool> {
+        self.pairs.get(&key(a, b)).map(|p| p.mutual)
+    }
+
+    /// Whether a lookup of `did` with any of `others` is still out.
+    pub fn looking_up(&self, did: &str, others: &[Did]) -> bool {
+        others.iter().any(|o| self.pending.contains(&key(did, o)))
     }
 
     fn profile_fresh(&self, did: &str, now: Instant) -> bool {

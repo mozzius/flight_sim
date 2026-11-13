@@ -9,7 +9,8 @@
 //! way (without exiting), each once, about a second after its event:
 //! `t<secs>`, `lobby<n>` (in a lobby with n players), `request` (a join
 //! request card), `kill` (our kill banner), `death` (the multiplayer death
-//! screen, killer named).
+//! screen, killer named), `rank` (the challenge score screen with our rank),
+//! `board` (the leaderboard screen with its rows).
 
 use bevy::{
     prelude::*,
@@ -178,6 +179,7 @@ fn extra_screenshots(
     prompt: Res<crate::respawn::RespawnPrompt>,
     mut kills: MessageReader<crate::game::PlayerKill>,
     mut last_kill: Local<Option<f32>>,
+    board: Res<crate::leaderboard::BoardUi>,
 ) {
     let now = time.elapsed_secs();
     if kills.read().count() > 0 {
@@ -194,6 +196,8 @@ fn extra_screenshots(
                 "request" => net.pending_request().is_some(),
                 "kill" => last_kill.is_some_and(|t| now - t < 2.0),
                 "death" => prompt.ready() && net.death().is_some(),
+                "rank" => prompt.ready() && net.standing().is_some(),
+                "board" => board.open && net.board(board.kind).is_some(),
                 _ => false,
             }
         };

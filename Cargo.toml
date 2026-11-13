@@ -27,7 +27,7 @@ client = [
     "dep:open",
 ]
 # no rendering, windowing or audio: just the ECS, time and logging
-server = ["dep:tokio", "dep:axum", "dep:futures-util", "dep:rand", "atproto"]
+server = ["dep:tokio", "dep:axum", "dep:futures-util", "dep:rand", "dep:rusqlite", "atproto"]
 # atproto service-auth verification (src/atproto): the server's, the client never needs it
 atproto = ["dep:reqwest", "dep:serde_json", "dep:base64", "dep:bs58", "dep:k256", "dep:p256"]
 
@@ -46,6 +46,8 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"], optional = true }
+# the server's challenge leaderboard (SQLite, compiled in: no system library needed)
+rusqlite = { version = "0.42", features = ["bundled"], optional = true }
 
 # atproto service-auth verification (the `atproto` feature, server side) and
 # the native client's OAuth sign-in (src/oauth).

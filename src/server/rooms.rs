@@ -391,7 +391,10 @@ impl Room {
             | ClientMsg::Leave
             | ClientMsg::Invite { .. }
             | ClientMsg::RequestJoin { .. }
-            | ClientMsg::AnswerJoin { .. } => {}
+            | ClientMsg::AnswerJoin { .. }
+            | ClientMsg::ChallengeStart { .. }
+            | ClientMsg::SubmitScore(_)
+            | ClientMsg::Leaderboard(_) => {}
         }
     }
 

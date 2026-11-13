@@ -4,12 +4,16 @@
 //! (asking the host of the room a mutual is in to let us in: the requester
 //! only learns the code by being admitted).
 //!
+//! The challenge leaderboard (`leaderboard`) hangs off the hub too: it
+//! needs the player's DID and presence's relationship cache.
+//!
 //! Pure like the parts: every call returns a [`Step`], the messages to send
 //! and the AppView lookups to run.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::leaderboard::{Board, Store};
 use crate::presence::{Did, Job, JobResult, Presence};
 use crate::protocol::*;
 use crate::rooms::{self, ConnId, Out};
@@ -25,6 +29,7 @@ pub struct Hub {
     pub presence: Presence,
     dids: HashMap<ConnId, Did>,
     asks: Vec<Ask>,
+    pub board: Board,
 }
 
 /// A join request waiting for the host.
@@ -40,8 +45,20 @@ struct Ask {
 }
 
 impl Hub {
+    /// A hub with a throwaway leaderboard (tests).
+    #[cfg(test)]
     pub fn new(dev_codes: bool) -> Self {
-        Self { rooms: rooms::Server::new(dev_codes), presence: Presence::new(), dids: HashMap::new(), asks: vec![] }
+        Self::with_store(dev_codes, Store::memory())
+    }
+
+    pub fn with_store(dev_codes: bool, store: Store) -> Self {
+        Self {
+            rooms: rooms::Server::new(dev_codes),
+            presence: Presence::new(),
+            dids: HashMap::new(),
+            asks: vec![],
+            board: Board::new(store),
+        }
     }
 
     pub fn connect(&mut self, conn: ConnId, did: String, handle: String, now: Instant) -> Step {
@@ -49,6 +66,7 @@ impl Hub {
         let (out, jobs) = self.presence.online(conn, &did, &handle, now);
         step.out.extend(out);
         step.jobs.extend(jobs);
+        self.board.connect(&did, &handle);
         self.dids.insert(conn, did);
         step
     }
@@ -59,6 +77,7 @@ impl Hub {
             step.out.extend(self.presence.offline(conn, &did));
         }
         self.asks.retain(|a| a.conn != conn);
+        self.board.disconnect(conn);
         step.out.extend(self.sync_statuses());
         step
     }
@@ -73,6 +92,23 @@ impl Hub {
                 self.answer_join(conn, &did, accept, now, &mut step.out);
                 step.out.extend(self.sync_statuses());
             }
+            ClientMsg::ChallengeStart { seed } => {
+                if let Some(did) = self.dids.get(&conn) {
+                    self.board.start(did, seed, now);
+                }
+            }
+            ClientMsg::SubmitScore(run) => {
+                if let Some(did) = self.dids.get(&conn).cloned() {
+                    step.out.extend(self.board.submit(conn, &did, run, now));
+                }
+            }
+            ClientMsg::Leaderboard(kind) => {
+                if let Some(did) = self.dids.get(&conn).cloned() {
+                    let (out, jobs) = self.board.request(conn, &did, kind, &mut self.presence, now);
+                    step.out.extend(out);
+                    step.jobs.extend(jobs);
+                }
+            }
             other => step.out.extend(self.rooms.handle(conn, other, now)),
         }
         if roomy {
@@ -82,7 +118,9 @@ impl Hub {
     }
 
     pub fn apply(&mut self, result: JobResult, now: Instant) -> Step {
-        Step { out: self.presence.apply(result, now), jobs: vec![] }
+        let mut out = self.presence.apply(result, now);
+        out.extend(self.board.resolve(&self.presence, now));
+        Step { out, jobs: vec![] }
     }
 
     pub fn tick(&mut self, now: Instant) -> Step {
@@ -96,6 +134,7 @@ impl Hub {
             }
             waiting
         });
+        out.extend(self.board.tick(&self.presence, now));
         Step { out, jobs: self.presence.tick(now) }
     }
 
@@ -294,6 +333,36 @@ mod tests {
 
     fn mentions_code(out: &[Out], conn: ConnId) -> bool {
         sent_to(out, conn).iter().any(|m| format!("{m:?}").contains("TEST"))
+    }
+
+    #[test]
+    fn challenge_runs_reach_both_boards() {
+        let now = Instant::now();
+        let graph = DevAware { inner: MockAppView::default(), dev_mutuals: true };
+        let mut hub = Hub::new(true);
+        online(&mut hub, &graph, 1, "alice", now);
+        online(&mut hub, &graph, 2, "bob", now);
+        online(&mut hub, &graph, 3, "carol", now);
+        hub.handle(1, ClientMsg::ChallengeStart { seed: 11 }, now);
+        hub.handle(2, ClientMsg::ChallengeStart { seed: 22 }, now);
+        let later = now + Duration::from_secs(70);
+        let step = hub.handle(1, ClientMsg::SubmitScore(Run { seed: 11, score: 550, wave: 2, kills: 3, secs: 60.0 }), later);
+        assert_eq!(sent_to(&step.out, 1), vec![&ServerMsg::Standing(Some(Standing { rank: 1, score: 550, wave: 2 }))]);
+        let step = hub.handle(2, ClientMsg::SubmitScore(Run { seed: 22, score: 1150, wave: 3, kills: 4, secs: 62.0 }), later);
+        assert_eq!(sent_to(&step.out, 2), vec![&ServerMsg::Standing(Some(Standing { rank: 1, score: 1150, wave: 3 }))]);
+        // carol never started a run: hers is ignored
+        let step = hub.handle(3, ClientMsg::SubmitScore(Run { seed: 33, score: 100, wave: 1, kills: 1, secs: 30.0 }), later);
+        assert_eq!(sent_to(&step.out, 3), vec![&ServerMsg::Standing(None)]);
+
+        let step = hub.handle(1, ClientMsg::Leaderboard(BoardKind::Global), later);
+        let [ServerMsg::LeaderboardData { rows, you, .. }] = &sent_to(&step.out, 1)[..] else { panic!("{:?}", step.out) };
+        assert_eq!(rows.iter().map(|r| (r.rank, r.handle.as_str(), r.score)).collect::<Vec<_>>(), vec![(1, "bob", 1150), (2, "alice", 550)]);
+        assert_eq!(you.map(|s| s.rank), Some(2));
+        // friends: the pair's already cached from presence, so it answers at once
+        let step = hub.handle(1, ClientMsg::Leaderboard(BoardKind::Friends), later);
+        assert!(step.jobs.is_empty());
+        let [ServerMsg::LeaderboardData { kind: BoardKind::Friends, rows, .. }] = &sent_to(&step.out, 1)[..] else { panic!("{:?}", step.out) };
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

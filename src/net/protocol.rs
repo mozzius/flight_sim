@@ -15,6 +15,12 @@
 //! (`JoinRequest` / `AnswerJoin`), without the room code ever leaving the
 //! server until they say yes.
 //!
+//! Challenge leaderboard (v4): a signed-in client says `ChallengeStart` when
+//! a challenge round begins and `SubmitScore` when it ends; the server checks
+//! the run against the scoring rules and its own clock ([`check_run`]),
+//! keeps each player's best, and answers with their [`Standing`].
+//! `Leaderboard` asks for the global or the friends (mutuals) board.
+//!
 //! Authority: each client flies its own jet and simulates its own bullets and
 //! missiles; the server relays states and events, and decides damage, kills
 //! and score from the hits shooters report ([`ClientMsg::Hit`]).
@@ -25,7 +31,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the messages change shape.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Service-auth audience and method the server checks tokens against.
 pub const AUTH_AUDIENCE: &str = "did:web:flight.mozzius.dev";
@@ -166,6 +172,12 @@ pub enum ClientMsg {
     RequestJoin { to: String },
     /// The host's answer to a `JoinRequest` (by the requester's DID).
     AnswerJoin { did: String, accept: bool },
+    /// A challenge round began on this map seed (the server times the run).
+    ChallengeStart { seed: u32 },
+    /// The challenge round that began with `ChallengeStart` ended.
+    SubmitScore(Run),
+    /// Asks for a board (`LeaderboardData`).
+    Leaderboard(BoardKind),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -254,6 +266,110 @@ pub enum ServerMsg {
     /// Our `RequestJoin` (to this DID) was turned down, timed out or
     /// couldn't go (all look the same).
     JoinDeclined(String),
+    /// Our best challenge run and its global rank (after `SubmitScore`,
+    /// whether or not the run counted). None: no run on the board yet.
+    Standing(Option<Standing>),
+    /// A board: the top rows, and where we stand on it.
+    LeaderboardData { kind: BoardKind, rows: Vec<BoardRow>, you: Option<Standing> },
+}
+
+// ---- challenge leaderboard ----
+
+/// Challenge scoring (the game's, `modes` re-exports these): points per kill
+/// of a hostile, and per cleared wave times the wave number.
+pub const KILL_POINTS: u32 = 100;
+pub const WAVE_POINTS: u32 = 250;
+/// Rows on a board.
+pub const BOARD_ROWS: usize = 20;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BoardKind {
+    Global,
+    /// Us and our mutuals.
+    Friends,
+}
+
+/// A finished challenge run.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Run {
+    /// The map seed (what `ChallengeStart` said).
+    pub seed: u32,
+    pub score: u32,
+    /// The wave reached.
+    pub wave: u32,
+    /// Everything we shot down (friendlies too).
+    pub kills: u32,
+    /// Game seconds from the start to going down.
+    pub secs: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BoardRow {
+    pub rank: u32,
+    pub did: String,
+    pub handle: String,
+    pub score: u32,
+    pub wave: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Standing {
+    pub rank: u32,
+    pub score: u32,
+    pub wave: u32,
+}
+
+/// Limits a believable run stays within.
+pub const MAX_RUN_SCORE: u32 = 2_000_000;
+pub const MAX_RUN_WAVE: u32 = 150;
+pub const MAX_RUN_SECS: f32 = 4.0 * 3600.0;
+/// Every wave after the first takes at least this long to reach (each
+/// needs the last one cleared, then a 5 s breather).
+pub const MIN_SECS_PER_WAVE: f32 = 10.0;
+/// And each kill at least this long.
+pub const MIN_SECS_PER_KILL: f32 = 2.0;
+/// How far the client's clock may run ahead of the server's.
+pub const RUN_CLOCK_SLACK: f32 = 15.0;
+/// Friendly wingmen in a challenge (shooting them counts as a kill, not points).
+const CHALLENGE_WINGMEN: u32 = 2;
+
+/// Hostiles in challenge wave `wave` (as `game::spawn_enemy_wave` spawns them).
+pub fn challenge_hostiles(wave: u32) -> u32 {
+    (1 + wave * 2).min(25)
+}
+
+/// Whether a run adds up under the scoring rules, within the limits, and
+/// took long enough: by its own clock (`run.secs`) and by the server's
+/// (`server_secs` since its `ChallengeStart`). The reason if not.
+pub fn check_run(run: &Run, server_secs: f32) -> Result<(), &'static str> {
+    if run.wave == 0 || run.wave > MAX_RUN_WAVE || run.score > MAX_RUN_SCORE {
+        return Err("out of range");
+    }
+    if !run.secs.is_finite() || run.secs < 0.0 || run.secs > MAX_RUN_SECS {
+        return Err("bad duration");
+    }
+    if run.secs > server_secs + RUN_CLOCK_SLACK {
+        return Err("longer than the server saw");
+    }
+    let hostiles: u32 = (1..=run.wave).map(challenge_hostiles).sum();
+    if run.kills > hostiles + CHALLENGE_WINGMEN {
+        return Err("too many kills");
+    }
+    // waves cleared: the one in progress isn't, unless we went down in the breather after it
+    let hostile_kills = [run.wave - 1, run.wave].into_iter().find_map(|cleared| {
+        let bonus = WAVE_POINTS * cleared * (cleared + 1) / 2;
+        let rest = run.score.checked_sub(bonus)?;
+        let kills = rest / KILL_POINTS;
+        (rest % KILL_POINTS == 0 && kills <= run.kills && kills <= hostiles).then_some(kills)
+    });
+    let Some(hostile_kills) = hostile_kills else {
+        return Err("score doesn't add up");
+    };
+    let min_secs = MIN_SECS_PER_WAVE * (run.wave - 1) as f32 + MIN_SECS_PER_KILL * hostile_kills as f32;
+    if run.secs < min_secs || server_secs < min_secs {
+        return Err("too quick");
+    }
+    Ok(())
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> Vec<u8> {
@@ -321,6 +437,63 @@ mod tests {
             assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
         }
         assert_eq!(decode::<ServerMsg>(&[0xff, 0xff, 0xff]), None);
+        let run = Run { seed: 7, score: 1150, wave: 3, kills: 4, secs: 61.5 };
+        for msg in [ClientMsg::ChallengeStart { seed: 7 }, ClientMsg::SubmitScore(run), ClientMsg::Leaderboard(BoardKind::Friends)] {
+            assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
+        }
+        let standing = Standing { rank: 3, score: 1150, wave: 3 };
+        let row = BoardRow { rank: 1, did: "did:plc:b".into(), handle: "b.test".into(), score: 9000, wave: 7 };
+        for msg in [
+            ServerMsg::Standing(Some(standing)),
+            ServerMsg::Standing(None),
+            ServerMsg::LeaderboardData { kind: BoardKind::Global, rows: vec![row], you: Some(standing) },
+        ] {
+            assert_eq!(decode::<ServerMsg>(&encode(&msg)), Some(msg));
+        }
+    }
+
+    fn run(score: u32, wave: u32, kills: u32, secs: f32) -> Run {
+        Run { seed: 1, score, wave, kills, secs }
+    }
+
+    #[test]
+    fn plausible_runs_pass() {
+        // wave 1, nothing done
+        assert_eq!(check_run(&run(0, 1, 0, 8.0), 9.0), Ok(()));
+        // 3 kills in wave 2 (wave 1 cleared): 300 + 250
+        assert_eq!(check_run(&run(550, 2, 3, 40.0), 41.0), Ok(()));
+        // a friendly kill counts as a kill but scores nothing
+        assert_eq!(check_run(&run(550, 2, 4, 40.0), 41.0), Ok(()));
+        // down in the breather after clearing wave 2: 250 + 500 + 8 kills
+        assert_eq!(check_run(&run(1550, 2, 8, 60.0), 60.0), Ok(()));
+        // the client's game clock is behind the server's (pauses, loading)
+        assert_eq!(check_run(&run(1150, 3, 4, 40.0), 300.0), Ok(()));
+        // a long, good run: wave 12 reached, every hostile of waves 1-11 down
+        let kills: u32 = (1..=11).map(challenge_hostiles).sum::<u32>() + 3;
+        let score = KILL_POINTS * kills + WAVE_POINTS * 11 * 12 / 2;
+        assert_eq!(check_run(&run(score, 12, kills, 1500.0), 1510.0), Ok(()));
+    }
+
+    #[test]
+    fn implausible_runs_fail() {
+        // doesn't add up: not a multiple of the kill points after the wave bonus
+        assert!(check_run(&run(560, 2, 3, 40.0), 41.0).is_err());
+        // more points than kills
+        assert!(check_run(&run(400, 1, 3, 60.0), 61.0).is_err());
+        // more kills than hostiles (wave 1 has 3, plus 2 wingmen)
+        assert!(check_run(&run(600, 1, 6, 60.0), 61.0).is_err());
+        // too quick for the waves / kills
+        assert!(check_run(&run(1150, 3, 4, 20.0), 21.0).is_err());
+        // the client says longer than the server saw
+        assert!(check_run(&run(550, 2, 3, 120.0), 40.0).is_err());
+        // the server saw too little time
+        assert!(check_run(&run(1150, 3, 4, 40.0), 10.0).is_err());
+        // caps and junk
+        assert!(check_run(&run(0, 0, 0, 10.0), 10.0).is_err());
+        assert!(check_run(&run(0, MAX_RUN_WAVE + 1, 0, 10.0), 10.0).is_err());
+        assert!(check_run(&run(MAX_RUN_SCORE + 100, 100, 1000, 9000.0), 9000.0).is_err());
+        assert!(check_run(&run(0, 1, 0, f32::NAN), 10.0).is_err());
+        assert!(check_run(&run(0, 1, 0, -1.0), 10.0).is_err());
     }
 
     #[test]

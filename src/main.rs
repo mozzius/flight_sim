@@ -24,6 +24,7 @@ mod game;
 mod hud;
 mod identity;
 mod intro;
+mod leaderboard;
 mod pause;
 mod platform;
 mod respawn;
@@ -107,6 +108,6 @@ fn main() {
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
-        .add_plugins((settings::SettingsPlugin, loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin, signin::SignInPlugin))
+        .add_plugins((settings::SettingsPlugin, loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin, signin::SignInPlugin, leaderboard::LeaderboardPlugin))
         .run();
 }
