@@ -205,7 +205,7 @@ impl Net {
             .map(|(id, k, d)| {
                 let me = Some(*id) == self.me;
                 let name = if me {
-                    auth::user().map(|u| u.handle).unwrap_or_else(|| "you".into())
+                    crate::identity::current_user().map(|u| u.handle).unwrap_or_else(|| "you".into())
                 } else {
                     self.peers.get(id).map(|p| p.handle.clone()).unwrap_or_default()
                 };

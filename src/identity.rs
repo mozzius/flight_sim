@@ -108,7 +108,6 @@ pub fn sign_out() {
 /// A fresh service-auth JWT for the game server (`aud`
 /// `did:web:flight.mozzius.dev`, `lxm` `dev.mozzius.flight.join`), minted by
 /// the player's PDS. Natively: `dev:<handle>` for a dev user.
-#[allow(dead_code)]
 pub async fn service_token() -> Result<String, String> {
     #[cfg(target_arch = "wasm32")]
     {

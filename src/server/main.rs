@@ -194,6 +194,8 @@ async fn connection(socket: WebSocket, shared: Shared) {
         }
     };
     let conn = shared.next_conn.fetch_add(1, Ordering::Relaxed) + 1;
+    // only a verified handle (the DID doc's alsoKnownAs, resolving back to the
+    // DID); the client never gets to name itself. No handle: part of the DID.
     let handle = user.handle.clone().unwrap_or_else(|| short_did(&user.did));
     let (out, mut out_rx) = unbounded_channel::<Bytes>();
     if shared.events.send(NetEvent::Connected { conn, did: user.did, handle, out }).is_err() {

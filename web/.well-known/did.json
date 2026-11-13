@@ -5,7 +5,7 @@
     {
       "id": "#flight_server",
       "type": "FlightSimServer",
-      "serviceEndpoint": "https://TODO-railway-url.up.railway.app"
+      "serviceEndpoint": "https://mp.flight.mozzius.dev"
     }
   ]
 }
