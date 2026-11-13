@@ -1,0 +1,11 @@
+{
+  "@context": ["https://www.w3.org/ns/did/v1"],
+  "id": "did:web:flight.mozzius.dev",
+  "service": [
+    {
+      "id": "#flight_server",
+      "type": "FlightSimServer",
+      "serviceEndpoint": "https://TODO-railway-url.up.railway.app"
+    }
+  ]
+}

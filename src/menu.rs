@@ -27,7 +27,7 @@ impl Plugin for MenuPlugin {
             .insert_resource(EndlessOpen(open))
             .add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), despawn_menu)
-            .add_systems(Update, (navigate, handle_pressed, style_buttons, layout_menu).chain());
+            .add_systems(Update, (navigate, handle_pressed, style_buttons, layout_menu, layout_account).chain());
     }
 }
 
@@ -55,6 +55,8 @@ pub enum UiAction {
     Resume,
     Menu,
     Retry,
+    /// Sign in or out (the account corner).
+    Account,
 }
 
 /// A menu button. `order` is the focus order on its screen; buttons sharing a
@@ -127,6 +129,16 @@ struct MenuRoot;
 #[derive(Component)]
 struct EndlessPanel;
 
+/// The account corner (top right): the signed-in handle and SIGN OUT, or SIGN IN.
+#[derive(Component)]
+struct AccountCorner;
+
+#[derive(Component)]
+struct AccountHandle;
+
+#[derive(Component)]
+struct AccountLabel;
+
 #[derive(Component)]
 struct PickValue(Pick);
 
@@ -189,6 +201,40 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                 }
                 panel.spawn(Node { height: px(4), ..default() });
                 button(panel, &font, "START", Screen::Modes, 5, 4, UiAction::Start);
+            });
+            root.spawn((
+                AccountCorner,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: px(12),
+                    right: px(12),
+                    column_gap: px(12),
+                    align_items: AlignItems::Center,
+                    display: Display::None,
+                    ..default()
+                },
+            ))
+            .with_children(|corner| {
+                corner.spawn((AccountHandle, Text::new(""), font_of(&font, 13.0, DIM)));
+                let action = UiAction::Account;
+                corner
+                    .spawn((
+                        UiButton { screen: Screen::Modes, order: 10, row: 9, action },
+                        Hovered::default(),
+                        Node {
+                            min_height: px(36),
+                            padding: UiRect::axes(px(12), px(6)),
+                            border: UiRect::all(px(1)),
+                            border_radius: BorderRadius::all(px(6)),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },
+                        BorderColor::all(BORDER),
+                        BackgroundColor(BUTTON),
+                    ))
+                    .with_child((AccountLabel, Text::new(""), font_of(&font, 13.0, GREEN), Pickable::IGNORE))
+                    .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)));
             });
         });
 }
@@ -337,6 +383,13 @@ fn handle_pressed(
             UiAction::Pick(Pick::Time) => picks.0.time = cycle(&TimeOfDay::ALL, picks.0.time, step),
             UiAction::Resume => paused.0 = false,
             UiAction::Menu => next.set(GameState::Menu),
+            UiAction::Account => {
+                if crate::identity::current_user().is_some() {
+                    crate::identity::sign_out();
+                } else {
+                    crate::identity::sign_in();
+                }
+            }
         }
     }
 }
@@ -396,6 +449,53 @@ fn layout_menu(
         let s = format!("< {} >", name.unwrap_or("random").to_ascii_uppercase());
         if text.0 != s {
             text.0 = s;
+        }
+    }
+}
+
+/// Keeps the account corner in step with the page's sign-in state.
+fn layout_account(
+    mut corner: Query<&mut Node, With<AccountCorner>>,
+    mut handle: Query<(&mut Text, &mut Node), (With<AccountHandle>, Without<AccountCorner>, Without<UiButton>)>,
+    mut label: Query<&mut Text, (With<AccountLabel>, Without<AccountHandle>)>,
+    mut buttons: Query<(&UiButton, &mut Node), (Without<AccountCorner>, Without<AccountHandle>)>,
+) {
+    let Ok(mut corner) = corner.single_mut() else { return };
+    let user = crate::identity::current_user();
+    // natively there's no sign-in: a dev user's handle shows, without a button
+    let can = crate::identity::can_sign_in();
+    let d = if user.is_some() || can { Display::Flex } else { Display::None };
+    if corner.display != d {
+        corner.display = d;
+    }
+    let s = crate::platform::safe_area();
+    let (top, right) = (px(s.y + 12.0), px(s.z + 12.0));
+    if corner.top != top || corner.right != right {
+        corner.top = top;
+        corner.right = right;
+    }
+    if let Ok((mut text, mut node)) = handle.single_mut() {
+        let h = user.as_ref().map(|u| format!("@{}", u.handle)).unwrap_or_default();
+        if text.0 != h {
+            text.0 = h;
+        }
+        let d = if user.is_some() { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+        }
+    }
+    if let Ok(mut text) = label.single_mut() {
+        let l = if user.is_some() { "SIGN OUT" } else { "SIGN IN" };
+        if text.0 != l {
+            text.0 = l.into();
+        }
+    }
+    for (b, mut node) in &mut buttons {
+        if b.action == UiAction::Account {
+            let d = if can { Display::Flex } else { Display::None };
+            if node.display != d {
+                node.display = d;
+            }
         }
     }
 }
