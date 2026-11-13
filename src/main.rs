@@ -5,6 +5,11 @@ use bevy::prelude::*;
 use bevy_transform_interpolation::prelude::*;
 
 mod ai;
+// server-side token verification: the game server's (it includes this file
+// via #[path]); only built into the client with the `atproto` feature
+#[cfg(all(feature = "atproto", not(target_arch = "wasm32")))]
+#[allow(dead_code)]
+mod atproto;
 mod audio;
 mod camera;
 mod clouds;
@@ -15,6 +20,7 @@ mod environment;
 mod flight;
 mod game;
 mod hud;
+mod identity;
 mod intro;
 mod pause;
 mod platform;

@@ -102,11 +102,13 @@ which checks them (range, rate of fire, both alive) and decides damage,
 kills and score. Each client bakes the room's map from its seed and
 environment; the server has no terrain (clients report their own crashes).
 
-Sign-in comes from the page (`window.FLIGHT_SIM_USER`,
-`window.flightSimAuth.serviceToken()` / `signIn()`); the server checks the
-service-auth token (`src/atproto`). Natively there's no sign-in yet:
-multiplayer only shows with `FLIGHT_SIM_DEV_USER=<handle>`, which sends a
-`dev:<handle>` token, and native clients only speak plain `ws://`.
+The player and their token come from `src/identity.rs` (see Sign-in below):
+the client sends a service-auth JWT (`aud=did:web:flight.mozzius.dev`,
+`lxm=dev.mozzius.flight.join`) and the server verifies it with
+`atproto::verify_service_auth`, naming players by their verified handle.
+Natively there's no sign-in yet: multiplayer only shows with
+`FLIGHT_SIM_DEV_USER=<handle>`, which sends a `dev:<handle>` token, and native
+clients only speak plain `ws://`.
 
 Client switches: `FLIGHT_SIM_SERVER=<url>` (`?server=` on the web; default
 `wss://mp.flight.mozzius.dev`; `/ws` is appended), `FLIGHT_SIM_MP=create[:CODE]|join:CODE`
@@ -137,6 +139,32 @@ docker run -p 8080:8080 -e FLIGHT_SIM_DEV_AUTH=1 flight-sim-server
 ```
 
 `railway.json` builds that Dockerfile and health-checks `/health`; Railway sets `PORT`.
+
+## Sign-in
+
+On the web you can sign in with an Atmosphere (Bluesky) account: SIGN IN in the
+menu's top-right corner asks for a handle (leave it empty to start at
+bsky.social, no typing) and redirects to the account's server via atproto OAuth.
+
+- `web/auth.js` runs the OAuth client (`@atproto/oauth-client-browser`, pinned on
+  esm.sh), keeps `window.FLIGHT_SIM_USER` (`{did, handle, displayName, avatar}` or
+  null) and exposes `window.flightSimAuth` (`signIn(handle?)`, `signOut()`,
+  `serviceToken()`). `src/identity.rs` is the Rust side.
+- Client metadata is `web/oauth-client-metadata.json` (the `client_id` URL on
+  flight.mozzius.dev). On `localhost` / `127.0.0.1` the loopback client is used
+  instead, so sign-in works against a local `python3 -m http.server --bind 127.0.0.1`
+  of `dist/` (it moves `localhost` to `127.0.0.1` first). Other hosts (Vercel
+  previews) can't sign in.
+- Scope: `atproto rpc:dev.mozzius.flight.join?aud=*`, just enough to mint a service-auth
+  token for joining the game server (`com.atproto.server.getServiceAuth`,
+  `aud=did:web:flight.mozzius.dev`). The rpc permission only allows `aud` as
+  `*` or a `did#service` ref, hence `aud=*`.
+- `web/.well-known/did.json` is `did:web:flight.mozzius.dev`; its `#flight_server` service points at the game server, `https://mp.flight.mozzius.dev`.
+- The game server checks tokens with `atproto::verify_service_auth`
+  (`src/atproto`, native only: ES256K / ES256, DID docs from plc.directory or
+  did:web; the `atproto` cargo feature, which `server` turns on, so the client
+  doesn't build it). Natively, `FLIGHT_SIM_DEV_USER=<handle>` plays as `did:dev:<handle>`
+  with token `dev:<handle>`, which the server accepts only with `FLIGHT_SIM_DEV_AUTH=1`.
 
 ## Desktop builds
 

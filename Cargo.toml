@@ -22,7 +22,9 @@ required-features = ["server"]
 default = ["client"]
 client = ["bevy/default", "bevy/wav", "dep:bevy_transform_interpolation", "dep:rand", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 # no rendering, windowing or audio: just the ECS, time and logging
-server = ["dep:tokio", "dep:axum", "dep:futures-util", "dep:rand"]
+server = ["dep:tokio", "dep:axum", "dep:futures-util", "dep:rand", "atproto"]
+# atproto service-auth verification (src/atproto): the server's, the client never needs it
+atproto = ["dep:reqwest", "dep:serde_json", "dep:base64", "dep:bs58", "dep:k256", "dep:p256"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
@@ -38,6 +40,18 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"], optional = true }
+
+# atproto service-auth verification (the `atproto` feature, server side only).
+# rustls with bundled webpki roots: no openssl or CA bundle needed in the image.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+serde_json = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
+bs58 = { version = "0.5", optional = true }
+k256 = { version = "0.13", features = ["ecdsa"], optional = true }
+p256 = { version = "0.13", features = ["ecdsa"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
