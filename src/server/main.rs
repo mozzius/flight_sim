@@ -135,7 +135,14 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
                 game.hub.connect(conn, did, handle, now)
             }
             NetEvent::Message(conn, msg) => {
-                if let ClientMsg::Create { .. } | ClientMsg::Join { .. } | ClientMsg::Leave | ClientMsg::Invite { .. } = &msg {
+                if let ClientMsg::Create { .. }
+                | ClientMsg::Join { .. }
+                | ClientMsg::Leave
+                | ClientMsg::Invite { .. }
+                | ClientMsg::Start
+                | ClientMsg::RequestJoin { .. }
+                | ClientMsg::AnswerJoin { .. } = &msg
+                {
                     info!("conn {conn}: {msg:?}");
                 }
                 game.hub.handle(conn, msg, now)
@@ -158,8 +165,14 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
     }
     for o in step.out {
         match &o.msg {
-            ServerMsg::Joined { code, you, players, .. } => info!("room {code}: player {you} joined ({} in the room)", players.len()),
-            ServerMsg::Killed { victim, killer } => info!("player {victim} down, killer {killer:?}"),
+            ServerMsg::Joined { code, you, players, started, .. } => {
+                info!("room {code}: player {you} joined ({} in the room, started {started})", players.len())
+            }
+            ServerMsg::Killed { victim, killer, record } => info!("player {victim} down, killer {killer:?} {record:?}"),
+            ServerMsg::Started => info!("room started -> conns {:?}", o.to),
+            ServerMsg::Host(id) => info!("player {id} hosts now"),
+            ServerMsg::JoinRequest(f) => info!("join request from {} -> conn {:?}", f.handle, o.to),
+            ServerMsg::JoinDeclined(_) => info!("join request declined (conn {:?})", o.to),
             ServerMsg::Respawned(id) => info!("player {id} respawned"),
             ServerMsg::Invited { from, code } => info!("invite from {} to room {code} -> conns {:?}", from.handle, o.to),
             ServerMsg::InviteFailed(_) => info!("invite failed (conn {:?})", o.to),

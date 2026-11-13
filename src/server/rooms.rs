@@ -1,5 +1,9 @@
 //! Rooms: who's in which, relaying, and the rules (damage, kills, score).
 //!
+//! A room starts as a lobby: its first player is the host, and nothing is
+//! flown until they `Start` it. When the host leaves, the longest-standing
+//! player takes over.
+//!
 //! Pure logic with no I/O, so it's testable: every call returns the
 //! messages to send ([`Out`]) and the caller delivers them.
 //!
@@ -48,10 +52,18 @@ pub struct Room {
     players: BTreeMap<PlayerId, Player>,
     next_id: PlayerId,
     empty_since: Option<Instant>,
+    host: PlayerId,
+    /// Out of the lobby, flying.
+    pub started: bool,
+    /// Kills per (killer DID, victim DID), for the room's lifetime.
+    records: HashMap<(String, String), u16>,
+    /// Join order (the host passes to the lowest).
+    next_seq: u32,
 }
 
 struct Player {
     conn: ConnId,
+    seq: u32,
     info: PlayerInfo,
     health: f32,
     alive: bool,
@@ -118,22 +130,15 @@ impl Server {
         match msg {
             // (auth is done by the connection before it gets here)
             ClientMsg::Hello { .. } | ClientMsg::Ping => {}
+            // (the hub handles join requests: they need presence)
+            ClientMsg::RequestJoin { .. } | ClientMsg::AnswerJoin { .. } => {}
             ClientMsg::Create { map, code } => {
                 self.create_room(conn, map, code, now, &mut out);
             }
             ClientMsg::Leave => self.leave(conn, now, &mut out),
             // (the hub handles invites: they need presence)
             ClientMsg::Invite { .. } => {}
-            ClientMsg::Join { code } => {
-                let code = normalize_code(&code);
-                if !self.rooms.contains_key(&code) {
-                    out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::NoRoom) });
-                    return out;
-                }
-                // (rejoining the same room is allowed: it replaces the old seat)
-                self.leave(conn, now, &mut out);
-                self.join(conn, &code, now, &mut out);
-            }
+            ClientMsg::Join { code } => self.join_code(conn, &code, now, &mut out),
             other => {
                 let Some((code, id)) = self.conns.get(&conn).and_then(|c| c.room.clone()) else { return out };
                 if let Some(room) = self.rooms.get_mut(&code) {
@@ -159,10 +164,43 @@ impl Server {
         };
         self.rooms.insert(
             code.clone(),
-            Room { code: code.clone(), map, players: BTreeMap::new(), next_id: 1, empty_since: Some(now) },
+            Room {
+                code: code.clone(),
+                map,
+                players: BTreeMap::new(),
+                next_id: 1,
+                empty_since: Some(now),
+                host: 0,
+                started: false,
+                records: HashMap::new(),
+                next_seq: 0,
+            },
         );
         self.join(conn, &code, now, out);
         Some(code)
+    }
+
+    /// Into room `code` (out of any other), or NO ROOM.
+    pub fn join_code(&mut self, conn: ConnId, code: &str, now: Instant, out: &mut Vec<Out>) {
+        let code = normalize_code(code);
+        if !self.rooms.contains_key(&code) {
+            out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::NoRoom) });
+            return;
+        }
+        // (rejoining the same room is allowed: it replaces the old seat)
+        self.leave(conn, now, out);
+        self.join(conn, &code, now, out);
+    }
+
+    /// The connection of room `code`'s host.
+    pub fn host_conn(&self, code: &str) -> Option<ConnId> {
+        let room = self.rooms.get(code)?;
+        room.players.get(&room.host).map(|p| p.conn)
+    }
+
+    /// Whether `did` has a seat in room `code`.
+    pub fn has_player(&self, code: &str, did: &str) -> bool {
+        self.rooms.get(code).is_some_and(|r| r.players.values().any(|p| p.info.did == did))
     }
 
     /// The room a connection is in: (code, whether it's full).
@@ -201,10 +239,16 @@ impl Server {
         }
         let id = room.free_id();
         let info = PlayerInfo { id, did, handle };
+        if room.players.is_empty() {
+            room.host = id;
+        }
+        let seq = room.next_seq;
+        room.next_seq += 1;
         room.players.insert(
             id,
             Player {
                 conn,
+                seq,
                 info: info.clone(),
                 health: MAX_HEALTH,
                 alive: true,
@@ -225,6 +269,8 @@ impl Server {
                 map: room.map,
                 you: id,
                 players: room.players.values().map(|p| p.info.clone()).collect(),
+                host: room.host,
+                started: room.started,
             },
         });
         out.push(Out { to: room.others(id), msg: ServerMsg::PlayerJoined(info) });
@@ -274,6 +320,12 @@ impl Room {
             self.empty_since = Some(now);
         } else {
             out.push(Out { to: self.all(), msg: ServerMsg::PlayerLeft(id) });
+            if id == self.host
+                && let Some(next) = self.players.values().min_by_key(|p| p.seq).map(|p| p.info.id)
+            {
+                self.host = next;
+                out.push(Out { to: self.all(), msg: ServerMsg::Host(next) });
+            }
             out.push(self.scores());
         }
     }
@@ -318,6 +370,12 @@ impl Room {
                 out.push(Out { to: others, msg: ServerMsg::Missiles { id, t, missiles } });
             }
             ClientMsg::Hit { target, weapon, damage } => self.hit(id, target, weapon, damage, now, out),
+            ClientMsg::Start => {
+                if id == self.host && !self.started {
+                    self.started = true;
+                    out.push(Out { to: self.all(), msg: ServerMsg::Started });
+                }
+            }
             ClientMsg::Respawn => {
                 if !p.alive {
                     p.alive = true;
@@ -331,7 +389,9 @@ impl Room {
             | ClientMsg::Join { .. }
             | ClientMsg::Ping
             | ClientMsg::Leave
-            | ClientMsg::Invite { .. } => {}
+            | ClientMsg::Invite { .. }
+            | ClientMsg::RequestJoin { .. }
+            | ClientMsg::AnswerJoin { .. } => {}
         }
     }
 
@@ -390,11 +450,17 @@ impl Room {
         v.alive = false;
         v.health = 0.0;
         v.deaths += 1;
+        let victim_did = v.info.did.clone();
         let killer = killer.filter(|k| *k != victim);
+        let mut record = (0, 0);
         if let Some(k) = killer.and_then(|k| self.players.get_mut(&k)) {
             k.kills += 1;
+            let killer_did = k.info.did.clone();
+            let theirs = self.records.entry((killer_did.clone(), victim_did.clone())).or_default();
+            *theirs += 1;
+            record = (*theirs, self.records.get(&(victim_did, killer_did)).copied().unwrap_or(0));
         }
-        out.push(Out { to: self.all(), msg: ServerMsg::Killed { victim, killer } });
+        out.push(Out { to: self.all(), msg: ServerMsg::Killed { victim, killer, record } });
         out.push(self.scores());
     }
 }
@@ -441,7 +507,7 @@ mod tests {
     fn kills(out: &[Out]) -> Vec<(PlayerId, Option<PlayerId>)> {
         out.iter()
             .filter_map(|o| match o.msg {
-                ServerMsg::Killed { victim, killer } => Some((victim, killer)),
+                ServerMsg::Killed { victim, killer, .. } => Some((victim, killer)),
                 _ => None,
             })
             .collect()
@@ -548,5 +614,82 @@ mod tests {
         let out = s.handle(3, ClientMsg::Join { code: "TEST".into() }, now);
         assert!(out.iter().any(|o| o.msg == ServerMsg::PlayerLeft(2)));
         assert_eq!(s.player_count(), 2);
+    }
+
+    #[test]
+    fn rooms_wait_in_the_lobby_until_the_host_starts() {
+        let now = Instant::now();
+        let mut s = Server::new(true);
+        for (c, h) in [(1, "a"), (2, "b"), (3, "c")] {
+            s.connect(c, format!("did:dev:{h}"), h.into());
+        }
+        let out = s.handle(1, ClientMsg::Create { map: MAP, code: Some("TEST".into()) }, now);
+        assert!(matches!(&out[0].msg, ServerMsg::Joined { host: 1, started: false, .. }));
+        let out = s.handle(2, ClientMsg::Join { code: "TEST".into() }, now);
+        assert!(matches!(&out[0].msg, ServerMsg::Joined { you: 2, host: 1, started: false, .. }));
+        // only the host starts it
+        assert!(s.handle(2, ClientMsg::Start, now).is_empty());
+        let out = s.handle(1, ClientMsg::Start, now);
+        assert_eq!(out, vec![Out { to: vec![1, 2], msg: ServerMsg::Started }]);
+        assert!(s.handle(1, ClientMsg::Start, now).is_empty(), "once");
+        // late joiners land in the game
+        let out = s.handle(3, ClientMsg::Join { code: "TEST".into() }, now);
+        assert!(matches!(&out[0].msg, ServerMsg::Joined { you: 3, started: true, .. }));
+    }
+
+    #[test]
+    fn the_host_passes_to_the_next_player() {
+        let now = Instant::now();
+        let mut s = Server::new(true);
+        for (c, h) in [(1, "a"), (2, "b"), (3, "c")] {
+            s.connect(c, format!("did:dev:{h}"), h.into());
+        }
+        s.handle(1, ClientMsg::Create { map: MAP, code: Some("TEST".into()) }, now);
+        s.handle(3, ClientMsg::Join { code: "TEST".into() }, now);
+        s.handle(2, ClientMsg::Join { code: "TEST".into() }, now);
+        assert_eq!(s.host_conn("TEST"), Some(1));
+        let out = s.handle(1, ClientMsg::Leave, now);
+        // c joined before b
+        assert!(out.iter().any(|o| o.msg == ServerMsg::Host(2) && o.to.len() == 2), "{out:?}");
+        assert_eq!(s.host_conn("TEST"), Some(3));
+        let out = s.handle(3, ClientMsg::Start, now);
+        assert_eq!(out[0].msg, ServerMsg::Started);
+        // everyone gone, then back: the newcomer hosts the empty room
+        s.disconnect(2, now);
+        s.disconnect(3, now);
+        let out = s.handle(1, ClientMsg::Join { code: "TEST".into() }, now);
+        assert!(matches!(&out[0].msg, ServerMsg::Joined { you, host, started: true, .. } if you == host));
+    }
+
+    #[test]
+    fn head_to_head_records_count_both_ways() {
+        let (mut s, now) = duel([0.0; 3], [500.0, 0.0, 0.0]);
+        let record = |out: &[Out]| {
+            out.iter().find_map(|o| match o.msg {
+                ServerMsg::Killed { record, .. } => Some(record),
+                _ => None,
+            })
+        };
+        let mut t = now;
+        let mut duel_to_the_death = |s: &mut Server, shooter: ConnId, target: PlayerId| {
+            let mut out = vec![];
+            for _ in 0..20 {
+                t += Duration::from_millis(40);
+                s.handle(1, state([0.0; 3], Status::Flying), t);
+                s.handle(2, state([500.0, 0.0, 0.0], Status::Flying), t);
+                out.extend(s.handle(shooter, ClientMsg::Hit { target, weapon: Weapon::Gun, damage: 5.0 }, t));
+            }
+            let victim = if shooter == 1 { 2 } else { 1 };
+            s.handle(victim, ClientMsg::Respawn, t);
+            out
+        };
+        assert_eq!(record(&duel_to_the_death(&mut s, 1, 2)), Some((1, 0)));
+        assert_eq!(record(&duel_to_the_death(&mut s, 1, 2)), Some((2, 0)));
+        // b gets one back: b's kills on a, a's on b
+        assert_eq!(record(&duel_to_the_death(&mut s, 2, 1)), Some((1, 2)));
+        // a crash with nobody chasing: no record
+        t += Duration::from_secs(30);
+        let out = s.handle(2, state([500.0, 0.0, 0.0], Status::Dead), t);
+        assert!(out.iter().any(|o| o.msg == ServerMsg::Killed { victim: 2, killer: None, record: (0, 0) }));
     }
 }

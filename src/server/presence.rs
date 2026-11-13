@@ -42,6 +42,9 @@ pub const PROFILE_BATCH: usize = 25;
 pub const INVITE_GAP: Duration = Duration::from_secs(10);
 /// And at most this many a minute from one player.
 const INVITES_PER_MINUTE: usize = 10;
+/// Join requests: one per host per this long, and a few a minute.
+pub const REQUEST_GAP: Duration = Duration::from_secs(10);
+const REQUESTS_PER_MINUTE: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Profile {
@@ -113,10 +116,43 @@ pub struct Presence {
     profiles: HashMap<Did, (Profile, Instant)>,
     profiles_pending: HashSet<Did>,
     profile_queue: Vec<Did>,
-    /// (from, to) → when.
-    invites: HashMap<(Did, Did), Instant>,
-    invites_by: HashMap<Did, VecDeque<Instant>>,
+    invites: Limiter,
+    requests: Limiter,
     last_sweep: Option<Instant>,
+}
+
+/// Asks from one player to another: one per pair per `gap`, and at most
+/// `per_minute` from anyone.
+#[derive(Default)]
+struct Limiter {
+    /// (from, to) → when.
+    last: HashMap<(Did, Did), Instant>,
+    by: HashMap<Did, VecDeque<Instant>>,
+}
+
+impl Limiter {
+    /// Records the ask if it's allowed.
+    fn allow(&mut self, from: &str, to: &str, gap: Duration, per_minute: usize, now: Instant) -> bool {
+        let pair = (from.to_string(), to.to_string());
+        if self.last.get(&pair).is_some_and(|t| now.duration_since(*t) < gap) {
+            return false;
+        }
+        let recent = self.by.entry(from.to_string()).or_default();
+        while recent.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60)) {
+            recent.pop_front();
+        }
+        if recent.len() >= per_minute {
+            return false;
+        }
+        recent.push_back(now);
+        self.last.insert(pair, now);
+        true
+    }
+
+    fn forget_old(&mut self, gap: Duration, now: Instant) {
+        self.last.retain(|_, t| now.duration_since(*t) < gap);
+        self.by.retain(|_, q| q.back().is_some_and(|t| now.duration_since(*t) < Duration::from_secs(60)));
+    }
 }
 
 fn key(a: &str, b: &str) -> (Did, Did) {
@@ -214,27 +250,21 @@ impl Presence {
     /// Whether `from` may invite `to` now (an online mutual, within the
     /// rate limits); records the invite if so.
     pub fn may_invite(&mut self, from: &str, to: &str, now: Instant) -> bool {
-        let mutual = from != to
+        self.online_mutuals(from, to) && self.invites.allow(from, to, INVITE_GAP, INVITES_PER_MINUTE, now)
+    }
+
+    /// Whether `from` may ask `host` to let them into their room now (an
+    /// online mutual, within the limits); records the request if so.
+    pub fn may_request(&mut self, from: &str, host: &str, now: Instant) -> bool {
+        self.online_mutuals(from, host) && self.requests.allow(from, host, REQUEST_GAP, REQUESTS_PER_MINUTE, now)
+    }
+
+    /// Both online, and `from` has been told `to` is their mutual.
+    pub fn online_mutuals(&self, from: &str, to: &str) -> bool {
+        from != to
             && self.users.contains_key(to)
             && self.users.get(from).is_some_and(|u| u.known.contains(to))
-            && self.pairs.get(&key(from, to)).is_some_and(|p| p.mutual);
-        if !mutual {
-            return false;
-        }
-        let pair = (from.to_string(), to.to_string());
-        if self.invites.get(&pair).is_some_and(|t| now.duration_since(*t) < INVITE_GAP) {
-            return false;
-        }
-        let recent = self.invites_by.entry(from.to_string()).or_default();
-        while recent.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60)) {
-            recent.pop_front();
-        }
-        if recent.len() >= INVITES_PER_MINUTE {
-            return false;
-        }
-        recent.push_back(now);
-        self.invites.insert(pair, now);
-        true
+            && self.pairs.get(&key(from, to)).is_some_and(|p| p.mutual)
     }
 
     /// `did` as its friends see it.
@@ -325,8 +355,8 @@ impl Presence {
                 now.duration_since(p.at) < PAIR_TTL * 2 || (users.contains_key(a) && users.contains_key(b))
             });
             self.profiles.retain(|d, (_, at)| now.duration_since(*at) < PROFILE_TTL || users.contains_key(d));
-            self.invites.retain(|_, t| now.duration_since(*t) < INVITE_GAP);
-            self.invites_by.retain(|_, q| q.back().is_some_and(|t| now.duration_since(*t) < Duration::from_secs(60)));
+            self.invites.forget_old(INVITE_GAP, now);
+            self.requests.forget_old(REQUEST_GAP, now);
             let mut dids: Vec<Did> = self.users.keys().cloned().collect();
             dids.sort();
             for did in dids {
