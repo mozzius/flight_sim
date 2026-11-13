@@ -1,17 +1,25 @@
 //! Device tiers. Phones and tablets get a low-memory mode: iOS kills a tab
 //! whose GPU process goes over its budget, and the full scene doesn't fit.
 //!
-//! On the web the page decides (`window.FLIGHT_SIM_LOW_MEMORY`: touch
-//! devices, or `?low`; `?high` forces it off). Natively,
-//! `FLIGHT_SIM_LOW_MEMORY=1` turns it on for testing.
+//! On the web the page decides before the game starts
+//! (`window.FLIGHT_SIM_LOW_MEMORY`: the GRAPHICS setting, AUTO meaning touch
+//! devices; `?low` / `?high` override it). Natively it's the GRAPHICS setting
+//! (AUTO is high), switchable while running, and `FLIGHT_SIM_LOW_MEMORY=1`
+//! forces it on.
 
-use std::sync::OnceLock;
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
+
+static LOW: AtomicBool = AtomicBool::new(false);
+static INIT: OnceLock<()> = OnceLock::new();
 
 /// Fewer and nearer trees, half-res terrain textures, no 32 m near terrain
 /// mesh, smaller shadow maps and cheaper clouds.
 pub fn low_memory() -> bool {
-    static LOW: OnceLock<bool> = OnceLock::new();
-    *LOW.get_or_init(detect)
+    INIT.get_or_init(|| LOW.store(detect(), Ordering::Relaxed));
+    LOW.load(Ordering::Relaxed)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -23,7 +31,29 @@ fn detect() -> bool {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn detect() -> bool {
-    std::env::var("FLIGHT_SIM_LOW_MEMORY").is_ok()
+    std::env::var("FLIGHT_SIM_LOW_MEMORY").is_ok() || crate::settings::stored_graphics() == crate::settings::Graphics::Low
+}
+
+/// Switches the scene for a new GRAPHICS pick (natively; the web reloads instead).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_graphics(graphics: crate::settings::Graphics) {
+    low_memory();
+    let low = std::env::var("FLIGHT_SIM_LOW_MEMORY").is_ok() || graphics == crate::settings::Graphics::Low;
+    LOW.store(low, Ordering::Relaxed);
+}
+
+/// `<OS data dir>/flight_sim`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    let home = |rest: &str| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(rest));
+    let dir = if cfg!(target_os = "macos") {
+        home("Library/Application Support")
+    } else if cfg!(windows) {
+        std::env::var_os("APPDATA").map(Into::into)
+    } else {
+        std::env::var_os("XDG_DATA_HOME").map(Into::into).or_else(|| home(".local/share"))
+    }?;
+    Some(dir.join("flight_sim"))
 }
 
 /// Whether to use Bevy's physical atmosphere. It samples 32-bit float

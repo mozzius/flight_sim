@@ -93,15 +93,17 @@ impl Plugin for CloudsPlugin {
         {
             settings.temporal_blend = b;
         }
-        if crate::platform::low_memory() {
-            settings.divisor = settings.divisor.max(4);
-        }
+        let full_divisor = settings.divisor;
+        settings.divisor = divisor_for(full_divisor);
         settings.enabled = !disabled;
         // the round's weather and time of day (re-applied when it changes)
         let base = settings.clone();
         settings = with_environment(&base, &crate::environment::Environment::default());
-        app.insert_resource(CloudBase(base))
-            .add_systems(Update, apply_environment.run_if(resource_changed::<crate::environment::Environment>));
+        app.insert_resource(CloudBase(base, full_divisor))
+            .add_systems(
+                Update,
+                (sync_divisor, apply_environment.run_if(resource_changed::<crate::environment::Environment>)),
+            );
 
         let t0 = bevy::platform::time::Instant::now();
         // baked unbiased: the shader and `CloudField` add the bias
@@ -173,9 +175,24 @@ impl Plugin for CloudsPlugin {
 // ---------------------------------------------------------------------------
 // settings and the CPU-side field
 
-/// The settings before the environment is applied.
+/// The settings before the environment is applied, and the divisor before
+/// the low-memory scene coarsens it.
 #[derive(Resource)]
-struct CloudBase(CloudSettings);
+struct CloudBase(CloudSettings, u32);
+
+/// The low-memory scene renders the clouds at 1/4 resolution at most.
+fn divisor_for(full: u32) -> u32 {
+    if crate::platform::low_memory() { full.max(4) } else { full }
+}
+
+/// Follows the GRAPHICS setting live (the clouds' textures resize with it).
+fn sync_divisor(mut base: ResMut<CloudBase>, mut settings: ResMut<CloudSettings>) {
+    let divisor = divisor_for(base.1);
+    if base.0.divisor != divisor {
+        base.0.divisor = divisor;
+        settings.divisor = divisor;
+    }
+}
 
 fn with_environment(base: &CloudSettings, env: &crate::environment::Environment) -> CloudSettings {
     let look = env.look().cloud;

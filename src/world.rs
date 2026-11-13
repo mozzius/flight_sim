@@ -21,7 +21,7 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Terrain>()
             .add_plugins(TerrainGenPlugin)
-            .add_systems(Startup, setup)
+            .add_systems(Update, sync_shadow_map)
             // the round's environment is chosen before each bake (and for the menu)
             .add_systems(Update, (apply_environment.run_if(resource_changed::<Environment>), follow_sky_dome).chain());
     }
@@ -74,9 +74,13 @@ impl Terrain {
 }
 
 
-fn setup(mut commands: Commands) {
-    if crate::platform::low_memory() {
-        commands.insert_resource(bevy::light::DirectionalLightShadowMap { size: 1024 });
+/// Smaller shadow maps in the low-memory scene (follows the GRAPHICS setting live).
+fn sync_shadow_map(map: Option<ResMut<bevy::light::DirectionalLightShadowMap>>) {
+    let size = if crate::platform::low_memory() { 1024 } else { 2048 };
+    if let Some(mut map) = map
+        && map.size != size
+    {
+        map.size = size;
     }
 }
 

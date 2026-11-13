@@ -233,19 +233,23 @@
     const resume = () => contexts.forEach((c) => c.state === "suspended" && c.resume().catch(() => {}));
     for (const ev of ["pointerdown", "keydown", "touchstart"]) addEventListener(ev, resume, { capture: true });
 
-    // Render at most 1.5x on touch devices (2x elsewhere): a phone at 3x pushes
-    // ~4x the pixels through the clouds and post-processing, and runs out of
-    // GPU memory. winit sizes the canvas from devicePixelRatio, so cap that.
-    {
-      const real = window.devicePixelRatio || 1;
-      const cap = navigator.maxTouchPoints > 0 ? 1.5 : 2;
-      if (real > cap) Object.defineProperty(window, "devicePixelRatio", { get: () => cap, configurable: true });
-    }
-
-    // Phones and tablets: the low-memory mode (see src/platform.rs)
+    // The low-memory mode (see src/platform.rs): the GRAPHICS setting
+    // (src/settings.rs; AUTO means phones and tablets), unless ?low / ?high.
+    // Render at most 1.5x in it (2x otherwise): a phone at 3x pushes ~4x the
+    // pixels through the clouds and post-processing, and runs out of GPU
+    // memory. winit sizes the canvas from devicePixelRatio, so cap that.
     {
       const q = new URLSearchParams(location.search);
-      window.FLIGHT_SIM_LOW_MEMORY = q.has("low") || (navigator.maxTouchPoints > 0 && !q.has("high"));
+      let graphics = "";
+      try { graphics = localStorage.getItem("flight_sim_graphics") || ""; } catch {}
+      const auto = navigator.maxTouchPoints > 0;
+      window.FLIGHT_SIM_LOW_MEMORY = q.has("low") || (!q.has("high") && (graphics === "low" || (graphics !== "high" && auto)));
+      const real = window.devicePixelRatio || 1;
+      const cap = window.FLIGHT_SIM_LOW_MEMORY ? 1.5 : 2;
+      if (real > cap) Object.defineProperty(window, "devicePixelRatio", { get: () => cap, configurable: true });
+    }
+    {
+      const q = new URLSearchParams(location.search);
       // ?biome=alpine|tundra|farmland, ?weather=clear|broken|overcast|hazy and
       // ?time=dawn|morning|midday|afternoon|golden pin the round's environment
       // (src/environment.rs); otherwise it's rolled from the map seed

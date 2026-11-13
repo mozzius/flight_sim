@@ -138,7 +138,7 @@ impl Plugin for TerrainGenPlugin {
             MaterialPlugin::<water::WaterMaterial>::default(),
         ))
         .init_resource::<trees::LoadedTrees>()
-        .add_systems(Update, (trees::stream_trees, water::follow_camera));
+        .add_systems(Update, ((replant_trees, trees::stream_trees).chain(), water::follow_camera));
         if let Some(cam) = std::env::var("TERRAIN_DEBUG_CAM")
             .ok()
             .and_then(|s| DebugCam::from_env(&s))
@@ -1133,6 +1133,8 @@ pub struct MapBaker {
     seed: u32,
     biome: biome::Biome,
     texture_div: usize,
+    /// For the low-memory scene (no near texture), decided when it starts.
+    low: bool,
     start: Instant,
     grids: Vec<HeightGrid>,
     roads: Vec<roads::Road>,
@@ -1170,12 +1172,13 @@ impl MapBaker {
         SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
         biome::set(biome);
         info!("terrain: map seed {seed}, {} (FLIGHT_SIM_SEED={seed} to fly it again)", biome.name());
+        let low = crate::platform::low_memory();
         let mut total = ROADS_COST;
         for (_, cells) in GRIDS {
             total += ((cells + 1) * (cells + 1)) as f64;
         }
         for which in 0..3 {
-            if Self::wants_texture(which) {
+            if Self::wants_texture(which, low) {
                 let res = TEXTURE_RES[which] / texture_div;
                 total += ((res + 2) * (res + 2)) as f64 + (res * res) as f64 * TEXEL_COST;
             }
@@ -1184,6 +1187,7 @@ impl MapBaker {
             seed,
             biome,
             texture_div,
+            low,
             start: Instant::now(),
             grids: Vec::new(),
             roads: Vec::new(),
@@ -1196,8 +1200,8 @@ impl MapBaker {
     }
 
     /// Low-memory devices never draw the near grid, so skip its texture.
-    fn wants_texture(which: usize) -> bool {
-        !(which == 0 && crate::platform::low_memory())
+    fn wants_texture(which: usize, low: bool) -> bool {
+        !(which == 0 && low)
     }
 
     pub fn progress(&self) -> f32 {
@@ -1296,7 +1300,7 @@ impl MapBaker {
     }
 
     fn next_texture(&mut self, mut which: usize) -> Stage {
-        while which < 3 && !Self::wants_texture(which) {
+        while which < 3 && !Self::wants_texture(which, self.low) {
             self.textures.push(None);
             which += 1;
         }
@@ -1315,6 +1319,16 @@ impl MapBaker {
 /// Parent of a spawned map's meshes and roads.
 #[derive(Component)]
 pub struct MapRoot;
+
+/// Drops the loaded trees when the GRAPHICS setting flips the low-memory
+/// scene, so they stream back in at the new density and reach.
+fn replant_trees(mut commands: Commands, mut loaded: ResMut<trees::LoadedTrees>, mut was: Local<Option<bool>>) {
+    let low = crate::platform::low_memory();
+    if was.is_some_and(|w| w != low) {
+        loaded.clear(&mut commands);
+    }
+    *was = Some(low);
+}
 
 /// Removes the current map (meshes, roads, trees, collision) before the next one.
 pub fn clear_map(
@@ -1366,7 +1380,9 @@ pub fn spawn_map(
     // Low-memory devices skip the 32 m near mesh (the 64 m one covers the
     // middle instead; collision still uses the near heights) and take the
     // textures at half resolution.
-    let low = crate::platform::low_memory();
+    // (a map baked for the low-memory scene has no near texture, whatever
+    // GRAPHICS says now)
+    let low = crate::platform::low_memory() || textures[0].is_none();
     // the farms, for the fields the shader draws per pixel (out to the edge of the fine grid)
     let (farms, farm) = if b.field_line.is_some() {
         let (image, first, n) = fields::farm_texture(&fields, fine_half);
