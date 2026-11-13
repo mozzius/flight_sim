@@ -63,7 +63,7 @@ const JOIN: &str = "dev.mozzius.flight.join";
 /// How long the browser has to come back.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long an error shows in the prompt.
-const ERROR_SECS: f32 = 5.0;
+const ERROR_SECS: f32 = 4.0;
 
 /// Where a sign-in is at.
 #[derive(Clone, Debug, PartialEq, Eq)]

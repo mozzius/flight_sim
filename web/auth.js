@@ -112,6 +112,8 @@ function showPrompt() {
         prompt.querySelector("button").disabled = false;
         prompt.handle.setCustomValidity(String(err?.message || err));
         prompt.handle.reportValidity();
+        // errors clear after a few seconds
+        setTimeout(() => prompt.handle.setCustomValidity(""), 4000);
       });
     });
     prompt.handle.addEventListener("input", () => prompt.handle.setCustomValidity(""));
