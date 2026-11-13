@@ -128,7 +128,7 @@ fn forest_cover(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&fi
     let hedgerow = field.map_or(0.0, |f| cover.field * 0.8 * smoothstep(7.0, 3.5, f.edge));
     // (no lone trees in the middle of a crop field)
     let open = 1.0 - cover.rock;
-    (cover.forest * open).max(scattered * open * (1.0 - cover.field)).max(hedgerow) * b.tree_density
+    (cover.forest * open).max(scattered * open * (1.0 - cover.field)).max(hedgerow) * b.tree_density * cover.dry
 }
 
 /// Plants one chunk's trees (positions relative to the chunk centre).
@@ -167,7 +167,7 @@ fn plant_one(iu: u32, ju: u32, xz: Vec2, field: &TreeField, terrain: &Terrain) -
     let b = biome::params();
     let here = biome::may_have_fields(b, t.height, normal.y).then(|| fields::field_at(xz, &field.fields));
     let cover = forest_cover(t.height, normal, t.ridge_map, jitter, here.as_ref());
-    if rand01(iu, ju, 3) >= cover * 0.92 {
+    if rand01(iu, ju, 3) >= cover * 0.92 || b.water.as_ref().is_some_and(|w| t.height < w.level + 1.0) {
         return None;
     }
     if field.roads.nearest(xz).is_some_and(|(_, d)| d < super::roads::ROAD_HALF_WIDTH + 7.0) {

@@ -4,10 +4,10 @@
 //! colour and illuminance, exposure, distance fog, valley mist, the cloud
 //! layer, the atmosphere's aerosols and the fallback sky's gradient.
 //!
-//! The biome (`Biome`: alpine, tundra, farmland) is rolled first and biases
+//! The biome (`Biome`: alpine, tundra, farmland, archipelago) is rolled first and biases
 //! the weather and time dice.
 //!
-//! Overrides: `FLIGHT_SIM_BIOME=alpine|tundra|farmland`, `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
+//! Overrides: `FLIGHT_SIM_BIOME=alpine|tundra|farmland|archipelago`, `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 //! `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` natively, and
 //! `?biome=` / `?weather=` / `?time=` on the web (the page sets `window.FLIGHT_SIM_BIOME`,
 //! `FLIGHT_SIM_WEATHER` and `FLIGHT_SIM_TIME`). Screenshot runs default to alpine, clear midday so they stay
@@ -53,16 +53,19 @@ pub enum Biome {
     Tundra,
     /// Gentler hills, a patchwork of fields and hedgerows on the valley floors.
     Farmland,
+    /// Islands in a warm sea: beaches, cliffs, green hills, a few peaks.
+    Archipelago,
 }
 
 impl Biome {
-    pub const ALL: [Self; 3] = [Self::Alpine, Self::Tundra, Self::Farmland];
+    pub const ALL: [Self; 4] = [Self::Alpine, Self::Tundra, Self::Farmland, Self::Archipelago];
 
     fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "alpine" | "mountains" | "default" => Self::Alpine,
             "tundra" | "winter" | "snow" => Self::Tundra,
             "farmland" | "farm" | "fields" => Self::Farmland,
+            "archipelago" | "islands" | "island" | "sea" => Self::Archipelago,
             _ => return None,
         })
     }
@@ -72,6 +75,7 @@ impl Biome {
             Self::Alpine => "alpine",
             Self::Tundra => "tundra",
             Self::Farmland => "farmland",
+            Self::Archipelago => "archipelago",
         }
     }
 }
@@ -227,8 +231,8 @@ impl Environment {
                 })
                 .unwrap_or(weights.len() - 1)
         };
-        // alpine, tundra, farmland
-        let rolled_biome = Biome::ALL[pick(next(), &[4.0, 3.0, 3.0])];
+        // alpine, tundra, farmland, archipelago
+        let rolled_biome = Biome::ALL[pick(next(), &[3.5, 3.0, 3.0, 3.0])];
         let biome = biome.unwrap_or(rolled_biome);
         let (times, weathers): ([f32; 5], [f32; 4]) = match biome {
             // (dawn, morning, midday, afternoon, golden), (clear, broken, overcast, hazy)
@@ -237,6 +241,8 @@ impl Environment {
             Biome::Tundra => ([2.0, 2.5, 1.0, 2.0, 2.5], [3.5, 3.0, 2.5, 0.0]),
             // summer: warm haze and long evenings
             Biome::Farmland => ([1.0, 2.0, 2.5, 2.5, 2.5], [3.0, 3.0, 1.0, 2.5]),
+            // trade-wind cumulus, sea haze and sunsets over the water
+            Biome::Archipelago => ([1.0, 2.0, 2.5, 2.5, 3.5], [3.5, 3.5, 0.7, 2.3]),
         };
         let time = TimeOfDay::ALL[pick(next(), &times)];
         let weather = Weather::ALL[pick(next(), &weathers)];
@@ -332,6 +338,8 @@ impl Environment {
         let mist_density = match self.biome {
             // the plains sit lower, deeper in the mist layer
             Biome::Farmland => 0.55,
+            // the sea is right at the bottom of it: a light sea haze
+            Biome::Archipelago => 0.12,
             _ => 1.0,
         } * match w {
             Weather::Clear => 1.0,
@@ -418,6 +426,8 @@ impl Environment {
             fog_base: (extinction + inscatter) * 0.5 * fog_tint,
             fog_glare: sun_hue.extend(glare),
             mist: (mist_base * tint * display).extend(mist_density),
+            // the sun's reflection on water: its colour through the air, gone under a deck
+            glint: sun_hue * sun_weather * sun_weather * display,
             sky_horizon,
             sky_zenith,
             sky_below,
@@ -463,6 +473,8 @@ pub struct Look {
     pub fog_glare: Vec4,
     /// rgb: valley mist colour (post-exposure), a: density multiplier
     pub mist: Vec4,
+    /// Colour and strength of the sun glint on water (post-exposure, see `terrain_gen::water`).
+    pub glint: Vec3,
     pub sky_horizon: Vec3,
     pub sky_zenith: Vec3,
     pub sky_below: Vec3,

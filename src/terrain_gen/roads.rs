@@ -140,6 +140,8 @@ fn plan(grid: &HeightGrid) -> Vec<Vec<Vec2>> {
     let m = (grid.n - 1) / STRIDE + 1;
     let margin = (EDGE_MARGIN / (grid.spacing * STRIDE as f32)).ceil() as usize;
     let lat = Lattice { grid, m, lo: margin, hi: m - 1 - margin };
+    // no sites on the shore or under water
+    let dry = super::biome::params().water.as_ref().map_or(f32::MIN, |w| w.level + w.beach + 4.0);
 
     // ---- sites: the flattest low spot in each block of a coarse lattice
     let block = 24; // ~1.5 km
@@ -152,7 +154,7 @@ fn plan(grid: &HeightGrid) -> Vec<Vec<Vec2>> {
             for j in bj..bj + block {
                 for i in bi..bi + block {
                     let (h, s) = (lat.h(i, j), lat.slope(i, j));
-                    if h > 750.0 || s > 0.08 {
+                    if h > 750.0 || h < dry || s > 0.08 {
                         continue;
                     }
                     let score = h + s * 4_000.0;
@@ -206,6 +208,9 @@ fn plan(grid: &HeightGrid) -> Vec<Vec<Vec2>> {
                 on_road[j * m + i] = true;
             }
             paths.push(nodes.iter().map(|&(i, j)| lat.pos(i, j)).collect());
+        } else {
+            // cut off (another island): later sites there can join this one
+            on_road[start.1 * m + start.0] = true;
         }
         connected.push(start);
     }
@@ -222,6 +227,8 @@ fn route(lat: &Lattice, start: (usize, usize), goal: &[bool]) -> Option<Vec<(usi
     cost[s] = 0.0;
     heap.push(Reverse((0u32, s as u32)));
     let step = lat.grid.spacing * STRIDE as f32;
+    // roads don't cross water
+    let dry = super::biome::params().water.as_ref().map_or(f32::MIN, |w| w.level + 2.0);
     while let Some(Reverse((c_bits, node))) = heap.pop() {
         let node = node as usize;
         let c = f32::from_bits(c_bits);
@@ -246,6 +253,9 @@ fn route(lat: &Lattice, start: (usize, usize), goal: &[bool]) -> Option<Vec<(usi
                 continue;
             }
             let (ni, nj) = (ni as usize, nj as usize);
+            if lat.h(ni, nj) < dry {
+                continue;
+            }
             let len = step * if di != 0 && dj != 0 { std::f32::consts::SQRT_2 } else { 1.0 };
             let grade = (lat.h(ni, nj) - h).abs() / len;
             // gentle grades are cheap, steep ones very expensive; a little

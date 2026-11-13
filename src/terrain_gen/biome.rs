@@ -37,6 +37,13 @@ pub(super) struct BiomeParams {
     /// that bottom out about `soft_floor_range` lower.
     pub soft_floor: f32,
     pub soft_floor_range: f32,
+    /// Islands (archipelago): the ground is dropped by this much (m) so about half the
+    /// map is under the sea, with the relief varying region to region and gentle
+    /// shelves at the waterline. 0 = off.
+    pub sea_shift: f32,
+
+    // ---- water (`water`)
+    pub water: Option<Water>,
 
     // ---- ground (`terrain_color` / `cover`)
     pub meadow: Vec3,
@@ -90,13 +97,54 @@ pub(super) struct BiomeParams {
     pub shader_snow: Vec3,
 }
 
-static PARAMS: LazyLock<[BiomeParams; 3]> = LazyLock::new(|| [alpine(), tundra(), farmland()]);
+/// Lakes or the sea: a single water level per map (see `water`).
+pub(super) struct Water {
+    /// Height of the water surface (m).
+    pub level: f32,
+    /// The sea: the water carries on past the map to the horizon.
+    pub sea: bool,
+    /// Frozen over (pale, rough ice: no ripples or glint).
+    pub frozen: bool,
+    /// Beach / shore band above the water (m), coloured `sand`.
+    pub beach: f32,
+    pub sand: Vec3,
+    /// Water colour over the shallows and the deep (linear), and the depth (m) it takes
+    /// to go from one to the other.
+    pub shallow: Vec3,
+    pub deep: Vec3,
+    pub depth_scale: f32,
+    /// Width (m of depth) of the foam line at the shore.
+    pub foam: f32,
+    /// Strength of the sky reflection (lakes sit among dark mountains: less).
+    pub reflect: f32,
+}
+
+static PARAMS: LazyLock<[BiomeParams; 4]> = LazyLock::new(|| [alpine(), tundra(), farmland(), archipelago()]);
+
+/// Mountain lakes: a level just above the soft floor's flats, so the deepest basins fill.
+fn lakes(level: f32) -> Water {
+    Water {
+        level,
+        sea: false,
+        frozen: false,
+        beach: 1.5,
+        sand: srgb(0.45, 0.42, 0.36),
+        shallow: srgb(0.16, 0.30, 0.26),
+        deep: srgb(0.02, 0.07, 0.09),
+        depth_scale: 9.0,
+        foam: 0.0,
+        // (mountains all round: the sky is only part of what a lake reflects)
+        reflect: 0.5,
+    }
+}
 
 fn alpine() -> BiomeParams {
     BiomeParams {
         relief: 1.0,
         soft_floor: 120.0,
         soft_floor_range: 180.0,
+        sea_shift: 0.0,
+        water: Some(lakes(LAKE_LEVEL)),
         meadow: srgb(0.42, 0.47, 0.22),
         dry_meadow: srgb(0.52, 0.50, 0.30),
         forest: srgb(0.17, 0.25, 0.11),
@@ -133,6 +181,14 @@ fn tundra() -> BiomeParams {
         relief: 1.0,
         soft_floor: 120.0,
         soft_floor_range: 180.0,
+        sea_shift: 0.0,
+        water: Some(Water {
+            frozen: true,
+            shallow: srgb(0.80, 0.86, 0.90),
+            deep: srgb(0.32, 0.44, 0.54),
+            sand: srgb(0.62, 0.62, 0.60),
+            ..lakes(LAKE_LEVEL)
+        }),
         // frozen, bleached tundra grass where the snow has blown off
         meadow: srgb(0.50, 0.48, 0.40),
         dry_meadow: srgb(0.58, 0.55, 0.47),
@@ -173,6 +229,9 @@ fn farmland() -> BiomeParams {
         relief: 0.5,
         soft_floor: 260.0,
         soft_floor_range: 380.0,
+        sea_shift: 0.0,
+        // (the plains bottom out lower)
+        water: Some(Water { shallow: srgb(0.20, 0.30, 0.22), ..lakes(FARM_LAKE_LEVEL) }),
         meadow: srgb(0.38, 0.48, 0.20),
         dry_meadow: srgb(0.48, 0.50, 0.26),
         forest: srgb(0.15, 0.24, 0.10),
@@ -206,6 +265,61 @@ fn farmland() -> BiomeParams {
     }
 }
 
+/// Lake level in the mountains, just above the deepest flats (which bottom out near -60 m).
+const LAKE_LEVEL: f32 = 20.0;
+const FARM_LAKE_LEVEL: f32 = 55.0;
+
+fn archipelago() -> BiomeParams {
+    BiomeParams {
+        relief: 1.0,
+        // a flat sea bed far down
+        soft_floor: -260.0,
+        soft_floor_range: 240.0,
+        sea_shift: 1350.0,
+        water: Some(Water {
+            level: 0.0,
+            sea: true,
+            frozen: false,
+            beach: 4.5,
+            sand: srgb(0.80, 0.74, 0.58),
+            shallow: srgb(0.18, 0.62, 0.60),
+            deep: srgb(0.02, 0.15, 0.30),
+            depth_scale: 26.0,
+            foam: 1.1,
+            reflect: 1.0,
+        }),
+        // lush, sunlit greens; scrub and bare volcanic rock up high
+        meadow: srgb(0.36, 0.50, 0.19),
+        dry_meadow: srgb(0.54, 0.53, 0.29),
+        forest: srgb(0.10, 0.24, 0.08),
+        alpine: srgb(0.44, 0.42, 0.28),
+        rock: srgb(0.44, 0.39, 0.33),
+        dark_rock: srgb(0.24, 0.21, 0.19),
+        snow: srgb(0.94, 0.95, 0.98),
+        tree_line: 1250.0,
+        snow_line: 9000.0,
+        snow_flatness: (0.55, 0.72),
+        rock_bias: 0.0,
+        low_snow: 0.0,
+        snow_in_forest: 1.0,
+        valley_woods: 0.9,
+        slope_woods: (0.99, 0.95),
+        hilltop_woods: 0.4,
+        field_line: None,
+        tree_density: 1.0,
+        tree_scale: 0.95,
+        conifers: (0.0, 0.25),
+        conifer: srgb(0.12, 0.22, 0.10),
+        broadleaf: srgb(0.17, 0.33, 0.10),
+        autumn: srgb(0.30, 0.36, 0.10),
+        autumn_share: 0.06,
+        tree_snow: 0.0,
+        shader_rock: Vec3::new(0.82, 0.8, 0.8),
+        veg_patches: 0.6,
+        shader_snow: Vec3::new(0.55, 0.75, 0.0),
+    }
+}
+
 /// How the ground is covered at a point (each 0..1), shared by the colour
 /// bake and the tree planter so the trees grow where the ground looks wooded.
 pub(super) struct Cover {
@@ -215,6 +329,10 @@ pub(super) struct Cover {
     pub alpine: f32,
     pub rock: f32,
     pub snow: f32,
+    /// Beach / lake shore, and the lake or sea bed below the water.
+    pub sand: f32,
+    /// 0 under water and on the shore, 1 inland: no trees or fields below.
+    pub dry: f32,
 }
 
 /// `field`: the field at the point, where `may_have_fields` (farmland only).
@@ -232,20 +350,34 @@ pub(super) fn cover(b: &BiomeParams, h: f32, normal: Vec3, ridge: f32, jitter: f
     let hilltops = b.hilltop_woods * smoothstep(0.2, 0.55, ridge + jitter * 0.3);
     let mut forest = slopes.max(woods).max(hilltops) * below_tree_line;
 
+    // the shore: a beach on gentle ground, nothing grows below it
+    let (mut sand, mut dry, mut coast) = (0.0, 1.0, 0.0);
+    if let Some(w) = &b.water {
+        let above = h - w.level + jitter * 1.5;
+        dry = smoothstep(w.beach * 0.6, w.beach + 3.0, above);
+        sand = smoothstep(w.beach + 1.0, w.beach - 1.0, above) * smoothstep(0.80, 0.93, flatness);
+        sand = sand.max(smoothstep(0.5, -0.5, above));
+        // sea cliffs: bare rock on the steep coasts
+        if w.sea {
+            coast = smoothstep(120.0, 20.0, above);
+        }
+        forest *= dry;
+    }
+
     let mut field_amt = 0.0;
     if let (Some(f), Some(line)) = (field, b.field_line) {
         let amt = fields_mask(line, h, flatness, jitter);
         if f.wood {
-            forest = forest.max(amt);
+            forest = forest.max(amt * dry);
         } else {
-            field_amt = amt;
-            forest *= 1.0 - amt;
+            field_amt = amt * dry;
+            forest *= 1.0 - field_amt;
         }
     }
     let alpine = smoothstep(tree_line - 100.0, tree_line + 250.0, h);
 
     // Rock on steep slopes, more exposed on ridges and higher up.
-    let steep_start = 0.70 + b.rock_bias + ridge * 0.06 + jitter * 0.04 + smoothstep(1500.0, 3000.0, h) * 0.08;
+    let steep_start = 0.70 + b.rock_bias + coast * 0.06 + ridge * 0.06 + jitter * 0.04 + smoothstep(1500.0, 3000.0, h) * 0.08;
     let rock = smoothstep(steep_start, steep_start - 0.10, flatness);
 
     // Snow on high, not-too-steep ground; it lingers longer in creases.
@@ -262,7 +394,7 @@ pub(super) fn cover(b: &BiomeParams, h: f32, normal: Vec3, ridge: f32, jitter: f
         snow = snow.max(drifts * b.low_snow);
     }
     snow *= 1.0 - forest * (1.0 - b.snow_in_forest);
-    Cover { forest, field: field_amt, alpine, rock, snow }
+    Cover { forest, field: field_amt, alpine, rock, snow, sand, dry }
 }
 
 /// Where fields go: flat, low ground (0..1).

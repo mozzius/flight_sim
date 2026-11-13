@@ -41,12 +41,15 @@ crosshair, right stick look around.
 Guns: put the boresight cross on the red lead pipper; it turns white with
 SHOOT when you have a firing solution.
 
-Every round flies a freshly generated map (mountains, roads and forests) in one of three
-biomes (alpine valleys; winter tundra with a low snow line and sparse snowy conifers;
-gentle farmland with a patchwork of fields and hedgerows on the valley floors) under a
-time of day (dawn, morning, midday, afternoon, golden hour) and weather (clear, broken
-cloud, overcast, hazy) rolled from the same seed (the biome tilts the weather: tundra is
-never hazy, farmland gets more summer haze); the seed is in the pause menu and
+Every round flies a freshly generated map (mountains, roads and forests) in one of four
+biomes (alpine valleys; winter tundra with a low snow line, sparse snowy conifers and
+frozen lakes; gentle farmland with a patchwork of fields and hedgerows on the valley
+floors; an archipelago of beaches, sea cliffs and green islands, about half the map sea)
+under a time of day (dawn, morning, midday, afternoon, golden hour) and weather (clear,
+broken cloud, overcast, hazy) rolled from the same seed (the biome tilts the weather:
+tundra is never hazy, farmland gets more summer haze, the islands more golden hours). The
+deepest valley basins hold lakes; water is coloured by its depth, reflects the sky, glints
+in the sun and counts as ground (you crash into it). The seed is in the pause menu and
 `FLIGHT_SIM_SEED=<n>` flies it again. The round opens with a short
 fly-by shot: any key, click, tap or gamepad A skips it.
 
@@ -68,13 +71,14 @@ tablets get a lighter scene (fewer trees, half-res terrain textures).
 resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FLIGHT_SIM_PAUSE_TEST=1`, `FLIGHT_SIM_KILL_TEST=1`,
 `FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_SEED=<n>` (fly that map; screenshot runs default to
 seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene), `FLIGHT_SIM_NO_ATMOSPHERE=1`
-(the plain gradient sky), `FLIGHT_SIM_BIOME=alpine|tundra|farmland`,
+(the plain gradient sky), `FLIGHT_SIM_BIOME=alpine|tundra|farmland|archipelago`,
 `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` (pin the environment; screenshot runs
 default to alpine, clear midday), `FLIGHT_SIM_MODE=endless|challenge` (skip the menu;
 screenshot runs default to endless), `FLIGHT_SIM_MODE=menu|menu-endless` (show the menu in a
 screenshot run), `FLIGHT_SIM_DIE_AT=<secs>` (shoot the player down, for the score screen). Biome parameter sets live in `src/terrain_gen/biome.rs`,
-the farmland fields in `src/terrain_gen/fields.rs`.
+the farmland fields in `src/terrain_gen/fields.rs`, lakes and the sea in `src/terrain_gen/water.rs`
+(shader `assets/shaders/water.wesl`).
 Screenshot runs are headless (no window) and silent.
 
 ## Web build

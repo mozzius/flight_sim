@@ -26,7 +26,10 @@
 //!
 //! Biomes (`biome`): a parameter set threaded through the height shaping (relief and the
 //! soft floor in `sample_terrain`), the colour bake (`terrain_color`), the trees and the
-//! terrain shader. Farmland adds fields on flat low ground (`fields`).
+//! terrain shader. Farmland adds fields on flat low ground (`fields`). Each biome has a water
+//! level (`water`): lakes in the deepest basins, or for the archipelago a sea over about half
+//! the map (`sample_terrain` drops the ground by `sea_shift`, varies the relief by region and
+//! eases the slope at the waterline into beaches).
 //!
 //! Debug: `TERRAIN_DEBUG_CAM=<n>` overrides the `Camera3d` transform with one of a few fixed
 //! viewpoints (or `x,y,z,tx,ty,tz`) for looking at the terrain.
@@ -47,6 +50,7 @@ pub mod biome;
 mod fields;
 mod roads;
 mod trees;
+pub mod water;
 
 pub struct TerrainGenPlugin;
 
@@ -117,9 +121,10 @@ impl Plugin for TerrainGenPlugin {
         app.add_plugins((
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<SceneryMaterial>::default(),
+            MaterialPlugin::<water::WaterMaterial>::default(),
         ))
         .init_resource::<trees::LoadedTrees>()
-        .add_systems(Update, trees::stream_trees);
+        .add_systems(Update, (trees::stream_trees, water::follow_camera));
         if let Some(cam) = std::env::var("TERRAIN_DEBUG_CAM")
             .ok()
             .and_then(|s| DebugCam::from_env(&s))
@@ -224,6 +229,8 @@ pub struct GeneratedTerrain {
     near: HeightGrid,
     fine: HeightGrid,
     coarse: HeightGrid,
+    /// Lakes or the sea: a floor at this height (`height_at`).
+    water_level: Option<f32>,
 }
 
 impl GeneratedTerrain {
@@ -232,14 +239,17 @@ impl GeneratedTerrain {
     /// beyond), so it matches the mesh at its vertices; between them bilinear interpolation
     /// differs slightly from the mesh's triangles. Outside the generated area (±76.8 km) the
     /// edge height is extended.
+    ///
+    /// Water counts as ground: this is the surface of a lake or the sea where there is one.
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
-        if let Some(h) = self.near.sample_inside(x, z) {
+        let h = if let Some(h) = self.near.sample_inside(x, z) {
             h
         } else if let Some(h) = self.fine.sample_inside(x, z) {
             h
         } else {
             self.coarse.sample_clamped(x, z)
-        }
+        };
+        self.water_level.map_or(h, |w| h.max(w))
     }
 }
 
@@ -662,6 +672,17 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
     let b = biome::params();
     let mut height = (eroded - SEA_LEVEL) * WORLD_SCALE * VERTICAL_SCALE * b.relief;
 
+    // Islands: drop about half the map under the sea, vary the relief from region to region
+    // (tall peaks in some places, low sandy islands and lagoons in others), and ease the
+    // slope at the waterline into shelves and beaches (monotonic: 1 - 0.7 e^-x²).
+    if b.sea_shift > 0.0 {
+        let region = noised(p * 1.4, terrain_seed() ^ 0x05EA).x;
+        let relief = lerp(0.3, 1.0, smoothstep(-0.4, 0.4, region));
+        height = (height - b.sea_shift) * relief;
+        let x = height / 30.0;
+        height *= 1.0 - 0.7 * (-x * x).exp();
+    }
+
     // Squash the deepest basins into broad, nearly flat floors that bottom out just below 0
     // (alpine: 120 m and 180 m; farmland squashes much more into wide plains).
     let (soft_floor, range) = (b.soft_floor, b.soft_floor_range);
@@ -757,6 +778,11 @@ fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&f
     // rock darker in eroded creases
     let rock_col = b.rock.lerp(b.dark_rock, crease * 0.8 + jitter.max(0.0) * 0.2);
     c = c.lerp(rock_col, cover.rock);
+    if let Some(w) = &b.water {
+        // wet and darker at the waterline and below it
+        let wet = smoothstep(w.level + 0.8, w.level - 1.5, h);
+        c = c.lerp(w.sand * (1.0 - 0.4 * wet), cover.sand);
+    }
     c.lerp(b.snow, cover.snow)
 }
 
@@ -1260,6 +1286,7 @@ pub fn clear_map(
 
 /// Turns a baked map into meshes, materials, roads and the tree field, and
 /// returns the heightfield for collision queries.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_map(
     bake: MapBake,
     look: &crate::environment::Look,
@@ -1267,6 +1294,7 @@ pub fn spawn_map(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<TerrainMaterial>,
     scenery_materials: &mut Assets<SceneryMaterial>,
+    water_materials: &mut Assets<water::WaterMaterial>,
     images: &mut Assets<Image>,
 ) -> GeneratedTerrain {
     let start = Instant::now();
@@ -1407,7 +1435,14 @@ pub fn spawn_map(
         start.elapsed(),
     );
 
-    GeneratedTerrain { near, fine, coarse }
+    // ---- lakes / the sea
+    if let Some(w) = &b.water {
+        let grids = [&near, &fine, &coarse];
+        let water = water::spawn(w, look, grids, low, commands, meshes, water_materials, images);
+        commands.entity(root).add_child(water);
+    }
+
+    GeneratedTerrain { near, fine, coarse, water_level: b.water.as_ref().map(|w| w.level) }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1535,7 +1570,7 @@ mod tests {
     #[test]
     fn stats() {
         // (biomes are a global: only this test switches them, and it puts alpine back)
-        for b in [biome::Biome::Farmland, biome::Biome::Tundra, biome::Biome::Alpine] {
+        for b in [biome::Biome::Archipelago, biome::Biome::Farmland, biome::Biome::Tundra, biome::Biome::Alpine] {
             biome::set(b);
             println!("{}:", b.name());
             stats_for_biome();
@@ -1566,5 +1601,12 @@ mod tests {
             pct(0.99),
             pct(1.0)
         );
+        // lakes fill a few basins; the archipelago is about half sea
+        if let Some(w) = &biome::params().water {
+            let wet = hs.iter().filter(|h| **h < w.level).count() as f32 / hs.len() as f32;
+            println!("under water: {:.1}%", wet * 100.0);
+            let range = if w.sea { 0.4..0.65 } else { 0.005..0.06 };
+            assert!(range.contains(&wet), "{:.1}% under water", wet * 100.0);
+        }
     }
 }

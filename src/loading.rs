@@ -140,6 +140,7 @@ fn load_map(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut scenery: ResMut<Assets<SceneryMaterial>>,
+    mut water: ResMut<Assets<terrain_gen::water::WaterMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut terrain: ResMut<Terrain>,
     env: Res<Environment>,
@@ -159,7 +160,7 @@ fn load_map(
     }
     let Some(bake) = done else { return };
     let generated =
-        terrain_gen::spawn_map(bake, &env.look(), &mut commands, &mut meshes, &mut materials, &mut scenery, &mut images);
+        terrain_gen::spawn_map(bake, &env.look(), &mut commands, &mut meshes, &mut materials, &mut scenery, &mut water, &mut images);
     terrain.set(generated);
     *baker = None;
     *frames = 0;
