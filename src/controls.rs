@@ -144,6 +144,7 @@ fn manage_cursor(
     prompt: Res<crate::respawn::RespawnPrompt>,
     touch: Res<crate::touch::TouchInput>,
     state: Res<State<crate::loading::GameState>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mut focus_events: MessageReader<bevy::window::WindowFocused>,
     mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
@@ -167,10 +168,27 @@ fn manage_cursor(
     if cursor.grab_mode != grab || cursor.visible != visible {
         cursor.grab_mode = grab;
         cursor.visible = visible;
-    } else if want && regained_focus {
-        // same values, but the OS forgot: make Bevy push them to the window again
+    } else if want && (regained_focus || (mouse.get_just_pressed().next().is_some() && !pointer_locked())) {
+        // same values, but the OS forgot (or, on the web, the browser refused the
+        // lock because no click came first): make Bevy push them to the window again
         cursor.set_changed();
     }
+}
+
+/// Whether the browser actually holds the pointer lock. Browsers refuse
+/// `requestPointerLock` without a recent click, so a lock asked for when a round
+/// starts after the loading bar can silently fail; the next click retries it.
+#[cfg(target_arch = "wasm32")]
+fn pointer_locked() -> bool {
+    let get = |o: &wasm_bindgen::JsValue, k: &str| js_sys::Reflect::get(o, &k.into()).ok();
+    get(&js_sys::global(), "document")
+        .and_then(|d| get(&d, "pointerLockElement"))
+        .is_some_and(|el| !el.is_null() && !el.is_undefined())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pointer_locked() -> bool {
+    true
 }
 
 fn gather_actions(

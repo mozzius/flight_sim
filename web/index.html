@@ -84,7 +84,7 @@
       addEventListener("error", (e) => show("error: " + (e.message || e.error)));
       addEventListener("unhandledrejection", (e) => {
         const r = String(e.reason);
-        if (!r.includes("Using exceptions for control flow") && !r.includes("pointer lock")) show("rejection: " + r);
+        if (!r.includes("Using exceptions for control flow") && !/pointer ?lock/i.test(r)) show("rejection: " + r);
       });
       window.__showError = show;
 
