@@ -101,6 +101,7 @@ function showPrompt() {
     prompt = document.createElement("form");
     prompt.id = "signin";
     prompt.innerHTML =
+      '<p>Sign in with your Atmosphere account (e.g. Bluesky)</p>' +
       '<input name="handle" type="text" placeholder="handle.bsky.social" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go">' +
       '<button type="submit">SIGN IN</button>';
     prompt.addEventListener("submit", (e) => {
