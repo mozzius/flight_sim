@@ -30,6 +30,7 @@ impl Plugin for MenuPlugin {
             Some("menu-multiplayer") => Panel::Multi,
             Some("menu-create") => Panel::Create,
             Some("menu-join") => Panel::Join,
+            Some("menu-settings") => Panel::Settings,
             _ => Panel::Closed,
         };
         app.init_resource::<Pressed>()
@@ -68,6 +69,8 @@ pub enum Pick {
     Location,
     Weather,
     Time,
+    Difficulty,
+    Graphics,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,6 +79,9 @@ pub enum UiAction {
     Challenge,
     Pick(Pick),
     Start,
+    /// The main menu's SETTINGS, and its APPLY (web: saves GRAPHICS and reloads).
+    Settings,
+    Apply,
     Resume,
     Menu,
     Retry,
@@ -140,6 +146,8 @@ enum Panel {
     Create,
     /// The code keypad.
     Join,
+    /// GRAPHICS.
+    Settings,
 }
 
 impl Panel {
@@ -155,7 +163,10 @@ struct JoinCode(String);
 // Focus orders and rows on the mode menu (the account corner button, if
 // any, is order 10 / row 9).
 const ORDER_PICKERS: u8 = 5;
-const ORDER_START: u8 = 8;
+const ORDER_START: u8 = 11;
+const ROW_START: u8 = 7;
+const ORDER_SETTINGS: u8 = 50;
+const ROW_SETTINGS: u8 = 16;
 const ORDER_KEYS: u8 = 20;
 const ROW_KEYS: u8 = 11;
 const KEYS_PER_ROW: usize = 8;
@@ -217,6 +228,48 @@ struct AccountLabel;
 
 #[derive(Component)]
 struct PickValue(Pick);
+
+/// DIFFICULTY (endless only: hidden when the pickers set up a room).
+#[derive(Component)]
+struct EndlessOnly;
+
+#[derive(Component)]
+struct SettingsButton;
+
+#[derive(Component)]
+struct SettingsPanel;
+
+/// Wraps APPLY (the web, with a GRAPHICS pick waiting).
+#[derive(Component)]
+struct ApplyButton;
+
+/// A picker row: label on the left, `< VALUE >` on the right.
+fn picker(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, pick: Pick, order: u8, row: u8) -> Entity {
+    let action = UiAction::Pick(pick);
+    parent
+        .spawn((
+            UiButton { screen: Screen::Modes, order, row, action },
+            Hovered::default(),
+            Node {
+                width: px(374),
+                min_height: px(44),
+                padding: UiRect::axes(px(16), px(8)),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BorderColor::all(BORDER),
+            BackgroundColor(BUTTON),
+        ))
+        .with_children(|b| {
+            b.spawn((Text::new(label), font_of(font, 14.0, DIM), Pickable::IGNORE));
+            b.spawn((PickValue(pick), Text::new(""), font_of(font, 17.0, GREEN), Pickable::IGNORE));
+        })
+        .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)))
+        .id()
+}
 
 /// ENDLESS / CHALLENGE (hidden while the multiplayer panels are open).
 #[derive(Component)]
@@ -323,35 +376,22 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                 Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(8), ..default() },
             ))
             .with_children(|panel| {
-                for (i, (pick, label)) in
-                    [(Pick::Location, "LOCATION"), (Pick::Weather, "WEATHER"), (Pick::Time, "TIME")].into_iter().enumerate()
+                for (i, (pick, label)) in [
+                    (Pick::Location, "LOCATION"),
+                    (Pick::Weather, "WEATHER"),
+                    (Pick::Time, "TIME"),
+                    (Pick::Difficulty, "DIFFICULTY"),
+                ]
+                .into_iter()
+                .enumerate()
                 {
-                    let action = UiAction::Pick(pick);
-                    panel
-                        .spawn((
-                            UiButton { screen: Screen::Modes, order: ORDER_PICKERS + i as u8, row: 3 + i as u8, action },
-                            Hovered::default(),
-                            Node {
-                                width: px(374),
-                                min_height: px(44),
-                                padding: UiRect::axes(px(16), px(8)),
-                                border: UiRect::all(px(1)),
-                                border_radius: BorderRadius::all(px(6)),
-                                justify_content: JustifyContent::SpaceBetween,
-                                align_items: AlignItems::Center,
-                                ..default()
-                            },
-                            BorderColor::all(BORDER),
-                            BackgroundColor(BUTTON),
-                        ))
-                        .with_children(|b| {
-                            b.spawn((Text::new(label), font_of(&font, 14.0, DIM), Pickable::IGNORE));
-                            b.spawn((PickValue(pick), Text::new(""), font_of(&font, 17.0, GREEN), Pickable::IGNORE));
-                        })
-                        .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)));
+                    let e = picker(panel, &font, label, pick, ORDER_PICKERS + i as u8, 3 + i as u8);
+                    if pick == Pick::Difficulty {
+                        panel.commands().entity(e).insert(EndlessOnly);
+                    }
                 }
                 panel.spawn(Node { height: px(4), ..default() });
-                button(panel, &font, "START", Screen::Modes, ORDER_START, 6, UiAction::Start);
+                button(panel, &font, "START", Screen::Modes, ORDER_START, ROW_START, UiAction::Start);
             });
             root.spawn((
                 JoinPanel,
@@ -396,6 +436,19 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         button(w, &font, "START", Screen::Modes, ORDER_LOBBY, ROW_LOBBY, UiAction::StartRoom);
                     });
                     button(row, &font, "LEAVE", Screen::Modes, ORDER_LOBBY + 1, ROW_LOBBY, UiAction::Leave);
+                });
+            });
+            root.spawn((SettingsButton, Node::default())).with_children(|row| {
+                button(row, &font, "SETTINGS", Screen::Modes, ORDER_SETTINGS, ROW_SETTINGS, UiAction::Settings);
+            });
+            root.spawn((
+                SettingsPanel,
+                Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(8), ..default() },
+            ))
+            .with_children(|panel| {
+                picker(panel, &font, "GRAPHICS", Pick::Graphics, ORDER_SETTINGS + 1, ROW_SETTINGS + 1);
+                panel.spawn((ApplyButton, Node { margin: UiRect::top(px(4)), ..default() })).with_children(|w| {
+                    button(w, &font, "APPLY", Screen::Modes, ORDER_SETTINGS + 2, ROW_SETTINGS + 2, UiAction::Apply);
                 });
             });
             root.spawn((StatusText, Text::new(""), font_of(&font, 15.0, DIM)));
@@ -591,6 +644,12 @@ fn cycle<T: Copy + PartialEq>(all: &[T], current: Option<T>, step: i32) -> Optio
     (j > 0).then(|| all[j as usize - 1])
 }
 
+/// Steps through `all` (no random slot), wrapping.
+fn step<T: Copy + PartialEq>(all: &[T], current: T, step: i32) -> T {
+    let i = all.iter().position(|x| *x == current).unwrap_or(0) as i32;
+    all[(i + step).rem_euclid(all.len() as i32) as usize]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_pressed(
     mut commands: Commands,
@@ -605,13 +664,33 @@ fn handle_pressed(
     time: Res<Time<Real>>,
     mut sign_in: ResMut<crate::signin::SignInPrompt>,
     handle_field: Query<&bevy::text::EditableText, With<crate::signin::HandleField>>,
+    mut settings: ResMut<crate::settings::Settings>,
+    mut applied: ResMut<crate::settings::Applied>,
 ) {
-    for (action, step) in std::mem::take(&mut pressed.0) {
+    for (action, step_by) in std::mem::take(&mut pressed.0) {
         match action {
             UiAction::Endless => {
                 *panel = if *panel == Panel::Endless { Panel::Closed } else { Panel::Endless };
                 if *panel == Panel::Endless {
                     focus.order = ORDER_START;
+                }
+            }
+            UiAction::Settings => {
+                *panel = if *panel == Panel::Settings { Panel::Closed } else { Panel::Settings };
+                if *panel == Panel::Settings {
+                    focus.order = ORDER_SETTINGS + 1;
+                }
+            }
+            UiAction::Apply => crate::settings::apply_graphics(&settings, &mut applied),
+            UiAction::Pick(Pick::Difficulty) => {
+                settings.difficulty = step(&crate::difficulty::Difficulty::ALL, settings.difficulty, step_by);
+                crate::settings::save_difficulty(settings.difficulty);
+            }
+            UiAction::Pick(Pick::Graphics) => {
+                settings.graphics = step(&crate::settings::Graphics::ALL, settings.graphics, step_by);
+                // natively it applies at once; the web waits for APPLY (it reloads)
+                if !cfg!(target_arch = "wasm32") {
+                    crate::settings::apply_graphics(&settings, &mut applied);
                 }
             }
             UiAction::Multiplayer => {
@@ -651,9 +730,9 @@ fn handle_pressed(
             }
             UiAction::Start if *panel == Panel::Create => net.create(picks.0),
             UiAction::Start => begin_round(&mut commands, &mut next, GameMode::Endless, picks.0),
-            UiAction::Pick(Pick::Location) => picks.0.biome = cycle(&Biome::ALL, picks.0.biome, step),
-            UiAction::Pick(Pick::Weather) => picks.0.weather = cycle(&Weather::ALL, picks.0.weather, step),
-            UiAction::Pick(Pick::Time) => picks.0.time = cycle(&TimeOfDay::ALL, picks.0.time, step),
+            UiAction::Pick(Pick::Location) => picks.0.biome = cycle(&Biome::ALL, picks.0.biome, step_by),
+            UiAction::Pick(Pick::Weather) => picks.0.weather = cycle(&Weather::ALL, picks.0.weather, step_by),
+            UiAction::Pick(Pick::Time) => picks.0.time = cycle(&TimeOfDay::ALL, picks.0.time, step_by),
             UiAction::Resume => paused.0 = false,
             UiAction::Menu => next.set(GameState::Menu),
             UiAction::Invite(i) => {
@@ -701,6 +780,7 @@ fn style_buttons(
             UiAction::Multiplayer => panel.multiplayer(),
             UiAction::Create => *panel == Panel::Create,
             UiAction::Join => *panel == Panel::Join,
+            UiAction::Settings => *panel == Panel::Settings,
             _ => false,
         };
         let color = if focused {
@@ -738,6 +818,7 @@ fn layout_menu(
             Option<&SignedIn>,
             Has<MultiButton>,
             Has<LobbyPanel>,
+            (Has<EndlessOnly>, Has<SettingsButton>, Has<SettingsPanel>, Has<ApplyButton>),
         ),
         (
             Without<MenuRoot>,
@@ -750,17 +831,25 @@ fn layout_menu(
                 With<crate::friends::FriendsSection>,
                 With<MultiButton>,
                 With<LobbyPanel>,
+                Or<(With<EndlessOnly>, With<SettingsButton>, With<SettingsPanel>, With<ApplyButton>)>,
             )>,
         ),
     >,
     mut values: Query<(&PickValue, &mut Text), (Without<CodeText>, Without<StatusText>)>,
     mut code_text: Query<&mut Text, (With<CodeText>, Without<StatusText>)>,
     mut status: Query<&mut Text, (With<StatusText>, Without<CodeText>)>,
+    settings: Res<crate::settings::Settings>,
+    applied: Res<crate::settings::Applied>,
 ) {
     let signed_in = crate::identity::current_user().is_some();
     let lobby = net.in_lobby();
-    for (mut node, endless, modes, multi, join, friends, signed, multi_button, lobby_panel) in &mut sections {
-        let show = if let Some(f) = friends {
+    for (mut node, endless, modes, multi, join, friends, signed, multi_button, lobby_panel, extra) in &mut sections {
+        let (endless_only, settings_button, settings_panel, apply) = extra;
+        let show = if endless_only {
+            *panel == Panel::Endless
+        } else if apply {
+            settings.graphics != applied.0
+        } else if let Some(f) = friends {
             // (the pause menu's list is the friends module's)
             if f.0 != Screen::Modes {
                 continue;
@@ -773,6 +862,10 @@ fn layout_menu(
             false
         } else if multi_button {
             true
+        } else if settings_button {
+            !panel.multiplayer()
+        } else if settings_panel {
+            *panel == Panel::Settings
         } else if endless {
             matches!(*panel, Panel::Endless | Panel::Create)
         } else if modes {
@@ -817,6 +910,8 @@ fn layout_menu(
             Pick::Location => picks.0.biome.map(Biome::name),
             Pick::Weather => picks.0.weather.map(Weather::name),
             Pick::Time => picks.0.time.map(TimeOfDay::name),
+            Pick::Difficulty => Some(settings.difficulty.name()),
+            Pick::Graphics => Some(settings.graphics.name()),
         };
         let s = format!("< {} >", name.unwrap_or("random").to_ascii_uppercase());
         if text.0 != s {

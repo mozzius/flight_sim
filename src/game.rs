@@ -208,6 +208,7 @@ fn initial_spawn(
     mode: Res<GameMode>,
     mut score: ResMut<Score>,
     mut aim: ResMut<MouseAim>,
+    settings: Res<crate::settings::Settings>,
 ) {
     let north = Vec3::NEG_Z;
     if *mode == GameMode::Multiplayer {
@@ -230,7 +231,8 @@ fn initial_spawn(
     {
         spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0) + offset, north, false);
     }
-    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, &mut score, Vec3::new(0.0, 1500.0, 6000.0), north);
+    let difficulty = crate::difficulty::active(*mode, settings.difficulty);
+    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, difficulty, &mut score, Vec3::new(0.0, 1500.0, 6000.0), north);
 }
 
 /// Resets the round's state when it ends (back to the menu, or a retry).
@@ -259,19 +261,22 @@ fn end_round(
     time.unpause();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_enemy_wave(
     commands: &mut Commands,
     models: &Models,
     terrain: &Terrain,
     mode: GameMode,
+    difficulty: &crate::difficulty::DifficultyParams,
     score: &mut Score,
     player_pos: Vec3,
     player_heading: Vec3,
 ) {
     score.wave += 1;
     let challenge = mode == GameMode::Challenge;
-    // challenge: 3, 5, 7... hostiles, sharper each wave
-    let count = if challenge { (1 + score.wave * 2).min(25) } else { (4 + score.wave * 2).min(12) };
+    // challenge: 3, 5, 7... hostiles, sharper each wave; endless: by difficulty
+    let count = if challenge { (1 + score.wave * 2).min(25) } else { difficulty.wave_size(score.wave) };
+    let mut skills = 0.0;
     let mut rng = rand::rng();
     let ahead = Vec3::new(player_heading.x, 0.0, player_heading.z).normalize_or(Vec3::NEG_Z);
     let centre = Vec3::new(player_pos.x, 0.0, player_pos.z) + ahead * 10_000.0;
@@ -283,13 +288,17 @@ fn spawn_enemy_wave(
             + ahead * rng.random_range(-300.0..300.0)
             + Vec3::Y * rng.random_range(1300.0..2600.0);
         let e = spawn_aircraft(commands, models, terrain, Team::Red, pos, -ahead, false);
-        if challenge {
-            let mut pilot = Pilot::new();
+        let mut pilot = Pilot::new();
+        pilot.skill = if challenge {
             let base = 0.4 + 0.06 * (score.wave - 1) as f32;
-            pilot.skill = (base + rng.random_range(0.0..0.3)).min(1.0);
-            commands.entity(e).insert(pilot);
-        }
+            (base + rng.random_range(0.0..0.3)).min(1.0)
+        } else {
+            difficulty.skill_at(rng.random_range(0.0..1.0))
+        };
+        skills += pilot.skill;
+        commands.entity(e).insert(pilot);
     }
+    info!("wave {}: {count} hostiles, mean skill {:.2}", score.wave, skills / count as f32);
     score.last_event = Some((format!("WAVE {}: {} HOSTILES", score.wave, count), 4.0));
 }
 
@@ -455,6 +464,7 @@ pub fn wave_system(
     mut cooldown: Local<f32>,
     mut cleared: Local<bool>,
     time: Res<Time>,
+    settings: Res<crate::settings::Settings>,
 ) {
     if reds.iter().any(|t| *t == Team::Red) {
         *cooldown = 5.0;
@@ -477,6 +487,7 @@ pub fn wave_system(
     let Ok((t, ..)) = player.single() else {
         return;
     };
-    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, &mut score, t.translation, t.forward().as_vec3());
+    let difficulty = crate::difficulty::active(*mode, settings.difficulty);
+    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, difficulty, &mut score, t.translation, t.forward().as_vec3());
     *cooldown = 5.0;
 }

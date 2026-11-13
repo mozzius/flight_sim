@@ -7,7 +7,19 @@ Run the game using `cargo run`
 ## Modes
 
 - **Endless**: waves forever, respawn when shot down. Pick the location, weather and
-  time first (each defaults to random).
+  time first (each defaults to random), and the DIFFICULTY (kept between sessions):
+  EASY has smaller waves (3, 4, 5, 6) of mostly rookies, and your missiles pull harder,
+  react faster, see wider, mostly ignore flares and lock in half the time; HARD has bigger
+  waves (8 up to 16) of mostly aces and slightly weaker missiles. NORMAL is the original
+  game (6 up to 12); challenge and multiplayer always play it. The numbers are in
+  `src/difficulty.rs`.
+
+**Settings** (main menu): GRAPHICS is AUTO (the lighter scene on phones and tablets on the
+web, full elsewhere), LOW or HIGH, kept in `localStorage` / `<data dir>/flight_sim/settings`.
+Natively it switches straight away: shadow-map size, cloud resolution and the trees live,
+the terrain (near mesh, texture resolution) from the next round. The web reads it before the
+game starts (it also caps the canvas at 1.5x DPR instead of 2x), so APPLY saves it and
+reloads the page. `?low` / `?high` and `FLIGHT_SIM_LOW_MEMORY=1` override it.
 - **Challenge**: a random map, one life, bigger and sharper waves. Kills and cleared
   waves score points; the best score is kept (`localStorage` on the web, a file in the
   OS data dir natively).
@@ -82,7 +94,7 @@ fly-by shot: any key, click, tap or gamepad A skips it.
 On a touchscreen: swipe anywhere to aim and an autopilot flies there (banking into turns,
 levelling out once on target); GUN (hold), MSL, FLR and TGT on the left, the throttle slider
 on the right edge (top = afterburner, bottom = airbrake), pause top left. Phones and
-tablets get a lighter scene (fewer trees, half-res terrain textures).
+tablets get a lighter scene (fewer trees, half-res terrain textures; SETTINGS → GRAPHICS).
 
 ## Dev
 
@@ -97,12 +109,14 @@ tablets get a lighter scene (fewer trees, half-res terrain textures).
 (staged effects), `CLOUDS_DEBUG_CAM=above|below|inside|band|sun|horizon` (`CLOUDS_DEBUG_CAM_SPEED=<m/s>` flies it, `CLOUDS_DEBUG_CAM_H=<0..1>` sets the band height), `CLOUDS_DEBUG=1|2` (opacity | march steps), `CLOUDS_DIV=2..4` (cloud
 resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FLIGHT_SIM_PAUSE_TEST=1`, `FLIGHT_SIM_KILL_TEST=1`,
 `FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_TEXTURE_DIV=2` (bake the terrain textures at the web's resolution), `FLIGHT_SIM_SEED=<n>` (fly that map; screenshot runs default to
-seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene), `FLIGHT_SIM_NO_ATMOSPHERE=1`
+seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene, whatever GRAPHICS says),
+`FLIGHT_SIM_GRAPHICS=auto|low|high` and `FLIGHT_SIM_DIFFICULTY=easy|normal|hard` (pin the
+settings for a run without saving them; screenshot runs never read or write the settings file), `FLIGHT_SIM_DEV_GRAPHICS_AT=<secs>:low|high` (switch GRAPHICS mid-run, to check the live switch), `FLIGHT_SIM_NO_ATMOSPHERE=1`
 (the plain gradient sky), `FLIGHT_SIM_BIOME=alpine|tundra|farmland|archipelago`,
 `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` (pin the environment; screenshot runs
 default to alpine, clear midday), `FLIGHT_SIM_MODE=endless|challenge` (skip the menu;
-screenshot runs default to endless), `FLIGHT_SIM_MODE=menu|menu-endless` (show the menu in a
+screenshot runs default to endless), `FLIGHT_SIM_MODE=menu|menu-endless|menu-settings` (show the menu in a
 screenshot run), `FLIGHT_SIM_DIE_AT=<secs>` (shoot the player down, for the score screen). Biome parameter sets live in `src/terrain_gen/biome.rs`,
 the farmland fields in `src/terrain_gen/fields.rs` (the terrain shader redraws them per pixel from a small farm-layout texture, so they stay crisp on phones), lakes and the sea in `src/terrain_gen/water.rs`
 (shader `assets/shaders/water.wesl`).
@@ -270,6 +284,6 @@ vercel deploy dist --prod --scope samuel-newmans-projects --project flight-sim
 The web build is single-threaded, so it bakes the terrain textures at half
 resolution, a slice per frame under a loading bar, and plants trees a couple of
 chunks per frame. `?debug` shows the log and GPU state on the page; `?low` /
-`?high` force the phone/tablet scene on or off; `?noatmo` forces the plain sky;
+`?high` force the phone/tablet scene on or off (over the GRAPHICS setting); `?noatmo` forces the plain sky;
 `?biome=`, `?weather=` and `?time=` preselect the environment, `?mode=endless|challenge` skips
 the menu (same values as the env vars above).

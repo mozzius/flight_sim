@@ -196,6 +196,33 @@ pub struct Missile {
     /// Filtered estimate of the target's acceleration (the seeker's tracker
     /// takes time to notice a sudden break: that's the window to dodge in).
     pub target_accel: Vec3,
+    /// How it guides (the player's get an endless difficulty's).
+    pub seeker: Seeker,
+}
+
+/// A missile's guidance and seeker (see `difficulty`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seeker {
+    /// Peak lateral acceleration (G) at full dynamic pressure, fresh off the rail.
+    pub max_g: f32,
+    /// How far off its nose the seeker can look before it loses the target (rad).
+    pub gimbal: f32,
+    /// Scales the autopilot and tracker lags (below 1 reacts faster to a break).
+    pub lag: f32,
+    /// Proportional navigation gain.
+    pub nav_gain: f32,
+    /// Chance each flare salvo pulls it off its target.
+    pub decoy_odds: f64,
+}
+
+impl Seeker {
+    pub const NORMAL: Self = Self { max_g: MISSILE_MAX_G, gimbal: SEEKER_GIMBAL, lag: 1.0, nav_gain: MISSILE_NAV_GAIN, decoy_odds: 0.55 };
+}
+
+impl Default for Seeker {
+    fn default() -> Self {
+        Self::NORMAL
+    }
 }
 
 impl Missile {
@@ -350,11 +377,15 @@ fn player_weapon_intents(
 
 fn update_locks(
     time: Res<Time>,
-    mut seekers: Query<(&Transform, &mut Targeting, Has<Disabled>)>,
+    mode: Res<crate::modes::GameMode>,
+    settings: Res<crate::settings::Settings>,
+    mut seekers: Query<(&Transform, &mut Targeting, Has<Disabled>, Has<crate::game::Player>)>,
     targets: Query<&Transform, (With<Aircraft>, Without<Disabled>)>,
 ) {
     let dt = time.delta_secs();
-    for (transform, mut targeting, disabled) in &mut seekers {
+    let player_lock_time = crate::difficulty::active(*mode, settings.difficulty).lock_time;
+    for (transform, mut targeting, disabled, player) in &mut seekers {
+        let lock_time = if player { player_lock_time } else { LOCK_TIME };
         let in_cone = !disabled
             && targeting.target.and_then(|t| targets.get(t).ok()).is_some_and(|t| {
                 let to = t.translation - transform.translation;
@@ -363,7 +394,7 @@ fn update_locks(
                         < LOCK_CONE
             });
         targeting.lock = if in_cone {
-            (targeting.lock + dt / LOCK_TIME).min(1.0)
+            (targeting.lock + dt / lock_time).min(1.0)
         } else {
             (targeting.lock - dt * 2.0).max(0.0)
         };
@@ -383,12 +414,16 @@ fn fire_weapons(
         &mut Weapons,
         Option<&Targeting>,
         Has<Disabled>,
+        Has<crate::game::Player>,
     ), Without<crate::net::Remote>>,
     mut missiles: Query<&mut Missile>,
+    mode: Res<crate::modes::GameMode>,
+    settings: Res<crate::settings::Settings>,
 ) {
     let dt = time.delta_secs();
     let mut rng = rand::rng();
-    for (entity, transform, state, team, mut weapons, targeting, disabled) in &mut shooters {
+    let player_seeker = crate::difficulty::active(*mode, settings.difficulty).seeker;
+    for (entity, transform, state, team, mut weapons, targeting, disabled, player) in &mut shooters {
         weapons.gun_cooldown -= dt;
         weapons.missile_cooldown -= dt;
         weapons.flare_cooldown -= dt;
@@ -461,6 +496,7 @@ fn fire_weapons(
                 lateral: Vec3::ZERO,
                 last_target_velocity: None,
                 target_accel: Vec3::ZERO,
+                seeker: if player { player_seeker } else { Seeker::NORMAL },
             };
             let rotation = transform.rotation * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
             let e = spawn_missile(&mut commands, &assets, missile, Transform::from_translation(pos).with_rotation(rotation));
@@ -495,7 +531,7 @@ fn fire_weapons(
 pub fn decoy_missiles<'a>(target: Entity, flare: Entity, missiles: impl Iterator<Item = &'a mut Missile>) {
     let mut rng = rand::rng();
     for m in missiles {
-        if m.target == Some(target) && rng.random_bool(0.55) {
+        if m.target == Some(target) && rng.random_bool(m.seeker.decoy_odds) {
             m.target = Some(flare);
         }
     }
@@ -739,25 +775,25 @@ pub fn missile_guidance(
             Some((tpos, tvel)) => {
                 let los = tpos - pos;
                 let los_hat = los.normalize_or_zero();
-                if los_hat.angle_between(dir) > SEEKER_GIMBAL {
+                if los_hat.angle_between(dir) > missile.seeker.gimbal {
                     lost = true; // target left the seeker's field of view
                 } else {
                     let rel_v = tvel - missile.velocity;
                     let omega = los.cross(rel_v) / los.length_squared().max(1.0);
                     let closing = -rel_v.dot(los_hat);
-                    command = MISSILE_NAV_GAIN * closing.max(100.0) * omega.cross(los_hat)
+                    command = missile.seeker.nav_gain * closing.max(100.0) * omega.cross(los_hat)
                         + Vec3::Y * GRAVITY;
                     // augmented PN: lead a target that's pulling a sustained turn,
                     // so turning early doesn't help; only a sharp late break does
                     if let Some(last) = missile.last_target_velocity {
                         let measured = (tvel - last) / dt.max(1e-4);
                         let (fresh, tired) = MISSILE_TRACKER_LAG;
-                        let lag = tired + (fresh - tired) * missile.agility();
+                        let lag = (tired + (fresh - tired) * missile.agility()) * missile.seeker.lag;
                         let k = 1.0 - (-dt / lag).exp();
                         missile.target_accel += (measured - missile.target_accel) * k;
                         let a = missile.target_accel;
                         let perp = a - los_hat * a.dot(los_hat);
-                        command += perp * (MISSILE_NAV_GAIN * MISSILE_APN);
+                        command += perp * (missile.seeker.nav_gain * MISSILE_APN);
                     }
                     missile.last_target_velocity = Some(tvel);
                 }
@@ -769,12 +805,12 @@ pub fn missile_guidance(
     command -= dir * command.dot(dir);
     let lift = (speed / 600.0).powi(2).min(1.0);
     let agility = missile.agility();
-    let max_g = MISSILE_MAX_G * (0.25 + 0.75 * agility);
+    let max_g = missile.seeker.max_g * (0.25 + 0.75 * agility);
     let command = command.clamp_length_max(max_g * GRAVITY * lift);
 
     // the airframe follows the command with a lag
     let (fresh, tired) = MISSILE_AUTOPILOT_LAG;
-    let lag = tired + (fresh - tired) * agility;
+    let lag = (tired + (fresh - tired) * agility) * missile.seeker.lag;
     let k = 1.0 - (-dt / lag).exp();
     missile.lateral += (command - missile.lateral) * k;
     missile.lateral -= dir * missile.lateral.dot(dir);
@@ -842,6 +878,23 @@ mod tests {
 
     /// Fly one engagement; returns the closest approach in metres.
     fn engage(range: f32, aspect_deg: f32, evasion: Evasion, break_up: bool) -> f32 {
+        engage_with(Seeker::NORMAL, range, aspect_deg, evasion, break_up, 0, 0)
+    }
+
+    /// One engagement against `seeker`; the target drops `salvos` flare salvos
+    /// (0.4 s apart) once it breaks, each rolling the seeker's decoy odds
+    /// (`seed` drives the rolls).
+    fn engage_with(seeker: Seeker, range: f32, aspect_deg: f32, evasion: Evasion, break_up: bool, salvos: u32, seed: u32) -> f32 {
+        let mut rng_state = seed.wrapping_mul(0x9e37_79b9) | 1;
+        let mut roll = move || {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 17;
+            rng_state ^= rng_state << 5;
+            rng_state as f64 / u32::MAX as f64
+        };
+        let mut flare: Option<(Vec3, Vec3)> = None;
+        let mut salvos_left = salvos;
+        let mut next_salvo = 0.0;
         let dt = 1.0 / 60.0;
         let target_speed = 270.0;
         let break_g = 8.0 * GRAVITY;
@@ -861,12 +914,14 @@ mod tests {
             lateral: Vec3::ZERO,
             last_target_velocity: None,
             target_accel: Vec3::ZERO,
+            seeker,
         };
         let mut breaking: Option<Vec3> = None;
         let mut closest = f32::MAX;
         for _ in 0..(MISSILE_LIFE / dt) as usize {
             missile.age += dt;
-            let (accel, lost) = missile_guidance(&mut missile, mpos, Some((tpos, tvel)), dt);
+            let chasing = flare.unwrap_or((tpos, tvel));
+            let (accel, lost) = missile_guidance(&mut missile, mpos, Some(chasing), dt);
             if lost {
                 // keeps flying, unguided
             }
@@ -885,6 +940,18 @@ mod tests {
                     let side = to_missile.cross(Vec3::Y).normalize_or(Vec3::X);
                     breaking = Some(if break_up { Vec3::Y } else { side });
                 }
+            }
+            if breaking.is_some() && salvos_left > 0 && missile.age >= next_salvo {
+                salvos_left -= 1;
+                next_salvo = missile.age + FLARE_INTERVAL;
+                if flare.is_none() && roll() < seeker.decoy_odds {
+                    flare = Some((tpos, tvel * 0.7));
+                }
+            }
+            if let Some((fpos, fvel)) = &mut flare {
+                fvel.y -= GRAVITY * dt;
+                *fvel *= 1.0 - 0.8 * dt;
+                *fpos += *fvel * dt;
             }
             if let Some(dir) = breaking {
                 let lateral = (dir - tvel.normalize() * dir.dot(tvel.normalize())).normalize_or_zero();
@@ -1002,5 +1069,34 @@ mod tests {
         let (hits, misses) = hit_rate(Evasion::BreakAt(6.0), false);
         println!("break at 6s: {hits}/{} hit, miss distances {misses:.0?}", SHOTS.len());
         assert!(hits >= SHOTS.len() / 2, "an early break gives the missile time to correct: {hits} hits");
+    }
+
+    /// The endless difficulties' seekers against breaking, flaring targets
+    /// (prints the table; EASY should clearly out-hit NORMAL, HARD not beat it).
+    #[test]
+    fn difficulty_seekers_hit_rates() {
+        let mut rates = Vec::new();
+        for d in crate::difficulty::Difficulty::ALL {
+            let seeker = d.params().seeker;
+            let (mut hits, mut flared_hits, mut total) = (0, 0, 0);
+            for evasion in [Evasion::Straight, Evasion::BreakAt(1.0), Evasion::BreakAt(1.5), Evasion::BreakAt(2.5)] {
+                for up in [false, true] {
+                    for (r, a) in SHOTS.iter().chain(CLOSE_SHOTS.iter()) {
+                        for seed in 0..6 {
+                            total += 1;
+                            hits += (engage_with(seeker, *r, *a, evasion, up, 0, seed) < MISSILE_FUSE) as usize;
+                            // AI pilots drop up to two salvos once a missile is close
+                            flared_hits += (engage_with(seeker, *r, *a, evasion, up, 2, seed) < MISSILE_FUSE) as usize;
+                        }
+                    }
+                }
+            }
+            let (pct, flared) = (hits as f32 / total as f32 * 100.0, flared_hits as f32 / total as f32 * 100.0);
+            println!("{:>6}: {pct:.0}% hit without flares, {flared:.0}% with two salvos ({total} shots)", d.name());
+            rates.push((pct, flared));
+        }
+        let [easy, normal, hard] = [rates[0], rates[1], rates[2]];
+        assert!(easy.0 > normal.0 + 10.0 && easy.1 > normal.1 + 20.0, "easy {easy:?} vs normal {normal:?}");
+        assert!(hard.0 <= normal.0 + 1.0 && hard.1 <= normal.1 + 1.0, "hard {hard:?} vs normal {normal:?}");
     }
 }

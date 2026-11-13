@@ -920,6 +920,7 @@ fn apply(
                             lateral: Vec3::ZERO,
                             last_target_velocity: None,
                             target_accel: Vec3::ZERO,
+                            seeker: default(),
                         };
                         let e = spawn_missile(&mut commands, &assets, missile, missile_transform(pos, vel));
                         commands.entity(e).insert(RemoteMissile);

@@ -15,6 +15,7 @@ mod camera;
 mod clouds;
 mod controls;
 mod dev;
+mod difficulty;
 mod effects;
 mod environment;
 mod flight;
@@ -26,6 +27,7 @@ mod intro;
 mod pause;
 mod platform;
 mod respawn;
+mod settings;
 mod terrain_gen;
 mod loading;
 mod menu;
@@ -105,6 +107,6 @@ fn main() {
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
-        .add_plugins((loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin, signin::SignInPlugin))
+        .add_plugins((settings::SettingsPlugin, loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin, signin::SignInPlugin))
         .run();
 }
