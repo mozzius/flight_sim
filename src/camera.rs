@@ -23,10 +23,29 @@ pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
+        patch_atmosphere(app);
         app.add_systems(Startup, spawn_camera)
             .add_systems(Update, apply_environment.run_if(resource_changed::<crate::environment::Environment>))
             .add_systems(PostUpdate, follow_player.before(TransformSystems::Propagate));
     }
+}
+
+/// Swaps Bevy's atmosphere compositing shader for our copy, which integrates the
+/// transmittance to opaque geometry along the ray instead of reading it off the
+/// transmittance LUT (see `assets/shaders/atmosphere_render_sky.wesl`: the LUT ratio
+/// put a seam across distant islands at the sea horizon). The atmosphere plugin
+/// embeds its shaders at build time and they're loaded later, so overwriting the
+/// embedded bytes here (after `DefaultPlugins`) is enough.
+fn patch_atmosphere(app: &mut App) {
+    use bevy::asset::io::embedded::EmbeddedAssetRegistry;
+    let Some(registry) = app.world().get_resource::<EmbeddedAssetRegistry>() else {
+        return;
+    };
+    registry.insert_asset(
+        std::path::PathBuf::new(),
+        std::path::Path::new("bevy_pbr/atmosphere/render_sky.wesl"),
+        include_bytes!("../assets/shaders/atmosphere_render_sky.wesl").as_slice(),
+    );
 }
 
 /// Marker for the main 3D camera.

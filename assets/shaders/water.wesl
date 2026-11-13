@@ -121,7 +121,9 @@ fn ripples(p: vec2<f32>, t: f32, footprint: f32, octaves: f32, wind: f32) -> vec
         k *= 1.25;
         angle += 2.1;
     }
-    return vec3<f32>(slope, 1.0 - kept / max(total, 1e-4));
+    // (clamped: with every octave kept, rounding can leave it a hair below 0, and the
+    // sqrt of that in the glint is NaN, which rendered the water under a low camera black)
+    return vec3<f32>(slope, clamp(1.0 - kept / max(total, 1e-4), 0.0, 1.0));
 }
 
 // Valley mist (keep in sync with terrain.wesl).
@@ -241,7 +243,7 @@ fn fragment(
     out.color = apply_pbr_lighting(pbr_input);
 
     // ---- reflections (post-exposure)
-    let cos_v = max(dot(n, v), 0.0);
+    let cos_v = clamp(dot(n, v), 0.0, 1.0);
     let fresnel = 0.02 + 0.98 * pow(1.0 - cos_v, 5.0);
     var refl = reflect(-v, n);
     refl.y = abs(refl.y);
