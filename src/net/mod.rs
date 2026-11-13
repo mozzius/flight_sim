@@ -528,6 +528,7 @@ fn apply(
                 }
             }
             ServerMsg::Killed { victim, killer } => {
+                info!("multiplayer: player {victim} down (killer {killer:?})");
                 let killer = killer.and_then(|k| net.entity_of(k, me));
                 if Some(victim) == net.me {
                     if !net.awaiting_respawn {
@@ -544,6 +545,7 @@ fn apply(
                 }
             }
             ServerMsg::Respawned(id) => {
+                info!("multiplayer: player {id} respawned");
                 if Some(id) == net.me {
                     net.awaiting_respawn = false;
                     net.dead_on_server = false;

@@ -128,8 +128,11 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
     drop(rx);
     game.server.tick(now);
     for o in outgoing {
-        if let ServerMsg::Joined { code, you, players, .. } = &o.msg {
-            info!("room {code}: player {you} joined ({} in the room)", players.len());
+        match &o.msg {
+            ServerMsg::Joined { code, you, players, .. } => info!("room {code}: player {you} joined ({} in the room)", players.len()),
+            ServerMsg::Killed { victim, killer } => info!("player {victim} down, killer {killer:?}"),
+            ServerMsg::Respawned(id) => info!("player {id} respawned"),
+            _ => {}
         }
         let bytes = Bytes::from(encode(&o.msg));
         for conn in o.to {
