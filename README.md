@@ -13,14 +13,23 @@ Run the game using `cargo run`
   OS data dir natively).
 
 - **Multiplayer**: a free-for-all dogfight with respawns, up to 8 players per room. CREATE picks
-  the room's location, weather and time (like Endless); JOIN takes the 4-letter room code
-  (typed, or on the keypad with a gamepad or touch). The code and a kills scoreboard are in
-  the pause menu (which doesn't stop the world). Signed out, MULTIPLAYER offers SIGN IN.
+  the room's location, weather and time (like Endless) and opens the room's lobby: the code,
+  who's in (the host marked), FRIENDS with INVITE, START (host only) and LEAVE (Esc / B), with
+  the map baking in the background under a thin bar so START is near-instant. JOIN takes the
+  4-letter room code (typed, or on the keypad with a gamepad or touch) and lands in the lobby,
+  or straight in the game once it's started. If the host leaves, the longest-standing player
+  hosts. The code and a kills scoreboard are in the pause menu (which doesn't stop the world).
+  Kills read `SPLASH @bob`; the death screen names who got you and your head-to-head record
+  against them this room (yours – theirs). Signed out, MULTIPLAYER offers SIGN IN. Errors
+  (NO ROOM, FULL, OFFLINE, DECLINED, sign-in) clear after 4 s.
 
 - **Friends**: signed in, the MULTIPLAYER menu and the multiplayer pause menu list your online
   Bluesky mutuals (people you follow who follow you back) with a status dot (green: around,
-  amber: in a room, grey: in a full room) and INVITE. Inviting from the menu makes a room on
-  the fly (with the CREATE pickers if they're open, else random). An invite shows as a card
+  amber: in a room, grey: in a full room) and INVITE, or JOIN for a friend in another room.
+  JOIN sends a join request to that room's host (the code is never shown): the host gets a
+  card, `@handle` with ACCEPT and X (in the lobby or in flight; J / D-pad down accepts in
+  flight), and X or 20 s declines (DECLINED). Inviting from the menu makes a room on
+  the fly (with the CREATE pickers if they're open, else random) and puts you in its lobby. An invite shows as a card
   wherever you are: JOIN (click, tap, or in menus down to it then A / Enter; in flight J or
   D-pad down) leaves what you're doing, single-player rounds included (no score is saved);
   X or 20 s dismisses it.
@@ -128,14 +137,24 @@ names) which other online players are mutuals (both follow records, no block eit
 caches pairs for 5 minutes (a sweep re-checks stale pairs among online players every minute)
 and runs at most 5 AppView calls a second. Only mutuals ever hear that you're online; an invite
 that fails looks the same whether the target is offline or not a mutual. Invites need an online
-mutual, one per friend per 10 s and 10 a minute. Avatar URLs are sent but not drawn: cdn.bsky.app
+mutual, one per friend per 10 s and 10 a minute. Join requests (protocol v3: `RequestJoin` →
+the host's `JoinRequest` → `AnswerJoin`, else `JoinDeclined` after 20 s) need the friend and the
+room's host to be online mutuals of the requester, one per host per 10 s and 6 a minute, and any
+failure is the same decline. Rooms start as lobbies (`Joined { host, started }`, `Start` →
+`Started`, `Host` on handover); `Killed` carries the pair's head-to-head record, counted per
+pair of DIDs for the room's lifetime (a crash credited to an attacker counts). Avatar URLs are sent but not drawn: cdn.bsky.app
 sends no CORS header, so the web build can't load them.
 
 Client switches: `FLIGHT_SIM_SERVER=<url>` (`?server=` on the web; default
 `wss://mp.flight.mozzius.dev`; `/ws` is appended), `FLIGHT_SIM_MP=create[:CODE]|join:CODE`
 (connect straight from the menu; a requested code needs a dev server),
 `FLIGHT_SIM_DEV_INVITE=<handle>` (invite that friend as soon as they're online),
-`FLIGHT_SIM_DEV_ACCEPT_INVITES=1` (join any invite after 2 s),
+`FLIGHT_SIM_DEV_ACCEPT_INVITES=1` (join any invite after 2 s), `FLIGHT_SIM_DEV_START=<n>` (a host
+starts its lobby 3 s after n players are in), `FLIGHT_SIM_DEV_REQUEST=<handle>` (ask to join that
+friend's room 4 s after they're seen in one), `FLIGHT_SIM_DEV_ACCEPT_REQUESTS=1` (let any join
+request in after 2 s), `FLIGHT_SIM_DEV_HIT=1` (land gun hits on anyone within range: a quick
+kill), `FLIGHT_SIM_SCREENSHOT_EXTRA=<event>:<path>,...` (extra shots without exiting on
+`t<secs>`, `lobby<n>`, `request`, `kill`, `death`),
 `FLIGHT_SIM_MODE=menu-multiplayer|menu-create|menu-join` (open that panel in a screenshot run).
 
 Run a server locally and two headless clients that fight each other:
@@ -143,7 +162,7 @@ Run a server locally and two headless clients that fight each other:
 ```bash
 FLIGHT_SIM_DEV_AUTH=1 PORT=8787 cargo run --release --no-default-features --features server --bin flight_sim_server
 # in two more shells
-FLIGHT_SIM_DEV_USER=alice FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=create:TEST \
+FLIGHT_SIM_DEV_USER=alice FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=create:TEST FLIGHT_SIM_DEV_START=2 \
   FLIGHT_SIM_AUTOPILOT=1 FLIGHT_SIM_SCREENSHOT=/tmp/a.png FLIGHT_SIM_SCREENSHOT_AFTER=40 cargo run
 FLIGHT_SIM_DEV_USER=bob FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=join:TEST \
   FLIGHT_SIM_AUTOPILOT=1 FLIGHT_SIM_SCREENSHOT=/tmp/b.png FLIGHT_SIM_SCREENSHOT_AFTER=40 cargo run

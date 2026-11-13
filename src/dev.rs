@@ -5,6 +5,11 @@
 //! `FLIGHT_SIM_SCREENSHOT_BURST=<count>,<secs>` saves `count` frames `secs`
 //! apart instead (`out_00.png`, `out_01.png`, ...), for catching flicker.
 //! `FLIGHT_SIM_DIE_AT=<secs>` shoots the player down that many (real) seconds in.
+//! `FLIGHT_SIM_SCREENSHOT_EXTRA=<event>:<path>[,...]` takes more shots on the
+//! way (without exiting), each once, about a second after its event:
+//! `t<secs>`, `lobby<n>` (in a lobby with n players), `request` (a join
+//! request card), `kill` (our kill banner), `death` (the multiplayer death
+//! screen, killer named).
 
 use bevy::{
     prelude::*,
@@ -82,6 +87,14 @@ impl Plugin for DevPlugin {
         if std::env::var("FLIGHT_SIM_AUTOPILOT").is_ok() {
             app.add_systems(Update, autopilot_player);
         }
+        if let Ok(list) = std::env::var("FLIGHT_SIM_SCREENSHOT_EXTRA") {
+            let shots = list
+                .split(',')
+                .filter_map(|e| e.split_once(':'))
+                .map(|(event, path)| ExtraShot { event: event.to_string(), path: path.to_string(), since: None, done: false })
+                .collect();
+            app.insert_resource(ExtraShots(shots)).add_systems(Update, extra_screenshots);
+        }
         if let Ok(path) = std::env::var("FLIGHT_SIM_SCREENSHOT") {
             let after = std::env::var("FLIGHT_SIM_SCREENSHOT_AFTER")
                 .ok()
@@ -142,6 +155,64 @@ fn auto_screenshot(
             }
         }
         _ => {}
+    }
+}
+
+struct ExtraShot {
+    event: String,
+    path: String,
+    /// When its event was first seen (real seconds).
+    since: Option<f32>,
+    done: bool,
+}
+
+#[derive(Resource)]
+struct ExtraShots(Vec<ExtraShot>);
+
+fn extra_screenshots(
+    mut commands: Commands,
+    target: Option<Res<HeadlessTarget>>,
+    time: Res<Time<Real>>,
+    mut shots: ResMut<ExtraShots>,
+    net: Res<crate::net::Net>,
+    prompt: Res<crate::respawn::RespawnPrompt>,
+    mut kills: MessageReader<crate::game::PlayerKill>,
+    mut last_kill: Local<Option<f32>>,
+) {
+    let now = time.elapsed_secs();
+    if kills.read().count() > 0 {
+        *last_kill = Some(now);
+    }
+    for shot in shots.0.iter_mut().filter(|s| !s.done) {
+        let e = shot.event.as_str();
+        let happening = if let Some(t) = e.strip_prefix('t') {
+            t.parse::<f32>().is_ok_and(|t| now >= t)
+        } else if let Some(n) = e.strip_prefix("lobby") {
+            net.in_lobby() && net.players().len() >= n.parse().unwrap_or(1)
+        } else {
+            match e {
+                "request" => net.pending_request().is_some(),
+                "kill" => last_kill.is_some_and(|t| now - t < 2.0),
+                "death" => prompt.ready() && net.death().is_some(),
+                _ => false,
+            }
+        };
+        if !happening {
+            shot.since = None;
+            continue;
+        }
+        let since = *shot.since.get_or_insert(now);
+        // (time events go at once; the others wait for the screen to settle)
+        let wait = if e.starts_with('t') { 0.0 } else if e == "kill" { 0.6 } else { 1.0 };
+        if now - since >= wait {
+            shot.done = true;
+            info!("dev: screenshot {} ({e})", shot.path);
+            let screenshot = match &target {
+                Some(t) => Screenshot::image(t.0.clone()),
+                None => Screenshot::primary_window(),
+            };
+            commands.spawn(screenshot).observe(save_to_disk(shot.path.clone()));
+        }
     }
 }
 
@@ -342,7 +413,7 @@ fn kill_test(
     let t = time.elapsed_secs();
     if t > shot.after - 0.4 && !*done {
         *done = true;
-        kills.write(crate::game::PlayerKill { total: 3, friendly: false });
+        kills.write(crate::game::PlayerKill { total: 3, friendly: false, name: None });
     }
     if t > shot.after - 0.1 {
         hits.write(crate::weapons::HitConfirmed { attacker: me });
