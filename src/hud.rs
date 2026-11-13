@@ -39,7 +39,12 @@ pub struct HUDPlugin;
 
 impl Plugin for HUDPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+        // FLIGHT_SIM_NO_HUD=1: skip the HUD entirely, for clean landscape screenshots.
+        if std::env::var("FLIGHT_SIM_NO_HUD").is_ok() {
+            return;
+        }
+        app
             // the HUD is plane-related only; score etc. live in the pause menu
             .add_systems(Startup, setup)
             .add_systems(

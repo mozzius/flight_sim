@@ -61,6 +61,9 @@ impl Plugin for DevPlugin {
                 }
             });
         }
+        if std::env::var("FLIGHT_SIM_NO_HUD").is_ok() {
+            app.add_systems(Update, hide_player_model);
+        }
         if std::env::var("FLIGHT_SIM_AUTOPILOT").is_ok() {
             app.add_systems(Update, autopilot_player);
         }
@@ -136,6 +139,14 @@ pub fn log_state(
             i.pitch, i.roll, i.yaw, i.throttle, cam, aircraft.iter().count()
         ),
         Err(_) => info!("t={:.0} no player, cam={:?} aircraft={}", time.elapsed_secs(), cam, aircraft.iter().count()),
+    }
+}
+
+/// `FLIGHT_SIM_NO_HUD=1`: hide the player's own jet (the HUD itself is
+/// skipped in `hud.rs`), for clean landscape screenshots.
+fn hide_player_model(mut player: Query<&mut Visibility, With<crate::game::Player>>) {
+    for mut vis in &mut player {
+        *vis = Visibility::Hidden;
     }
 }
 
