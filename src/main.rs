@@ -18,6 +18,7 @@ mod dev;
 mod effects;
 mod environment;
 mod flight;
+mod friends;
 mod game;
 mod hud;
 mod identity;
@@ -100,6 +101,6 @@ fn main() {
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
-        .add_plugins((loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin))
+        .add_plugins((loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin))
         .run();
 }

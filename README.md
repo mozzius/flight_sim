@@ -17,6 +17,14 @@ Run the game using `cargo run`
   (typed, or on the keypad with a gamepad or touch). The code and a kills scoreboard are in
   the pause menu (which doesn't stop the world). Signed out, MULTIPLAYER offers SIGN IN.
 
+- **Friends**: signed in, the MULTIPLAYER menu and the multiplayer pause menu list your online
+  Bluesky mutuals (people you follow who follow you back) with a status dot (green: around,
+  amber: in a room, grey: in a full room) and INVITE. Inviting from the menu makes a room on
+  the fly (with the CREATE pickers if they're open, else random). An invite shows as a card
+  wherever you are: JOIN (click, tap, or in menus down to it then A / Enter; in flight J or
+  D-pad down) leaves what you're doing, single-player rounds included (no score is saved);
+  X or 20 s dismisses it.
+
 Esc → MENU goes back to the mode menu; every round bakes a fresh map.
 
 The world is procedurally generated eroded mountains (Rune Skovbo Johansen's
@@ -110,9 +118,23 @@ Natively there's no sign-in yet: multiplayer only shows with
 `FLIGHT_SIM_DEV_USER=<handle>`, which sends a `dev:<handle>` token, and native
 clients only speak plain `ws://`.
 
+Presence and invites: while signed in the game keeps that one connection open in every mode
+(menus and single player too; it just doesn't join a room), and `Leave` takes it out of a room
+without hanging up. The server (`src/server/presence.rs`, tied to the rooms in `hub.rs`) keeps
+the online DIDs in memory and, when someone comes online, asks the public AppView
+(`app.bsky.graph.getRelationships`, 30 others a call; `app.bsky.actor.getProfiles` for display
+names) which other online players are mutuals (both follow records, no block either way). It
+caches pairs for 5 minutes (a sweep re-checks stale pairs among online players every minute)
+and runs at most 5 AppView calls a second. Only mutuals ever hear that you're online; an invite
+that fails looks the same whether the target is offline or not a mutual. Invites need an online
+mutual, one per friend per 10 s and 10 a minute. Avatar URLs are sent but not drawn: cdn.bsky.app
+sends no CORS header, so the web build can't load them.
+
 Client switches: `FLIGHT_SIM_SERVER=<url>` (`?server=` on the web; default
 `wss://mp.flight.mozzius.dev`; `/ws` is appended), `FLIGHT_SIM_MP=create[:CODE]|join:CODE`
 (connect straight from the menu; a requested code needs a dev server),
+`FLIGHT_SIM_DEV_INVITE=<handle>` (invite that friend as soon as they're online),
+`FLIGHT_SIM_DEV_ACCEPT_INVITES=1` (join any invite after 2 s),
 `FLIGHT_SIM_MODE=menu-multiplayer|menu-create|menu-join` (open that panel in a screenshot run).
 
 Run a server locally and two headless clients that fight each other:
@@ -127,8 +149,21 @@ FLIGHT_SIM_DEV_USER=bob FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=join
 ```
 
 Server env: `PORT` (default 8080), `FLIGHT_SIM_DEV_AUTH=1` (accept `dev:` tokens and requested
-room codes: never in production), `RUST_LOG`. Endpoints: `/ws` (the game) and `/health` ("ok").
-`cargo test --no-default-features --features server --bin flight_sim_server` runs the room tests.
+room codes: never in production), `FLIGHT_SIM_DEV_MUTUALS=1` (dev users are all each other's
+mutuals; they're never anyone's otherwise), `FLIGHT_SIM_APPVIEW` (default
+`https://public.api.bsky.app`), `RUST_LOG`. Endpoints: `/ws` (the game) and `/health` ("ok").
+`cargo test --no-default-features --features server --bin flight_sim_server` runs the room,
+presence and invite tests (against a mock AppView; `real_appview -- --ignored` asks the real one).
+
+Friends and invites locally (alice invites bob from the menu, bob joins):
+
+```bash
+FLIGHT_SIM_DEV_AUTH=1 FLIGHT_SIM_DEV_MUTUALS=1 PORT=8787 cargo run --release --no-default-features --features server --bin flight_sim_server
+FLIGHT_SIM_DEV_USER=bob FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_DEV_ACCEPT_INVITES=1 \
+  FLIGHT_SIM_SCREENSHOT=/tmp/b.png FLIGHT_SIM_SCREENSHOT_AFTER=45 cargo run
+FLIGHT_SIM_DEV_USER=alice FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_DEV_INVITE=bob \
+  FLIGHT_SIM_SCREENSHOT=/tmp/a.png FLIGHT_SIM_SCREENSHOT_AFTER=30 cargo run
+```
 
 The server is a headless Bevy app (no rendering, windowing or audio: the `server` feature
 leaves Bevy's default features off). Docker (multi-stage, Debian slim runtime):

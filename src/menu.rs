@@ -35,7 +35,8 @@ impl Plugin for MenuPlugin {
             .insert_resource(panel)
             .add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), despawn_menu)
-            .add_systems(Update, (navigate, handle_pressed, style_buttons, layout_menu, layout_account).chain());
+            .add_systems(Update, (navigate, handle_pressed, style_buttons, layout_menu, layout_account).chain())
+            .add_systems(Update, crate::friends::invite_shortcut.before(handle_pressed));
     }
 }
 
@@ -72,6 +73,11 @@ pub enum UiAction {
     Delete,
     /// Sign in or out (the account corner).
     Account,
+    /// INVITE on a friends row (an index into `Net::friends`).
+    Invite(u8),
+    /// The invite card's JOIN and ✕.
+    AcceptInvite,
+    DismissInvite,
 }
 
 /// A menu button. `order` is the focus order on its screen; buttons sharing a
@@ -86,7 +92,7 @@ pub struct UiButton {
 
 /// Presses this frame: (action, step). Clicks step forward; left / right on a picker step ±1.
 #[derive(Resource, Default)]
-struct Pressed(Vec<(UiAction, i32)>);
+pub(crate) struct Pressed(pub(crate) Vec<(UiAction, i32)>);
 
 /// The focused button (keyboard / gamepad / last hovered).
 #[derive(Resource, Default)]
@@ -130,16 +136,18 @@ const ORDER_START: u8 = 8;
 const ORDER_KEYS: u8 = 20;
 const ROW_KEYS: u8 = 11;
 const KEYS_PER_ROW: usize = 8;
+const ORDER_FRIENDS: u8 = 100;
+const ROW_FRIENDS: u8 = 30;
 
-const BG: Color = Color::srgb(0.043, 0.059, 0.078);
-const GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
-const DIM: Color = Color::srgb(0.65, 0.8, 0.7);
-const BUTTON: Color = Color::srgba(0.05, 0.18, 0.09, 0.9);
+pub(crate) const BG: Color = Color::srgb(0.043, 0.059, 0.078);
+pub(crate) const GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
+pub(crate) const DIM: Color = Color::srgb(0.65, 0.8, 0.7);
+pub(crate) const BUTTON: Color = Color::srgba(0.05, 0.18, 0.09, 0.9);
 const BUTTON_FOCUS: Color = Color::srgba(0.1, 0.32, 0.16, 0.95);
 const BUTTON_ON: Color = Color::srgba(0.16, 0.45, 0.24, 0.95);
-const BORDER: Color = Color::srgba(0.4, 1.0, 0.55, 0.45);
+pub(crate) const BORDER: Color = Color::srgba(0.4, 1.0, 0.55, 0.45);
 
-fn font_of(font: &Handle<Font>, size: f32, color: Color) -> (TextFont, TextColor) {
+pub(crate) fn font_of(font: &Handle<Font>, size: f32, color: Color) -> (TextFont, TextColor) {
     (TextFont { font: font.clone().into(), font_size: FontSize::Px(size), ..default() }, TextColor(color))
 }
 
@@ -327,6 +335,9 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                 }
             });
             root.spawn((StatusText, Text::new(""), font_of(&font, 15.0, DIM)));
+            if crate::net::auth::available() {
+                crate::friends::spawn_list(root, &font, Screen::Modes, ORDER_FRIENDS, ROW_FRIENDS);
+            }
             root.spawn((
                 AccountCorner,
                 Node {
@@ -371,7 +382,7 @@ fn despawn_menu(mut commands: Commands, roots: Query<Entity, With<MenuRoot>>) {
 }
 
 /// The screen whose buttons are live, if any.
-fn active_screen(state: GameState, paused: bool, challenge_over: bool) -> Option<Screen> {
+pub(crate) fn active_screen(state: GameState, paused: bool, challenge_over: bool) -> Option<Screen> {
     match state {
         GameState::Menu => Some(Screen::Modes),
         GameState::Playing if paused => Some(Screen::Pause),
@@ -517,6 +528,7 @@ fn handle_pressed(
     mut code: ResMut<JoinCode>,
     mut net: ResMut<crate::net::Net>,
     mut next: ResMut<NextState<GameState>>,
+    time: Res<Time<Real>>,
 ) {
     for (action, step) in std::mem::take(&mut pressed.0) {
         match action {
@@ -566,6 +578,18 @@ fn handle_pressed(
             UiAction::Pick(Pick::Time) => picks.0.time = cycle(&TimeOfDay::ALL, picks.0.time, step),
             UiAction::Resume => paused.0 = false,
             UiAction::Menu => next.set(GameState::Menu),
+            UiAction::Invite(i) => {
+                // a room made for the invite takes the pickers if they're open
+                let p = if *panel == Panel::Create { picks.0 } else { Picks::from_settings() };
+                if let Some(did) = net.friends().get(i as usize).map(|f| f.did.clone()) {
+                    net.invite(&did, p, time.elapsed_secs_f64());
+                }
+            }
+            UiAction::AcceptInvite => {
+                paused.0 = false;
+                net.accept_invite();
+            }
+            UiAction::DismissInvite => net.dismiss_invite(),
             UiAction::Account => {
                 if crate::identity::current_user().is_some() {
                     crate::identity::sign_out();
@@ -616,16 +640,25 @@ fn layout_menu(
     net: Res<crate::net::Net>,
     mut root: Query<&mut Node, (With<MenuRoot>, Without<EndlessPanel>)>,
     mut sections: Query<
-        (&mut Node, Has<EndlessPanel>, Has<ModesRow>, Has<MultiRow>, Has<JoinPanel>, Option<&SignedIn>),
-        (Without<MenuRoot>, Or<(With<EndlessPanel>, With<ModesRow>, With<MultiRow>, With<JoinPanel>, With<SignedIn>)>),
+        (&mut Node, Has<EndlessPanel>, Has<ModesRow>, Has<MultiRow>, Has<JoinPanel>, Option<&crate::friends::FriendsSection>, Option<&SignedIn>),
+        (
+            Without<MenuRoot>,
+            Or<(With<EndlessPanel>, With<ModesRow>, With<MultiRow>, With<JoinPanel>, With<SignedIn>, With<crate::friends::FriendsSection>)>,
+        ),
     >,
     mut values: Query<(&PickValue, &mut Text), (Without<CodeText>, Without<StatusText>)>,
     mut code_text: Query<&mut Text, (With<CodeText>, Without<StatusText>)>,
     mut status: Query<&mut Text, (With<StatusText>, Without<CodeText>)>,
 ) {
     let signed_in = crate::identity::current_user().is_some();
-    for (mut node, endless, modes, multi, join, signed) in &mut sections {
-        let show = if endless {
+    for (mut node, endless, modes, multi, join, friends, signed) in &mut sections {
+        let show = if let Some(f) = friends {
+            // (the pause menu's list is the friends module's)
+            if f.0 != Screen::Modes {
+                continue;
+            }
+            panel.multiplayer() && signed_in
+        } else if endless {
             matches!(*panel, Panel::Endless | Panel::Create)
         } else if modes {
             !panel.multiplayer()

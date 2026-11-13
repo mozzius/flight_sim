@@ -151,6 +151,8 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     button(row, &font, "RESUME", Screen::Pause, 0, 0, UiAction::Resume);
                     button(row, &font, "MENU", Screen::Pause, 1, 0, UiAction::Menu);
                 });
+                // (multiplayer only: shown in a room)
+                crate::friends::spawn_list(panel, &font, crate::menu::Screen::Pause, 100, 1);
                 panel.spawn((DesktopOnly, text("Esc / Start: resume      Q: quit", 16.0, DIM)));
             });
         });

@@ -12,9 +12,17 @@
 //! marker (Team::Red: everyone's a hostile), without physics or a pilot;
 //! their missiles carry [`RemoteMissile`] and aren't simulated here.
 //!
+//! Presence: while signed in the game stays connected in every mode, and
+//! the server keeps us up to date on which Bluesky mutuals are online
+//! ([`Net::friends`]); INVITE asks one to our room (made on the fly if we're
+//! not in one), and an invite to theirs waits in [`Net::pending_invite`]
+//! (the card in `friends`).
+//!
 //! Dev: `FLIGHT_SIM_MP=create[:CODE]|join:CODE` connects straight from the
 //! menu (natively with `FLIGHT_SIM_DEV_USER`; requested codes need a dev
-//! server). See `auth` for sign-in and the server URL.
+//! server); `FLIGHT_SIM_DEV_INVITE=<handle>` and
+//! `FLIGHT_SIM_DEV_ACCEPT_INVITES=1` (see `dev_invites`). See `auth` for
+//! sign-in and the server URL.
 
 pub mod auth;
 pub mod protocol;
@@ -55,7 +63,15 @@ impl Plugin for NetPlugin {
             .add_systems(OnExit(GameState::Playing), forget_entities)
             .add_systems(
                 Update,
-                (pump, (apply, interpolate, tag_own_missiles, send).chain().run_if(in_state(GameState::Playing))).chain(),
+                (
+                    pump,
+                    (apply, interpolate, tag_own_missiles, send)
+                        .chain()
+                        .run_if(in_state(GameState::Playing))
+                        // (not a single-player round we're leaving for a room)
+                        .run_if(|mode: Res<GameMode>| *mode == GameMode::Multiplayer),
+                )
+                    .chain(),
             );
     }
 }
@@ -86,6 +102,9 @@ pub struct NetHit {
     pub damage: f32,
 }
 
+/// The connection. While signed in the game stays connected in every mode
+/// (presence: the server tells us which mutuals are online, and passes on
+/// invites); rooms come and go over the same connection.
 #[derive(Default, PartialEq, Eq, Debug, Clone, Copy)]
 enum Phase {
     #[default]
@@ -95,14 +114,21 @@ enum Phase {
     Connecting,
     /// Sent Hello, waiting for Welcome.
     Hello,
-    /// Signed in, Create / Join sent.
-    Lobby,
-    InRoom,
+    /// Signed in.
+    Online,
 }
 
 enum Intent {
     Create(RoomMap, Option<String>),
     Join(String),
+}
+
+/// An invite to a friend's room, waiting for JOIN or ✕.
+#[derive(Clone, Debug)]
+pub struct PendingInvite {
+    pub from: Friend,
+    pub code: String,
+    at: f64,
 }
 
 #[derive(Resource, Default)]
@@ -111,9 +137,30 @@ pub struct Net {
     transport: Option<Transport>,
     token_request: Option<auth::TokenRequest>,
     token: String,
+    /// Who the connection is signed in as (a sign-out or a new account reconnects).
+    did: Option<String>,
+    /// Waiting to go once we're online.
     intent: Option<Intent>,
+    /// Create / Join sent, waiting for the room.
+    awaiting: bool,
     /// The menu's one-word status (an error).
     label: Option<&'static str>,
+    /// Reconnect no sooner than this (real seconds), and the next wait.
+    retry_at: f64,
+    backoff: f64,
+    /// The server wants a newer game: stop trying.
+    outdated: bool,
+    /// Online mutuals, by handle.
+    friends: Vec<Friend>,
+    /// Bumped whenever `friends` changes (the menus rebuild their rows).
+    friends_version: u32,
+    /// When we last invited each friend (DID → real seconds).
+    invited: HashMap<String, f64>,
+    invite: Option<PendingInvite>,
+    dev_invited: bool,
+
+    // ---- the room ----
+    in_room: bool,
     code: Option<String>,
     me: Option<PlayerId>,
     peers: HashMap<PlayerId, Peer>,
@@ -122,7 +169,8 @@ pub struct Net {
     inbox: Vec<ServerMsg>,
     /// Joined a room: start the round on its map.
     joined: Option<RoomMap>,
-    /// The connection dropped: back to the menu.
+    /// Out of the room while flying in it (the connection dropped, or a
+    /// join failed): back to the menu.
     lost: bool,
     last_send: f64,
     last_msg: f64,
@@ -162,23 +210,30 @@ struct PeerMissile {
 
 static ME: AtomicU8 = AtomicU8::new(0);
 
+/// Invites disappear after this long.
+pub const INVITE_SECS: f64 = 20.0;
+/// An invited friend's button says SENT this long (the server's per-friend limit).
+const SENT_SECS: f64 = 10.0;
+const FIRST_RETRY: f64 = 2.0;
+const MAX_RETRY: f64 = 60.0;
+
+/// The room map for a new room with these picks (random where unpicked).
+fn new_map(picks: Picks) -> RoomMap {
+    let seed = round_seed();
+    let env = Environment::choose(seed, picks);
+    let index = |i: Option<usize>| i.unwrap_or(0) as u8;
+    RoomMap {
+        seed,
+        biome: index(Biome::ALL.iter().position(|b| *b == env.biome)),
+        time: index(TimeOfDay::ALL.iter().position(|t| *t == env.time)),
+        weather: index(Weather::ALL.iter().position(|w| *w == env.weather)),
+    }
+}
+
 impl Net {
     /// Creates a room on a fresh map with these picks.
     pub fn create(&mut self, picks: Picks) {
-        self.create_with_code(picks, None);
-    }
-
-    fn create_with_code(&mut self, picks: Picks, code: Option<String>) {
-        let seed = round_seed();
-        let env = Environment::choose(seed, picks);
-        let index = |i: Option<usize>| i.unwrap_or(0) as u8;
-        let map = RoomMap {
-            seed,
-            biome: index(Biome::ALL.iter().position(|b| *b == env.biome)),
-            time: index(TimeOfDay::ALL.iter().position(|t| *t == env.time)),
-            weather: index(Weather::ALL.iter().position(|w| *w == env.weather)),
-        };
-        self.start(Intent::Create(map, code));
+        self.start(Intent::Create(new_map(picks), None));
     }
 
     pub fn join(&mut self, code: &str) {
@@ -187,14 +242,52 @@ impl Net {
 
     /// The menu's status word: what went wrong, or that we're on our way.
     pub fn label(&self) -> Option<&'static str> {
-        match self.phase {
-            Phase::Idle | Phase::InRoom => self.label,
-            _ => Some("CONNECTING"),
-        }
+        if self.intent.is_some() || self.awaiting { Some("CONNECTING") } else { self.label }
     }
 
     pub fn room_code(&self) -> Option<&str> {
-        self.code.as_deref().filter(|_| self.phase == Phase::InRoom)
+        self.code.as_deref().filter(|_| self.in_room)
+    }
+
+    pub fn friends(&self) -> &[Friend] {
+        &self.friends
+    }
+
+    pub fn friends_version(&self) -> u32 {
+        self.friends_version
+    }
+
+    /// Asks a friend (by DID) to our room; not in one, the server makes one
+    /// with these picks first.
+    pub fn invite(&mut self, did: &str, picks: Picks, now: f64) {
+        if self.phase != Phase::Online || self.invited.get(did).is_some_and(|t| now - t < SENT_SECS) {
+            return;
+        }
+        info!("multiplayer: inviting {did}");
+        self.invited.insert(did.to_string(), now);
+        self.send(&ClientMsg::Invite { to: did.to_string(), map: new_map(picks) });
+        self.friends_version += 1;
+    }
+
+    /// Whether a friend's button says SENT.
+    pub fn invite_sent(&self, did: &str, now: f64) -> bool {
+        self.invited.get(did).is_some_and(|t| now - t < SENT_SECS)
+    }
+
+    pub fn pending_invite(&self) -> Option<&PendingInvite> {
+        self.invite.as_ref()
+    }
+
+    /// JOIN: leaves whatever we're doing for the friend's room.
+    pub fn accept_invite(&mut self) {
+        if let Some(invite) = self.invite.take() {
+            info!("multiplayer: joining {}'s room {}", invite.from.handle, invite.code);
+            self.join(&invite.code);
+        }
+    }
+
+    pub fn dismiss_invite(&mut self) {
+        self.invite = None;
     }
 
     /// (handle, kills, deaths, is us), most kills first.
@@ -217,25 +310,73 @@ impl Net {
     }
 
     fn start(&mut self, intent: Intent) {
-        self.reset();
+        self.label = None;
+        if self.phase == Phase::Online {
+            self.send_intent(intent);
+            return;
+        }
         self.intent = Some(intent);
+        if self.phase == Phase::Idle {
+            self.connect();
+        }
+    }
+
+    fn send_intent(&mut self, intent: Intent) {
+        self.awaiting = true;
+        match intent {
+            Intent::Create(map, code) => self.send(&ClientMsg::Create { map, code }),
+            Intent::Join(code) => self.send(&ClientMsg::Join { code }),
+        }
+    }
+
+    fn connect(&mut self) {
         self.phase = Phase::Token;
+        self.did = crate::identity::current_user().map(|u| u.did);
         self.token_request = Some(auth::request_token());
     }
 
-    /// Drops the connection and the room (keeps the status label).
-    fn reset(&mut self) {
-        let label = self.label.take();
-        *self = Net { label, ..default() };
-        ME.store(0, Ordering::Relaxed);
+    /// Drops the connection (and the room), and schedules a reconnect.
+    fn disconnect(&mut self, label: Option<&'static str>, now: f64) {
+        if let Some(l) = label {
+            warn!("multiplayer: {l}");
+        }
+        let had_intent = self.intent.take().is_some() || self.awaiting;
+        if self.in_room || had_intent {
+            self.label = label;
+        }
+        self.lost |= self.in_room;
+        self.clear_room();
+        self.phase = Phase::Idle;
+        self.transport = None;
+        self.token_request = None;
+        self.token.clear();
+        self.did = None;
+        self.awaiting = false;
+        self.friends.clear();
+        self.friends_version += 1;
+        self.invite = None;
+        self.backoff = if self.backoff == 0.0 { FIRST_RETRY } else { (self.backoff * 2.0).min(MAX_RETRY) };
+        self.retry_at = now + self.backoff;
     }
 
-    fn fail(&mut self, label: &'static str) {
-        warn!("multiplayer: {label}");
-        let in_game = self.phase == Phase::InRoom;
-        self.reset();
-        self.label = Some(label);
-        self.lost = in_game;
+    /// Forgets the room (the connection stays).
+    fn clear_room(&mut self) {
+        self.in_room = false;
+        self.code = None;
+        self.me = None;
+        self.peers.clear();
+        self.scores.clear();
+        self.inbox.clear();
+        self.joined = None;
+        self.next_missile = 0;
+        self.shots.clear();
+        self.flares.clear();
+        self.had_missiles = false;
+        self.flown = false;
+        self.last_pose = None;
+        self.dead_on_server = false;
+        self.awaiting_respawn = false;
+        ME.store(0, Ordering::Relaxed);
     }
 
     fn send(&self, msg: &ClientMsg) {
@@ -244,27 +385,50 @@ impl Net {
         }
     }
 
-    fn receive(&mut self, msg: ServerMsg, commands: &mut Commands) {
+    fn set_friend(&mut self, friend: Friend) {
+        match self.friends.iter_mut().find(|f| f.did == friend.did) {
+            Some(f) => *f = friend,
+            None => self.friends.push(friend),
+        }
+        self.friends.sort_by(|a, b| a.handle.cmp(&b.handle));
+        self.friends_version += 1;
+    }
+
+    fn receive(&mut self, msg: ServerMsg, commands: &mut Commands, now: f64) {
         match msg {
             ServerMsg::Welcome { handle } => {
-                info!("multiplayer: signed in as {handle}");
-                self.phase = Phase::Lobby;
-                match self.intent.take() {
-                    Some(Intent::Create(map, code)) => self.send(&ClientMsg::Create { map, code }),
-                    Some(Intent::Join(code)) => self.send(&ClientMsg::Join { code }),
-                    None => {}
+                info!("multiplayer: online as {handle}");
+                self.phase = Phase::Online;
+                self.backoff = 0.0;
+                if let Some(intent) = self.intent.take() {
+                    self.send_intent(intent);
                 }
             }
-            ServerMsg::Error(code) => self.fail(code.label()),
+            // before Welcome: the server's closing on us
+            ServerMsg::Error(code) if self.phase != Phase::Online => {
+                self.outdated |= code == ErrorCode::Version;
+                self.disconnect(Some(code.label()), now);
+            }
+            // a room we couldn't get into (the server has us in none now)
+            ServerMsg::Error(code) => {
+                warn!("multiplayer: {}", code.label());
+                self.awaiting = false;
+                self.label = Some(code.label());
+                self.lost |= self.in_room;
+                self.clear_room();
+            }
             ServerMsg::Joined { code, map, you, players } => {
                 info!("multiplayer: room {code}, player {you}, {} here", players.len());
-                self.phase = Phase::InRoom;
+                self.clear_room();
+                self.awaiting = false;
+                self.in_room = true;
                 self.code = Some(code);
                 self.me = Some(you);
                 ME.store(you, Ordering::Relaxed);
                 self.peers = players.into_iter().filter(|p| p.id != you).map(|p| (p.id, Peer::new(p.handle))).collect();
                 self.label = None;
                 self.joined = Some(map);
+                self.lost = false;
             }
             ServerMsg::PlayerJoined(info) if Some(info.id) != self.me => {
                 self.peers.insert(info.id, Peer::new(info.handle));
@@ -275,7 +439,27 @@ impl Net {
                 }
             }
             ServerMsg::Scores(scores) => self.scores = scores,
-            other if self.phase == Phase::InRoom => self.inbox.push(other),
+            ServerMsg::Friends(mut list) => {
+                list.sort_by(|a, b| a.handle.cmp(&b.handle));
+                info!("multiplayer: {} friends online", list.len());
+                self.friends = list;
+                self.friends_version += 1;
+            }
+            ServerMsg::FriendUpdate(f) => self.set_friend(f),
+            ServerMsg::FriendGone(did) => {
+                self.friends.retain(|f| f.did != did);
+                self.friends_version += 1;
+            }
+            ServerMsg::Invited { from, code } => {
+                info!("multiplayer: {} invites us to {code}", from.handle);
+                self.invite = Some(PendingInvite { from, code, at: now });
+            }
+            ServerMsg::InviteFailed(did) => {
+                info!("multiplayer: invite to {did} failed");
+                self.invited.remove(&did);
+                self.friends_version += 1;
+            }
+            other if self.in_room => self.inbox.push(other),
             _ => {}
         }
     }
@@ -359,16 +543,114 @@ fn dev_auto_start(mut net: ResMut<Net>, mut done: Local<bool>) {
         return;
     }
     match dev_auto() {
-        Some(DevAuto::Create(code)) => net.create_with_code(Picks::from_settings(), code),
+        Some(DevAuto::Create(code)) => net.start(Intent::Create(new_map(Picks::from_settings()), code)),
         Some(DevAuto::Join(code)) => net.join(&code),
         None => {}
     }
 }
 
-/// Back at the menu: leave the room.
+/// Back at the menu: out of the room (still online).
 fn leave_room(mut net: ResMut<Net>) {
-    if net.phase == Phase::InRoom {
-        net.reset();
+    if net.in_room {
+        net.send(&ClientMsg::Leave);
+        net.clear_room();
+    }
+}
+
+/// The connection: presence while signed in, sign-in, the socket, invites,
+/// and the room's comings and goings.
+fn pump(
+    mut net: ResMut<Net>,
+    time: Res<Time<Real>>,
+    mut commands: Commands,
+    state: Res<State<GameState>>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    let now = time.elapsed_secs_f64();
+    // online whenever signed in (a sign-out or another account: reconnect)
+    let user = crate::identity::current_user().map(|u| u.did);
+    if net.phase != Phase::Idle && net.did != user {
+        net.disconnect(None, now);
+        net.retry_at = now;
+    }
+    if net.phase == Phase::Idle && user.is_some() && !net.outdated && now >= net.retry_at {
+        net.connect();
+    }
+    if net.phase == Phase::Token
+        && let Some(result) = net.token_request.as_mut().and_then(|t| t.poll())
+    {
+        match result {
+            Ok(token) => {
+                let url = auth::server_url();
+                info!("multiplayer: connecting to {url}");
+                net.token = token;
+                net.transport = Some(Transport::connect(&url));
+                net.phase = Phase::Connecting;
+            }
+            Err(e) => {
+                warn!("multiplayer: no token: {e}");
+                net.disconnect(Some("SIGN IN"), now);
+            }
+        }
+    }
+    let events = net.transport.as_ref().map(|t| t.poll()).unwrap_or_default();
+    for event in events {
+        match event {
+            TransportEvent::Open => {
+                let token = std::mem::take(&mut net.token);
+                net.send(&ClientMsg::Hello { version: PROTOCOL_VERSION, token });
+                net.phase = Phase::Hello;
+                net.last_msg = now;
+            }
+            TransportEvent::Message(bytes) => match decode::<ServerMsg>(&bytes) {
+                Some(msg) => net.receive(msg, &mut commands, now),
+                None => warn!("multiplayer: unreadable message"),
+            },
+            TransportEvent::Closed => net.disconnect(Some("OFFLINE"), now),
+        }
+        if net.phase == Phase::Idle {
+            break;
+        }
+    }
+    // (gameplay messages only mean something while flying)
+    if *state.get() != GameState::Playing {
+        net.inbox.clear();
+    }
+    if net.invite.as_ref().is_some_and(|i| now - i.at > INVITE_SECS) {
+        net.invite = None;
+    }
+    dev_invites(&mut net, now);
+    if let Some(map) = net.joined.take() {
+        let picks = Picks {
+            biome: Biome::ALL.get(map.biome as usize).copied(),
+            time: TimeOfDay::ALL.get(map.time as usize).copied(),
+            weather: Weather::ALL.get(map.weather as usize).copied(),
+        };
+        begin_map(&mut commands, &mut next, GameMode::Multiplayer, map.seed, picks);
+    }
+    if std::mem::take(&mut net.lost) && *state.get() != GameState::Menu {
+        next.set(GameState::Menu);
+    }
+    if net.phase == Phase::Online && now - net.last_msg > PING_SECS {
+        net.send(&ClientMsg::Ping);
+        net.last_msg = now;
+    }
+}
+
+/// Dev: `FLIGHT_SIM_DEV_INVITE=<handle>` invites that friend once they're
+/// online; `FLIGHT_SIM_DEV_ACCEPT_INVITES=1` joins any invite after 2 s.
+fn dev_invites(net: &mut Net, now: f64) {
+    if !net.dev_invited
+        && let Some(handle) = crate::environment::setting("FLIGHT_SIM_DEV_INVITE")
+        && let Some(did) = net.friends.iter().find(|f| f.handle == handle).map(|f| f.did.clone())
+    {
+        net.dev_invited = true;
+        net.invite(&did, Picks::from_settings(), now);
+    }
+    if net.invite.as_ref().is_some_and(|i| now - i.at > 2.0)
+        && crate::environment::setting("FLIGHT_SIM_DEV_ACCEPT_INVITES").as_deref() == Some("1")
+    {
+        net.accept_invite();
     }
 }
 
@@ -384,72 +666,6 @@ fn forget_entities(mut net: ResMut<Net>) {
     net.flown = false;
     net.last_pose = None;
     net.had_missiles = false;
-}
-
-/// The connection: sign-in, the socket, and the room's comings and goings.
-fn pump(
-    mut net: ResMut<Net>,
-    time: Res<Time<Real>>,
-    mut commands: Commands,
-    state: Res<State<GameState>>,
-    mut next: ResMut<NextState<GameState>>,
-) {
-    let now = time.elapsed_secs_f64();
-    if net.phase == Phase::Token
-        && let Some(result) = net.token_request.as_mut().and_then(|t| t.poll())
-    {
-        match result {
-            Ok(token) => {
-                let url = auth::server_url();
-                info!("multiplayer: connecting to {url}");
-                net.token = token;
-                net.transport = Some(Transport::connect(&url));
-                net.phase = Phase::Connecting;
-            }
-            Err(e) => {
-                warn!("multiplayer: no token: {e}");
-                net.fail("SIGN IN");
-            }
-        }
-    }
-    let events = net.transport.as_ref().map(|t| t.poll()).unwrap_or_default();
-    for event in events {
-        match event {
-            TransportEvent::Open => {
-                let token = std::mem::take(&mut net.token);
-                net.send(&ClientMsg::Hello { version: PROTOCOL_VERSION, token });
-                net.phase = Phase::Hello;
-                net.last_msg = now;
-            }
-            TransportEvent::Message(bytes) => match decode::<ServerMsg>(&bytes) {
-                Some(msg) => net.receive(msg, &mut commands),
-                None => warn!("multiplayer: unreadable message"),
-            },
-            TransportEvent::Closed => net.fail("OFFLINE"),
-        }
-        if net.phase == Phase::Idle {
-            break;
-        }
-    }
-    // (gameplay messages only mean something while flying)
-    if *state.get() != GameState::Playing {
-        net.inbox.clear();
-    }
-    if let Some(map) = net.joined.take() {
-        let picks = Picks {
-            biome: Biome::ALL.get(map.biome as usize).copied(),
-            time: TimeOfDay::ALL.get(map.time as usize).copied(),
-            weather: Weather::ALL.get(map.weather as usize).copied(),
-        };
-        begin_map(&mut commands, &mut next, GameMode::Multiplayer, map.seed, picks);
-    }
-    if std::mem::take(&mut net.lost) && *state.get() != GameState::Menu {
-        next.set(GameState::Menu);
-    }
-    if matches!(net.phase, Phase::Lobby | Phase::InRoom) && now - net.last_msg > PING_SECS {
-        net.send(&ClientMsg::Ping);
-        net.last_msg = now;
-    }
 }
 
 /// Damage, kills and respawns from the server; other players' states and events into their buffers.
@@ -793,7 +1009,7 @@ fn send(
     remotes: Query<&Remote>,
     mut hits: MessageReader<NetHit>,
 ) {
-    if net.phase != Phase::InRoom {
+    if !net.in_room {
         hits.clear();
         return;
     }
