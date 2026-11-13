@@ -17,6 +17,13 @@
         { "key": "Content-Type", "value": "application/json" },
         { "key": "Access-Control-Allow-Origin", "value": "*" }
       ]
+    },
+    {
+      "source": "/oauth-native-client-metadata.json",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json" },
+        { "key": "Access-Control-Allow-Origin", "value": "*" }
+      ]
     }
   ]
 }

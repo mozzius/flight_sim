@@ -1,0 +1,12 @@
+{
+  "client_id": "https://flight.mozzius.dev/oauth-native-client-metadata.json",
+  "client_name": "Flight Sim",
+  "client_uri": "https://flight.mozzius.dev",
+  "application_type": "native",
+  "dpop_bound_access_tokens": true,
+  "token_endpoint_auth_method": "none",
+  "redirect_uris": ["http://127.0.0.1/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "atproto rpc:dev.mozzius.flight.join?aud=*"
+}

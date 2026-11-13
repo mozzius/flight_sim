@@ -14,7 +14,7 @@ if command -v wasm-opt >/dev/null; then
   wasm-opt -Os --all-features dist/flight_sim_bg.wasm -o dist/flight_sim_bg.wasm
 fi
 cp -R assets dist/assets
-cp web/vercel.json web/manifest.json web/auth.js web/oauth-client-metadata.json dist/
+cp web/vercel.json web/manifest.json web/auth.js web/oauth-client-metadata.json web/oauth-native-client-metadata.json dist/
 cp -R web/.well-known dist/.well-known
 # stamp the build so a stale cached page is easy to spot
 BUILD="$(git rev-parse --short HEAD)$(git diff --quiet || echo +)-$(date +%H%M)"
