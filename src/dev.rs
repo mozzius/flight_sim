@@ -84,13 +84,16 @@ fn auto_screenshot(
                 Some(t) => Screenshot::image(t.0.clone()),
                 None => Screenshot::primary_window(),
             };
+            // (a stale file would end the wait below early)
+            let _ = std::fs::remove_file(&state.path);
             commands
                 .spawn(screenshot)
                 .observe(save_to_disk(state.path.clone()));
             state.taken_at = Some(now);
         }
-        // give the capture a moment to be written before quitting
-        Some(t) if now - t > 1.0 => {
+        // wait for the capture to be written before quitting (it can take a while
+        // when the machine is busy), giving up after 20 s
+        Some(t) if (now - t > 1.0 && std::path::Path::new(&state.path).exists()) || now - t > 20.0 => {
             exit.write(AppExit::Success);
         }
         _ => {}

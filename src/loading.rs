@@ -126,7 +126,7 @@ fn load_map(
     if *frames < 3 {
         return;
     }
-    let b = baker.get_or_insert_with(|| MapBaker::new(seed.0, terrain_gen::TEXTURE_DIV));
+    let b = baker.get_or_insert_with(|| MapBaker::new(seed.0, env.biome, terrain_gen::TEXTURE_DIV));
     let done = b.step(FRAME_BUDGET);
     // the last tenth of the bar is building the meshes
     let progress = if done.is_some() { 1.0 } else { b.progress() * 0.9 };

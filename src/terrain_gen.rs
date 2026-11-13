@@ -24,6 +24,10 @@
 //! multi-threaded natively, ~2 s), then `spawn_map` builds the meshes.
 //! Valley floors sit at roughly 0..400 m, most peaks at 2000..3500 m (max ~3.9 km).
 //!
+//! Biomes (`biome`): a parameter set threaded through the height shaping (relief and the
+//! soft floor in `sample_terrain`), the colour bake (`terrain_color`), the trees and the
+//! terrain shader. Farmland adds fields on flat low ground (`fields`).
+//!
 //! Debug: `TERRAIN_DEBUG_CAM=<n>` overrides the `Camera3d` transform with one of a few fixed
 //! viewpoints (or `x,y,z,tx,ty,tz`) for looking at the terrain.
 
@@ -39,6 +43,8 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
+pub mod biome;
+mod fields;
 mod roads;
 mod trees;
 
@@ -90,6 +96,10 @@ pub struct TerrainParams {
     pub mist: Vec4,
     /// xyz: direction to the sun
     pub sun: Vec4,
+    /// rgb: rock tint, a: vegetation mottling strength (see `biome`)
+    pub biome: Vec4,
+    /// xy: slope range the snow fades out over, z: snow follows the baked colour (see `biome`)
+    pub snow: Vec4,
 }
 
 impl MaterialExtension for TerrainDetail {
@@ -649,14 +659,14 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
     let offset = lerp(HEIGHT_OFFSET.x, -fade_target, HEIGHT_OFFSET.y) * e.magnitude;
     let eroded = n.x + e.delta.x + offset;
 
-    let mut height = (eroded - SEA_LEVEL) * WORLD_SCALE * VERTICAL_SCALE;
+    let b = biome::params();
+    let mut height = (eroded - SEA_LEVEL) * WORLD_SCALE * VERTICAL_SCALE * b.relief;
 
-    // Squash the deepest basins into broad, nearly flat floors that bottom out just below 0.
-    const SOFT_FLOOR: f32 = 120.0;
-    const SOFT_FLOOR_RANGE: f32 = 180.0;
-    if height < SOFT_FLOOR {
-        height = SOFT_FLOOR
-            - SOFT_FLOOR_RANGE * (1.0 - ((height - SOFT_FLOOR) / SOFT_FLOOR_RANGE).exp());
+    // Squash the deepest basins into broad, nearly flat floors that bottom out just below 0
+    // (alpine: 120 m and 180 m; farmland squashes much more into wide plains).
+    let (soft_floor, range) = (b.soft_floor, b.soft_floor_range);
+    if height < soft_floor {
+        height = soft_floor - range * (1.0 - ((height - soft_floor) / range).exp());
     }
 
     // Hard spawn guarantee: a smooth cap that is SPAWN_CLEAR_HEIGHT within the clear radius
@@ -728,42 +738,26 @@ fn srgb(r: f32, g: f32, b: f32) -> Vec3 {
     Vec3::new(c.red, c.green, c.blue)
 }
 
-/// Surface colour (linear RGB) from height, normal and the erosion ridge map.
-fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32) -> Vec3 {
-    let meadow = srgb(0.42, 0.47, 0.22);
-    let dry_meadow = srgb(0.52, 0.50, 0.30);
-    let forest = srgb(0.17, 0.25, 0.11);
-    let alpine = srgb(0.46, 0.44, 0.30);
-    let rock = srgb(0.52, 0.46, 0.36);
-    let dark_rock = srgb(0.31, 0.27, 0.22);
-    let snow = srgb(0.94, 0.95, 0.98);
+/// Surface colour (linear RGB) from height, normal and the erosion ridge map, in the
+/// current biome. `field` is the field here (farmland), `step` the texel size.
+fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&fields::Field>, step: f32) -> Vec3 {
+    let b = biome::params();
+    let cover = biome::cover(b, h, normal, ridge, jitter, field);
+    let crease = (-ridge.clamp(-1.0, 1.0)).max(0.0);
 
-    let flatness = normal.y; // 1 = flat
-    let ridge = ridge.clamp(-1.0, 1.0);
-    let crease = (-ridge).max(0.0);
-
-    // Valley floors are a patchwork of meadow and woods, slopes are forested up to the tree
-    // line (which reaches higher up the gullies, where the drainage is), then alpine grass.
-    let tree_line = 1650.0 + jitter * 250.0 + crease * 250.0 - ridge.max(0.0) * 200.0;
-    let woods = smoothstep(0.15, 0.45, jitter + crease * 0.3);
-    let forest_amt = smoothstep(0.985, 0.94 - crease * 0.05, flatness).max(woods)
-        * smoothstep(tree_line + 150.0, tree_line - 150.0, h);
-    let floor_col = meadow.lerp(dry_meadow, smoothstep(-0.1, -0.5, jitter));
-    let mut c = floor_col.lerp(forest, forest_amt);
-    let alpine_amt = smoothstep(tree_line - 100.0, tree_line + 250.0, h);
-    c = c.lerp(alpine, alpine_amt);
-
-    // Rock on steep slopes, more exposed on ridges and higher up, darker in eroded creases.
-    let steep_start = 0.70 + ridge * 0.06 + jitter * 0.04 + smoothstep(1500.0, 3000.0, h) * 0.08;
-    let rock_amt = smoothstep(steep_start, steep_start - 0.10, flatness);
-    let rock_col = rock.lerp(dark_rock, crease * 0.8 + jitter.max(0.0) * 0.2);
-    c = c.lerp(rock_col, rock_amt);
-
-    // Snow on high, not-too-steep ground; it lingers longer in creases.
-    let snow_line = 2350.0 + jitter * 200.0 - crease * 200.0;
-    let snow_amt = smoothstep(snow_line - 100.0, snow_line + 250.0, h)
-        * smoothstep(0.55 - smoothstep(2500.0, 3500.0, h) * 0.15, 0.72, flatness);
-    c.lerp(snow, snow_amt)
+    let floor_col = b.meadow.lerp(b.dry_meadow, smoothstep(-0.1, -0.5, jitter));
+    let mut c = floor_col.lerp(b.forest, cover.forest);
+    if let Some(f) = field
+        && cover.field > 0.0
+    {
+        let (field_col, hedge) = fields::field_color(f, step);
+        c = c.lerp(field_col.lerp(b.forest, hedge), cover.field);
+    }
+    c = c.lerp(b.alpine, cover.alpine);
+    // rock darker in eroded creases
+    let rock_col = b.rock.lerp(b.dark_rock, crease * 0.8 + jitter.max(0.0) * 0.2);
+    c = c.lerp(rock_col, cover.rock);
+    c.lerp(b.snow, cover.snow)
 }
 
 /// Builds a full mip chain by 2x2 box filtering. `renormalize` is for normal maps.
@@ -836,7 +830,16 @@ fn texture_sample(origin: Vec2, step: f32, i: usize, j: usize) -> (f32, f32) {
 }
 
 /// Colour and normal of texel (i, j), from the finished sample lattice (`res + 2` wide).
-fn texture_texel(samples: &[(f32, f32)], res: usize, origin: Vec2, step: f32, i: usize, j: usize) -> (Vec4, Vec4) {
+#[allow(clippy::too_many_arguments)]
+fn texture_texel(
+    samples: &[(f32, f32)],
+    fields: &fields::FieldMap,
+    res: usize,
+    origin: Vec2,
+    step: f32,
+    i: usize,
+    j: usize,
+) -> (Vec4, Vec4) {
     let n = res + 2;
     let k = (j + 1) * n + i + 1;
     let dx = (samples[k + 1].0 - samples[k - 1].0) / (2.0 * step);
@@ -844,7 +847,8 @@ fn texture_texel(samples: &[(f32, f32)], res: usize, origin: Vec2, step: f32, i:
     let normal = Vec3::new(-dx, 1.0, -dz).normalize();
     let xz = origin + (Vec2::new(i as f32, j as f32) + 0.5) * step;
     let jitter = noised(xz / 900.0, 77).x + 0.5 * noised(xz / 310.0, 78).x;
-    let mut color = terrain_color(samples[k].0, normal, samples[k].1, jitter);
+    let field = biome::may_have_fields(biome::params(), samples[k].0, normal.y).then(|| fields::field_at(xz, fields));
+    let mut color = terrain_color(samples[k].0, normal, samples[k].1, jitter, field.as_ref(), step);
 
     // Cheap baked cavity / ambient occlusion: compare the height with its surroundings at a
     // few radii. Gully floors (concave) get darker, ridge crests (convex) a little lighter,
@@ -1043,6 +1047,8 @@ pub struct MapBake {
     fine: HeightGrid,
     coarse: HeightGrid,
     roads: Vec<roads::Road>,
+    biome: biome::Biome,
+    fields: fields::FieldMap,
     /// near, fine, coarse; `None` where it won't be drawn (the near one on low-memory devices)
     textures: [Option<TextureBake>; 3],
 }
@@ -1052,10 +1058,12 @@ pub struct MapBake {
 /// the page for many seconds.
 pub struct MapBaker {
     seed: u32,
+    biome: biome::Biome,
     texture_div: usize,
     start: Instant,
     grids: Vec<HeightGrid>,
     roads: Vec<roads::Road>,
+    fields: fields::FieldMap,
     textures: Vec<Option<TextureBake>>,
     stage: Stage,
     /// Rough cost units done / in total, for the progress bar.
@@ -1085,9 +1093,10 @@ const TEXEL_COST: f64 = 0.15;
 const ROADS_COST: f64 = 250_000.0;
 
 impl MapBaker {
-    pub fn new(seed: u32, texture_div: usize) -> Self {
+    pub fn new(seed: u32, biome: biome::Biome, texture_div: usize) -> Self {
         SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
-        info!("terrain: map seed {seed} (FLIGHT_SIM_SEED={seed} to fly it again)");
+        biome::set(biome);
+        info!("terrain: map seed {seed}, {} (FLIGHT_SIM_SEED={seed} to fly it again)", biome.name());
         let mut total = ROADS_COST;
         for (_, cells) in GRIDS {
             total += ((cells + 1) * (cells + 1)) as f64;
@@ -1100,10 +1109,12 @@ impl MapBaker {
         }
         MapBaker {
             seed,
+            biome,
             texture_div,
             start: Instant::now(),
             grids: Vec::new(),
             roads: Vec::new(),
+            fields: fields::FieldMap::empty(),
             textures: Vec::new(),
             stage: Stage::Grid { which: 0, heights: Vec::new() },
             done: 0.0,
@@ -1137,6 +1148,8 @@ impl MapBaker {
                     fine: grids.next().unwrap(),
                     coarse: grids.next().unwrap(),
                     roads: std::mem::take(&mut self.roads),
+                    biome: self.biome,
+                    fields: std::mem::replace(&mut self.fields, fields::FieldMap::empty()),
                     textures: [textures.next().unwrap(), textures.next().unwrap(), textures.next().unwrap()],
                 });
             }
@@ -1172,6 +1185,9 @@ impl MapBaker {
             }
             Stage::Roads => {
                 self.roads = roads::build_roads(&mut self.grids[0]);
+                if biome::params().field_line.is_some() {
+                    self.fields = fields::FieldMap::new(&self.roads, NEAR_SPACING * NEAR_CELLS as f32 * 0.5);
+                }
                 self.done += ROADS_COST;
                 Stage::Grid { which: 1, heights: Vec::new() }
             }
@@ -1192,7 +1208,8 @@ impl MapBaker {
                 let (origin, step, res) = self.texture_frame(which);
                 let j0 = texels.len() / res;
                 let rows = ((slice as f64 / TEXEL_COST) as usize / res).clamp(1, res - j0);
-                texels.extend(par_map(res, rows, |i, j| texture_texel(&samples, res, origin, step, i, j0 + j)));
+                let fields = &self.fields;
+                texels.extend(par_map(res, rows, |i, j| texture_texel(&samples, fields, res, origin, step, i, j0 + j)));
                 self.done += (rows * res) as f64 * TEXEL_COST;
                 if texels.len() < res * res {
                     Stage::Texels { which, samples, texels }
@@ -1234,8 +1251,10 @@ pub fn spawn_map(
     images: &mut Assets<Image>,
 ) -> GeneratedTerrain {
     let start = Instant::now();
-    let MapBake { seed, near, fine, coarse, roads: road_lines, textures } = bake;
+    let MapBake { seed, near, fine, coarse, roads: road_lines, biome: map_biome, fields, textures } = bake;
     SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
+    biome::set(map_biome);
+    let b = biome::params();
 
     let root = commands
         .spawn((
@@ -1278,9 +1297,11 @@ pub fn spawn_map(
             extension: TerrainDetail {
                 params: TerrainParams {
                     // normal detail strength, snow line (m), rock slope threshold, mist brightness
-                    params: Vec4::new(1.0, 2350.0, 0.36, 1.0),
+                    params: Vec4::new(1.0, b.snow_line, 0.36, 1.0),
                     mist: look.mist,
                     sun: look.sun_dir.extend(0.0),
+                    biome: b.shader_rock.extend(b.veg_patches),
+                    snow: b.shader_snow.extend(0.0),
                 },
             },
         });
@@ -1346,6 +1367,7 @@ pub fn spawn_map(
     let road_index = roads::RoadIndex::new(&road_lines, 20.0);
     commands.insert_resource(trees::TreeField::new(
         road_index,
+        fields,
         scenery_materials.add(scenery(0.0, 0.95)),
         NEAR_SPACING * NEAR_CELLS as f32 * 0.5,
     ));
@@ -1492,6 +1514,15 @@ mod tests {
 
     #[test]
     fn stats() {
+        // (biomes are a global: only this test switches them, and it puts alpine back)
+        for b in [biome::Biome::Farmland, biome::Biome::Tundra, biome::Biome::Alpine] {
+            biome::set(b);
+            println!("{}:", b.name());
+            stats_for_biome();
+        }
+    }
+
+    fn stats_for_biome() {
         let axis: Vec<String> = (-12..=14)
             .map(|k| format!("{:.0}", sample_terrain(0.0, k as f32 * 1000.0, 5.0).height))
             .collect();

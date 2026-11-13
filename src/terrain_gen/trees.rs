@@ -1,8 +1,10 @@
 //! Forests over the high-res grid.
 //!
 //! Trees are scattered on a jittered lattice wherever the baked terrain colour
-//! says "forest" (the same rules as `terrain_color`: wooded slopes below the
-//! tree line, patches on the valley floors, none on rock, snow or roads).
+//! says "forest" (the same rules as `terrain_color`, `biome::cover`: wooded
+//! slopes below the tree line, patches on the valley floors, none on rock or
+//! roads; hedgerows along farmland fields). Species, colours, density and snow
+//! on the crowns come from the biome.
 //! Trees are planted and meshed per 512 m chunk only when the camera comes
 //! near (several chunks at once on worker threads), in two levels of detail
 //! that dither into each other, and dropped again when it leaves.
@@ -18,8 +20,8 @@ use bevy::{
 };
 
 use super::{
-    EROSION_OCTAVES, SceneryMaterial, noised, octaves_at, roads::RoadIndex, sample_terrain,
-    smoothstep, srgb,
+    EROSION_OCTAVES, SceneryMaterial, biome, fields, noised, octaves_at, roads::RoadIndex,
+    sample_terrain, smoothstep, srgb,
 };
 use crate::{camera::MainCamera, world::Terrain};
 
@@ -56,11 +58,14 @@ struct Tree {
     yaw: f32,
     conifer: bool,
     color: Vec3,
+    /// Snow on the crown (0..1).
+    snow: f32,
 }
 
 #[derive(Resource)]
 pub(super) struct TreeField {
     roads: RoadIndex,
+    fields: fields::FieldMap,
     material: Handle<SceneryMaterial>,
     /// The square trees grow in (the high-res grid, minus a margin).
     min: Vec2,
@@ -68,10 +73,15 @@ pub(super) struct TreeField {
 }
 
 impl TreeField {
-    pub(super) fn new(roads: RoadIndex, material: Handle<SceneryMaterial>, center_half_extent: f32) -> Self {
+    pub(super) fn new(
+        roads: RoadIndex,
+        fields: fields::FieldMap,
+        material: Handle<SceneryMaterial>,
+        center_half_extent: f32,
+    ) -> Self {
         // stay off the grid's edge, where it meets the coarser terrain
         let half = center_half_extent - 300.0;
-        Self { roads, material, min: Vec2::splat(-half), max: Vec2::splat(half) }
+        Self { roads, fields, material, min: Vec2::splat(-half), max: Vec2::splat(half) }
     }
 }
 
@@ -99,20 +109,18 @@ fn chunk_center(key: (i32, i32)) -> Vec2 {
     (Vec2::new(key.0 as f32, key.1 as f32) + 0.5) * CHUNK
 }
 
-/// How wooded the ground is (0..1), mirroring `terrain_color`'s forest and rock rules.
-fn forest_cover(h: f32, normal: Vec3, ridge: f32, jitter: f32) -> f32 {
-    let flatness = normal.y;
-    let ridge = ridge.clamp(-1.0, 1.0);
-    let crease = (-ridge).max(0.0);
-    let tree_line = 1650.0 + jitter * 250.0 + crease * 250.0 - ridge.max(0.0) * 200.0;
-    let woods = smoothstep(0.15, 0.45, jitter + crease * 0.3);
-    let forest = smoothstep(0.985, 0.94 - crease * 0.05, flatness).max(woods)
-        * smoothstep(tree_line + 150.0, tree_line - 150.0, h);
-    let steep_start = 0.70 + ridge * 0.06 + jitter * 0.04 + smoothstep(1500.0, 3000.0, h) * 0.08;
-    let rock = smoothstep(steep_start, steep_start - 0.10, flatness);
+/// How wooded the ground is (0..1): `biome::cover`, as the baked colour uses it, plus
+/// hedgerow trees along the field edges in farmland.
+fn forest_cover(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&fields::Field>) -> f32 {
+    let b = biome::params();
+    let cover = biome::cover(b, h, normal, ridge, jitter, field);
+    let tree_line = b.tree_line + jitter * 250.0;
     // a few lone trees in the meadows too
     let scattered = 0.03 * smoothstep(tree_line, tree_line - 300.0, h);
-    (forest * (1.0 - rock)).max(scattered * (1.0 - rock))
+    let hedgerow = field.map_or(0.0, |f| cover.field * 0.8 * smoothstep(7.0, 3.5, f.edge));
+    // (no lone trees in the middle of a crop field)
+    let open = 1.0 - cover.rock;
+    (cover.forest * open).max(scattered * open * (1.0 - cover.field)).max(hedgerow) * b.tree_density
 }
 
 /// Plants one chunk's trees (positions relative to the chunk centre).
@@ -148,7 +156,9 @@ fn plant_one(iu: u32, ju: u32, xz: Vec2, field: &TreeField, terrain: &Terrain) -
     let hz = sample_terrain(xz.x, xz.y + step, octaves).height;
     let normal = Vec3::new(-(hx - t.height) / step, 1.0, -(hz - t.height) / step).normalize();
     let jitter = noised(xz / 900.0, 77).x + 0.5 * noised(xz / 310.0, 78).x;
-    let cover = forest_cover(t.height, normal, t.ridge_map, jitter);
+    let b = biome::params();
+    let here = biome::may_have_fields(b, t.height, normal.y).then(|| fields::field_at(xz, &field.fields));
+    let cover = forest_cover(t.height, normal, t.ridge_map, jitter, here.as_ref());
     if rand01(iu, ju, 3) >= cover * 0.92 {
         return None;
     }
@@ -157,23 +167,25 @@ fn plant_one(iu: u32, ju: u32, xz: Vec2, field: &TreeField, terrain: &Terrain) -
     }
     let ground = terrain.height_at(xz.x, xz.y);
     // broadleaf woods on the valley floors, conifers up the slopes
-    let conifer = rand01(iu, ju, 4) < smoothstep(500.0, 1100.0, ground) * 0.85 + 0.15;
+    let (low, high) = b.conifers;
+    let conifer = rand01(iu, ju, 4) < low + (high - low) * smoothstep(500.0, 1100.0, ground);
     let r = rand01(iu, ju, 5);
     let shade = 0.8 + 0.35 * rand01(iu, ju, 6);
     let color = if conifer {
-        srgb(0.15, 0.22, 0.11) * shade
-    } else if r < 0.05 {
-        srgb(0.48, 0.38, 0.12) * shade // turning early
+        b.conifer * shade
+    } else if r < b.autumn_share {
+        b.autumn * shade // turning early
     } else {
-        srgb(0.22, 0.31, 0.12) * shade
+        b.broadleaf * shade
     };
     Some(Tree {
         pos: Vec3::new(xz.x, ground, xz.y),
-        height: if conifer { 14.0 + 12.0 * r } else { 10.0 + 8.0 * r },
+        height: if conifer { 14.0 + 12.0 * r } else { 10.0 + 8.0 * r } * b.tree_scale,
         width: if conifer { 0.28 + 0.08 * rand01(iu, ju, 7) } else { 0.45 + 0.12 * rand01(iu, ju, 7) },
         yaw: rand01(iu, ju, 8) * std::f32::consts::TAU,
         conifer,
         color,
+        snow: b.tree_snow * (0.6 + 0.4 * rand01(iu, ju, 9)),
     })
 }
 
@@ -199,8 +211,24 @@ impl MeshBuilder {
     /// A cone (or, with `bottom`, a double cone) around the tree's axis.
     #[allow(clippy::too_many_arguments)]
     fn crown(&mut self, t: &Tree, sides: usize, base: f32, top: f32, radius: f32, bottom: Option<f32>, color: Vec3) {
+        self.crown_tipped(t, sides, base, top, radius, bottom, color, color * 1.15);
+    }
+
+    /// `crown` with its own colour at the tip (snow).
+    #[allow(clippy::too_many_arguments)]
+    fn crown_tipped(
+        &mut self,
+        t: &Tree,
+        sides: usize,
+        base: f32,
+        top: f32,
+        radius: f32,
+        bottom: Option<f32>,
+        color: Vec3,
+        tip: Vec3,
+    ) {
         let (h, r) = (t.height, radius * t.height);
-        let apex = self.vert(t.pos + Vec3::Y * top * h, Vec3::Y, color * 1.15);
+        let apex = self.vert(t.pos + Vec3::Y * top * h, Vec3::Y, tip);
         let low = bottom.map(|b| self.vert(t.pos + Vec3::Y * b * h, Vec3::NEG_Y, color * 0.6));
         let first = self.positions.len() as u32;
         for k in 0..sides {
@@ -247,14 +275,17 @@ impl MeshBuilder {
 }
 
 fn chunk_meshes(trees: &[Tree]) -> (Mesh, Mesh) {
+    let snow = srgb(0.86, 0.89, 0.93);
     let mut near = MeshBuilder::default();
     let mut far = MeshBuilder::default();
     for t in trees {
         if t.conifer {
+            // snow lies on the tiers, so it shows towards each cone's tip
+            let snowy = |c: Vec3, k: f32| c.lerp(snow, t.snow * k);
             near.trunk(t, 0.25);
-            near.crown(t, 6, 0.15, 0.7, t.width, None, t.color);
-            near.crown(t, 6, 0.42, 1.0, t.width * 0.7, None, t.color * 1.08);
-            far.crown(t, 4, 0.1, 1.0, t.width, None, t.color);
+            near.crown_tipped(t, 6, 0.15, 0.7, t.width, None, snowy(t.color, 0.25), snowy(t.color * 1.15, 0.8));
+            near.crown_tipped(t, 6, 0.42, 1.0, t.width * 0.7, None, snowy(t.color * 1.08, 0.3), snowy(t.color * 1.15, 0.9));
+            far.crown_tipped(t, 4, 0.1, 1.0, t.width, None, snowy(t.color, 0.3), snowy(t.color * 1.15, 0.85));
         } else {
             near.trunk(t, 0.4);
             near.crown(t, 6, 0.62, 1.0, t.width, Some(0.3), t.color);

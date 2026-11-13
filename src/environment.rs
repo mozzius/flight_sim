@@ -4,10 +4,13 @@
 //! colour and illuminance, exposure, distance fog, valley mist, the cloud
 //! layer, the atmosphere's aerosols and the fallback sky's gradient.
 //!
-//! Overrides: `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
+//! The biome (`Biome`: alpine, tundra, farmland) is rolled first and biases
+//! the weather and time dice.
+//!
+//! Overrides: `FLIGHT_SIM_BIOME=alpine|tundra|farmland`, `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 //! `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` natively, and
-//! `?weather=` / `?time=` on the web (the page sets `window.FLIGHT_SIM_WEATHER`
-//! / `FLIGHT_SIM_TIME`). Screenshot runs default to clear midday so they stay
+//! `?biome=` / `?weather=` / `?time=` on the web (the page sets `window.FLIGHT_SIM_BIOME`,
+//! `FLIGHT_SIM_WEATHER` and `FLIGHT_SIM_TIME`). Screenshot runs default to alpine, clear midday so they stay
 //! comparable.
 //!
 //! Everything is applied once at startup (the map, and so the environment,
@@ -36,6 +39,41 @@ pub enum Weather {
     Overcast,
     /// Warm, low-contrast haze; few clouds.
     Hazy,
+}
+
+/// The map's landscape (terrain palette, tree cover, height shaping: see
+/// `terrain_gen::biome`). Rolled from the seed like the weather, and it biases
+/// the weather and time dice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Biome {
+    /// Forested valleys, alpine meadows, rock and snow-capped peaks (the original look).
+    #[default]
+    Alpine,
+    /// Winter: a low snow line, sparse dark conifers, pale rock.
+    Tundra,
+    /// Gentler hills, a patchwork of fields and hedgerows on the valley floors.
+    Farmland,
+}
+
+impl Biome {
+    pub const ALL: [Self; 3] = [Self::Alpine, Self::Tundra, Self::Farmland];
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "alpine" | "mountains" | "default" => Self::Alpine,
+            "tundra" | "winter" | "snow" => Self::Tundra,
+            "farmland" | "farm" | "fields" => Self::Farmland,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Alpine => "alpine",
+            Self::Tundra => "tundra",
+            Self::Farmland => "farmland",
+        }
+    }
 }
 
 impl TimeOfDay {
@@ -83,6 +121,7 @@ impl Weather {
 /// The round's time of day and weather. Inserted by `loading::LoadingPlugin`.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct Environment {
+    pub biome: Biome,
     pub time: TimeOfDay,
     pub weather: Weather,
     /// Compass bearing of the sun, radians from +Z (behind the spawn, which
@@ -102,8 +141,17 @@ impl Environment {
     }
 
     fn choose(seed: u32) -> Self {
-        let rolled = Self::roll(seed);
         let headless = crate::dev::headless();
+        let biome = match setting("FLIGHT_SIM_BIOME") {
+            Some(s) => Biome::parse(&s).unwrap_or_else(|| {
+                warn!("unknown FLIGHT_SIM_BIOME {s:?}");
+                Self::roll(seed, None).biome
+            }),
+            None if headless => Biome::Alpine,
+            None => Self::roll(seed, None).biome,
+        };
+        // the weather dice depend on the biome (pinned or rolled)
+        let rolled = Self::roll(seed, Some(biome));
         let time = match setting("FLIGHT_SIM_TIME") {
             Some(s) => TimeOfDay::parse(&s).unwrap_or_else(|| {
                 warn!("unknown FLIGHT_SIM_TIME {s:?}");
@@ -121,13 +169,14 @@ impl Environment {
             None => rolled.weather,
         };
         let sun_azimuth = if headless { DEFAULT_AZIMUTH } else { rolled.sun_azimuth };
-        let env = Self { time, weather, sun_azimuth };
-        info!("environment: {:?} {:?}, sun bearing {:.0}°", env.time, env.weather, env.sun_azimuth.to_degrees());
+        let env = Self { biome, time, weather, sun_azimuth };
+        info!("environment: {:?} {:?} {:?}, sun bearing {:.0}°", env.biome, env.time, env.weather, env.sun_azimuth.to_degrees());
         env
     }
 
     /// Weighted dice from the seed (hashed, so it's independent of the terrain).
-    fn roll(seed: u32) -> Self {
+    /// `biome` replaces the rolled biome (it still biases the weather and time).
+    fn roll(seed: u32, biome: Option<Biome>) -> Self {
         let mut state = seed ^ 0x9e37_79b9;
         let mut next = || {
             // splitmix32
@@ -148,15 +197,24 @@ impl Environment {
                 })
                 .unwrap_or(weights.len() - 1)
         };
-        // dawn, morning, midday, afternoon, golden
-        let time = TimeOfDay::ALL[pick(next(), &[1.0, 2.0, 2.5, 2.5, 2.0])];
-        // clear, broken, overcast, hazy
-        let weather = Weather::ALL[pick(next(), &[3.5, 3.0, 1.5, 2.0])];
+        // alpine, tundra, farmland
+        let rolled_biome = Biome::ALL[pick(next(), &[4.0, 3.0, 3.0])];
+        let biome = biome.unwrap_or(rolled_biome);
+        let (times, weathers): ([f32; 5], [f32; 4]) = match biome {
+            // (dawn, morning, midday, afternoon, golden), (clear, broken, overcast, hazy)
+            Biome::Alpine => ([1.0, 2.0, 2.5, 2.5, 2.0], [3.5, 3.0, 1.5, 2.0]),
+            // a low winter sun, crisp air: never hazy, often grey
+            Biome::Tundra => ([2.0, 2.5, 1.0, 2.0, 2.5], [3.5, 3.0, 2.5, 0.0]),
+            // summer: warm haze and long evenings
+            Biome::Farmland => ([1.0, 2.0, 2.5, 2.5, 2.5], [3.0, 3.0, 1.0, 2.5]),
+        };
+        let time = TimeOfDay::ALL[pick(next(), &times)];
+        let weather = Weather::ALL[pick(next(), &weathers)];
         // keep the sun off the nose of the spawn heading (-Z): behind or to
         // either side, so the opening fight isn't flown into the glare
         let side = if next() < 0.5 { -1.0 } else { 1.0 };
         let sun_azimuth = side * (0.25 + next() * 1.6);
-        Self { time, weather, sun_azimuth }
+        Self { biome, time, weather, sun_azimuth }
     }
 
     /// Unit vector towards the sun.
@@ -241,7 +299,11 @@ impl Environment {
         let sun_hue = sun_rel / sun_rel.max_element();
 
         // ---- valley mist
-        let mist_density = match w {
+        let mist_density = match self.biome {
+            // the plains sit lower, deeper in the mist layer
+            Biome::Farmland => 0.55,
+            _ => 1.0,
+        } * match w {
             Weather::Clear => 1.0,
             Weather::Broken => 1.2,
             Weather::Overcast => 2.4,
@@ -256,6 +318,10 @@ impl Environment {
             Weather::Overcast => Vec3::new(0.6, 0.62, 0.65),
             Weather::Hazy => Vec3::new(0.76, 0.75, 0.72),
             _ => Vec3::new(0.62, 0.68, 0.76),
+        } * match self.biome {
+            // cold, blue-white mist over the snow
+            Biome::Tundra => Vec3::new(1.0, 1.04, 1.1),
+            _ => Vec3::ONE,
         };
 
         // ---- fallback sky gradient (display colours)
@@ -456,7 +522,7 @@ mod tests {
 
     #[test]
     fn midday_matches_the_original_sun() {
-        let env = Environment { time: TimeOfDay::Midday, weather: Weather::Clear, sun_azimuth: DEFAULT_AZIMUTH };
+        let env = Environment { biome: Biome::Alpine, time: TimeOfDay::Midday, weather: Weather::Clear, sun_azimuth: DEFAULT_AZIMUTH };
         let original = Vec3::new(4.0, 10.0, 10.0).normalize();
         assert!(env.sun_dir().distance(original) < 1e-3, "{:?}", env.sun_dir());
         let look = env.look();
@@ -466,7 +532,12 @@ mod tests {
 
     #[test]
     fn rolls_cover_every_preset() {
-        let rolls: Vec<_> = (0..400).map(Environment::roll).collect();
+        let rolls: Vec<_> = (0..400).map(|s| Environment::roll(s, None)).collect();
+        for b in Biome::ALL {
+            let n = rolls.iter().filter(|e| e.biome == b).count();
+            assert!(n > 80, "{b:?} rolled only {n} times in 400");
+        }
+        assert!(!rolls.iter().any(|e| e.biome == Biome::Tundra && e.weather == Weather::Hazy));
         for t in TimeOfDay::ALL {
             assert!(rolls.iter().any(|e| e.time == t), "{t:?} never rolled");
         }

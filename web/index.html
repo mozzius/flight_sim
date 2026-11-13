@@ -227,8 +227,10 @@
     {
       const q = new URLSearchParams(location.search);
       window.FLIGHT_SIM_LOW_MEMORY = q.has("low") || (navigator.maxTouchPoints > 0 && !q.has("high"));
-      // ?weather=clear|broken|overcast|hazy and ?time=dawn|morning|midday|afternoon|golden
-      // pin the round's environment (src/environment.rs); otherwise it's rolled from the map seed
+      // ?biome=alpine|tundra|farmland, ?weather=clear|broken|overcast|hazy and
+      // ?time=dawn|morning|midday|afternoon|golden pin the round's environment
+      // (src/environment.rs); otherwise it's rolled from the map seed
+      window.FLIGHT_SIM_BIOME = q.get("biome") || "";
       window.FLIGHT_SIM_WEATHER = q.get("weather") || "";
       window.FLIGHT_SIM_TIME = q.get("time") || "";
     }

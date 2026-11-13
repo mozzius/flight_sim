@@ -32,6 +32,10 @@ struct TerrainDetail {
     mist: vec4<f32>,
     // xyz: direction to the sun
     sun: vec4<f32>,
+    // rgb: rock tint, a: vegetation mottling strength (src/terrain_gen/biome.rs)
+    biome: vec4<f32>,
+    // xy: slope range the snow fades out over, z: 1 = snow only where the baked colour is snowy
+    snow: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
@@ -134,18 +138,21 @@ fn fragment(
     let rock = smoothstep1(terrain.params.z - 0.06, terrain.params.z + 0.06, slope + breakup * 0.08);
     let snow_line = terrain.params.y + breakup * 140.0;
     // snow settles on gentler slopes
-    let snow = smoothstep1(snow_line - 60.0, snow_line + 120.0, pos.y)
-        * (1.0 - smoothstep1(0.55, 0.75, slope));
+    var snow = smoothstep1(snow_line - 60.0, snow_line + 120.0, pos.y)
+        * (1.0 - smoothstep1(terrain.snow.x, terrain.snow.y, slope));
 
     let macro_col = pbr_input.material.base_color.rgb;
+    // (tundra) keep the baked forest, tundra grass and rock showing through
+    let macro_snowy = smoothstep1(0.3, 0.7, dot(macro_col, vec3<f32>(0.3, 0.5, 0.2)));
+    snow *= mix(1.0, macro_snowy, terrain.snow.z);
     // vegetation: keep the baked palette, add patchy variation
     let patches = noised(pos.xz / 18.0).x * 0.5 + noised(pos.xz / 5.0).x * 0.3;
-    var veg = macro_col * (0.85 + 0.25 * patches);
+    var veg = macro_col * (1.0 + (0.25 * patches - 0.15) * terrain.biome.a);
     // rock: grey-brown with strata that follow altitude, tinted by the macro colour
     // (warped by the breakup noise so the layers aren't ruler-straight)
     let strata = noised(vec2<f32>((pos.y + breakup * 12.0) / 6.0, (pos.x + pos.z) / 150.0)).x;
     var rock_col = mix(vec3<f32>(0.34, 0.31, 0.28), vec3<f32>(0.42, 0.39, 0.35), strata * 0.5 + 0.5);
-    rock_col = mix(rock_col, macro_col, 0.25) * (0.85 + 0.2 * breakup);
+    rock_col = mix(rock_col * terrain.biome.rgb, macro_col, 0.25) * (0.85 + 0.2 * breakup);
     let snow_col = vec3<f32>(0.92, 0.94, 0.98) * (0.92 + 0.08 * patches);
 
     var col = mix(veg, rock_col, rock);
