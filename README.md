@@ -10,7 +10,10 @@ Run the game using `cargo run`
   time first (each defaults to random).
 - **Challenge**: a random map, one life, bigger and sharper waves. Kills and cleared
   waves score points; the best score is kept (`localStorage` on the web, a file in the
-  OS data dir natively).
+  OS data dir natively). Signed in, runs also go on the server's leaderboard: the score
+  screen shows `BEST <n>  #<rank>` and LEADERBOARD (SIGN IN when signed out), which opens
+  GLOBAL / FRIENDS boards (`#  @handle  score  W<wave>`, your row highlighted); the menu
+  has it top left too.
 
 - **Multiplayer**: a free-for-all dogfight with respawns, up to 8 players per room. CREATE picks
   the room's location, weather and time (like Endless) and opens the room's lobby: the code,
@@ -194,6 +197,47 @@ docker run -p 8080:8080 -e FLIGHT_SIM_DEV_AUTH=1 flight-sim-server
 ```
 
 `railway.json` builds that Dockerfile and health-checks `/health`; Railway sets `PORT`.
+
+### Challenge leaderboard
+
+Protocol v4. When a signed-in challenge round starts the client sends `ChallengeStart { seed }`
+(queued until online); when it ends, `SubmitScore(Run { seed, score, wave, kills, secs })`, and
+the server answers `Standing(Option<{rank, score, wave}>)` (our best and global rank).
+`Leaderboard(Global | Friends)` → `LeaderboardData { kind, rows, you }` (top 20 and where we
+stand). Client: `src/leaderboard.rs`; server: `src/server/leaderboard.rs`.
+
+The client is authoritative, so a run only counts if it's sensible (`protocol::check_run`):
+a `ChallengeStart` on the same seed came first (one submission per start); the score splits
+into 250 × each cleared wave (wave − 1, or all waves if you went down in the breather) plus
+100 × kills, with no more kills than hostiles spawned (plus the two wingmen); at least 10 s per
+wave after the first plus 2 s per kill, by the client's game clock *and* the server's; the
+client's clock no more than 15 s ahead of the server's; caps (score 2,000,000, wave 150, 4 h).
+Rate limits: 10 starts a minute, one submission per 5 s, 30 board requests a minute. A rejected
+run is dropped quietly (logged; the reply is the same `Standing` as any run that isn't a best).
+
+Storage: SQLite (rusqlite, bundled) at `FLIGHT_SIM_DB` (default `./flight_sim.db`; the Docker
+image sets `/data/flight_sim.db`): `players` (DID → handle, refreshed on every connect, so
+renames show), `best` (each player's best run) and `runs` (every accepted run). The friends
+board is you plus your mutuals among the top 300 players, checked with presence's
+relationship cache (`getRelationships`, 5-minute cache, the same 5 calls a second); a request
+waits up to 8 s for lookups. On Railway, attach a volume at `/data` and set
+`RAILWAY_RUN_UID=0` (Railway mounts volumes root-owned, and the image runs as a non-root user).
+If the file can't be opened the server logs it and keeps the board in memory.
+
+Locally (two dev runs with fake but plausible scores, then the boards):
+
+```bash
+FLIGHT_SIM_DEV_AUTH=1 FLIGHT_SIM_DEV_MUTUALS=1 FLIGHT_SIM_DB=/tmp/fs/board.db PORT=8787 \
+  cargo run --release --no-default-features --features server --bin flight_sim_server
+FLIGHT_SIM_DEV_USER=alice FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MODE=challenge FLIGHT_SIM_AUTOPILOT=1 \
+  FLIGHT_SIM_DIE_AT=50 FLIGHT_SIM_DEV_RUN=3,2 FLIGHT_SIM_DEV_BOARD=global \
+  FLIGHT_SIM_SCREENSHOT_EXTRA=rank:/tmp/score.png,board:/tmp/board.png \
+  FLIGHT_SIM_SCREENSHOT=/tmp/end.png FLIGHT_SIM_SCREENSHOT_AFTER=62 cargo run
+```
+
+`FLIGHT_SIM_DEV_RUN=<kills>,<wave>` swaps in that run when the challenge ends;
+`FLIGHT_SIM_DEV_BOARD=global|friends` opens that board once online in the menu (or 3 s after the
+score screen gets its rank); screenshot events `rank` and `board`.
 
 ## Sign-in
 
