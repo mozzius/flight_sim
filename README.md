@@ -61,9 +61,8 @@ tablets get a lighter scene (fewer trees, half-res terrain textures).
 
 `FLIGHT_SIM_SCREENSHOT=out.png cargo run` saves a screenshot after 5 seconds
 (`FLIGHT_SIM_SCREENSHOT_AFTER=<secs>` to change) and exits. Other switches:
-`FLIGHT_SIM_LOG=1` (FPS + flight state each second), `FLIGHT_SIM_AUTOPILOT=1`,
-`FLIGHT_SIM_NO_HUD=1` (no HUD or player jet, for landscape shots)
-(the AI flies your jet), `FLIGHT_SIM_FX_TEST=1` (afterburner + an explosion),
+`FLIGHT_SIM_LOG=1` (FPS + flight state each second), `FLIGHT_SIM_AUTOPILOT=1`
+(the AI flies your jet), `FLIGHT_SIM_NO_HUD=1` (no HUD or player jet), `FLIGHT_SIM_FX_TEST=1` (afterburner + an explosion),
 `TERRAIN_DEBUG_CAM=1..4` (terrain viewpoints), `FLIGHT_SIM_FX_TEST=explosion|engines|missile|vapour|...`
 (staged effects), `CLOUDS_DEBUG_CAM=above|below|inside|sun|horizon`, `CLOUDS_DIV=2..4` (cloud
 resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FLIGHT_SIM_PAUSE_TEST=1`, `FLIGHT_SIM_KILL_TEST=1`,
