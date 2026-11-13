@@ -85,6 +85,31 @@ the farmland fields in `src/terrain_gen/fields.rs` (the terrain shader redraws t
 (shader `assets/shaders/water.wesl`).
 Screenshot runs are headless (no window) and silent.
 
+## Sign-in
+
+On the web you can sign in with an Atmosphere (Bluesky) account: SIGN IN in the
+menu's top-right corner asks for a handle (leave it empty to start at
+bsky.social, no typing) and redirects to the account's server via atproto OAuth.
+
+- `web/auth.js` runs the OAuth client (`@atproto/oauth-client-browser`, pinned on
+  esm.sh), keeps `window.FLIGHT_SIM_USER` (`{did, handle, displayName, avatar}` or
+  null) and exposes `window.flightSimAuth` (`signIn(handle?)`, `signOut()`,
+  `serviceToken()`). `src/identity.rs` is the Rust side.
+- Client metadata is `web/oauth-client-metadata.json` (the `client_id` URL on
+  flight.mozzius.dev). On `localhost` / `127.0.0.1` the loopback client is used
+  instead, so sign-in works against a local `python3 -m http.server --bind 127.0.0.1`
+  of `dist/` (it moves `localhost` to `127.0.0.1` first). Other hosts (Vercel
+  previews) can't sign in.
+- Scope: `atproto rpc:dev.mozzius.flight.join?aud=*`, just enough to mint a service-auth
+  token for joining the game server (`com.atproto.server.getServiceAuth`,
+  `aud=did:web:flight.mozzius.dev`). The rpc permission only allows `aud` as
+  `*` or a `did#service` ref, hence `aud=*`.
+- `web/.well-known/did.json` is `did:web:flight.mozzius.dev`.
+- The game server checks tokens with `atproto::verify_service_auth`
+  (`src/atproto`, native only: ES256K / ES256, DID docs from plc.directory or
+  did:web). Natively, `FLIGHT_SIM_DEV_USER=<handle>` plays as `did:dev:<handle>`
+  with token `dev:<handle>`, which the server accepts only with `FLIGHT_SIM_DEV_AUTH=1`.
+
 ## Desktop builds
 
 Pushing a `v*` tag builds a universal macOS .app, a Windows .exe and a Linux x86_64 tarball in GitHub Actions (`.github/workflows/release.yml`) and attaches them to a GitHub release. The macOS app is ad-hoc signed but not notarised, so the first launch needs right-click → Open (or `xattr -dr com.apple.quarantine "Flight Sim.app"`).
