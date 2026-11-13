@@ -41,7 +41,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(GameState::Menu), despawn_menu)
             .add_systems(
                 Update,
-                (lobby_focus, navigate, handle_pressed, style_buttons, layout_menu, layout_lobby, layout_account)
+                (lobby_focus, navigate, crate::leaderboard::handle_pressed, handle_pressed, style_buttons, layout_menu, layout_lobby, layout_account)
                     .chain()
                     .in_set(MenuSystems),
             )
@@ -61,6 +61,8 @@ pub enum Screen {
     Score,
     /// The native sign-in prompt (over the mode menu).
     SignIn,
+    /// The challenge leaderboard (`leaderboard`).
+    Leaderboard,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,6 +103,10 @@ pub enum UiAction {
     /// The native sign-in prompt's SIGN IN and CANCEL.
     SignInSubmit,
     SignInCancel,
+    /// The leaderboard's buttons (handled in `leaderboard`).
+    Leaderboard,
+    BoardTab(crate::net::protocol::BoardKind),
+    CloseBoard,
 }
 
 /// A menu button. `order` is the focus order on its screen; buttons sharing a
@@ -472,11 +478,14 @@ fn navigate(
     mut moved: MessageReader<CursorMoved>,
     sign_in: Res<crate::signin::SignInPrompt>,
     net: Res<crate::net::Net>,
+    board: Res<crate::leaderboard::BoardUi>,
 ) {
     // (only when the mouse moves: not when the layout shifts under it)
     let mouse_moved = moved.read().count() > 0;
     let screen = if sign_in.open && *state.get() == GameState::Menu {
         Some(Screen::SignIn)
+    } else if board.open {
+        Some(Screen::Leaderboard)
     } else {
         active_screen(*state.get(), paused.0, crate::modes::challenge_over(&mode, &prompt))
     };
@@ -678,6 +687,8 @@ fn handle_pressed(
             UiAction::DismissInvite => net.dismiss_invite(),
             UiAction::StartRoom => net.start_game(),
             UiAction::Leave => net.leave(),
+            // (taken by `leaderboard::handle_pressed` first)
+            UiAction::Leaderboard | UiAction::BoardTab(_) | UiAction::CloseBoard => {}
             UiAction::Account => {
                 if crate::identity::current_user().is_some() {
                     crate::identity::sign_out();

@@ -20,6 +20,11 @@
 //! room's host ([`Net::request_join`]); a host's incoming requests wait in
 //! [`Net::pending_request`] (the same card, ACCEPT / X).
 //!
+//! The challenge leaderboard rides the same connection: `crate::leaderboard`
+//! calls [`Net::challenge_start`], [`Net::submit_score`] and
+//! [`Net::request_board`] (queued until we're online), and reads the replies
+//! back ([`Net::standing`], [`Net::board`]).
+//!
 //! The lobby: a new room waits (in the menu, `menu`'s lobby panel) until its
 //! host starts it, baking the map meanwhile (`loading::Prebake`); joiners
 //! wait there too, and once it's started they go straight to the game.
@@ -190,6 +195,16 @@ pub struct Net {
     dev_since: Option<f64>,
     dev_start_since: Option<f64>,
     last_dev_hit: f64,
+
+    // ---- the challenge leaderboard ----
+    /// Leaderboard messages waiting for us to be online.
+    outbox: Vec<ClientMsg>,
+    /// Our best run and rank, as of our last submission.
+    standing: Option<Standing>,
+    /// The boards as last received: (rows, where we stand).
+    boards: HashMap<BoardKind, (Vec<BoardRow>, Option<Standing>)>,
+    /// Bumped whenever a board arrives.
+    board_version: u32,
 
     // ---- the room ----
     in_room: bool,
@@ -373,6 +388,52 @@ impl Net {
         }
     }
 
+    /// A challenge round began on this map (the server times the run).
+    pub fn challenge_start(&mut self, seed: u32) {
+        self.standing = None;
+        self.queue(ClientMsg::ChallengeStart { seed });
+    }
+
+    /// The challenge round ended.
+    pub fn submit_score(&mut self, run: Run) {
+        info!("leaderboard: submitting {run:?}");
+        self.queue(ClientMsg::SubmitScore(run));
+    }
+
+    pub fn request_board(&mut self, kind: BoardKind) {
+        let msg = ClientMsg::Leaderboard(kind);
+        if !self.outbox.contains(&msg) {
+            self.queue(msg);
+        }
+    }
+
+    /// Our best challenge run and its global rank (after this round's submission).
+    pub fn standing(&self) -> Option<Standing> {
+        self.standing
+    }
+
+    /// A board, once it's arrived: (rows, where we stand).
+    pub fn board(&self, kind: BoardKind) -> Option<&(Vec<BoardRow>, Option<Standing>)> {
+        self.boards.get(&kind)
+    }
+
+    pub fn board_version(&self) -> u32 {
+        self.board_version
+    }
+
+    pub fn online(&self) -> bool {
+        self.phase == Phase::Online
+    }
+
+    /// Sends now if we're online, else once we are (a few at most).
+    fn queue(&mut self, msg: ClientMsg) {
+        if self.phase == Phase::Online {
+            self.send(&msg);
+        } else if self.outbox.len() < 8 {
+            self.outbox.push(msg);
+        }
+    }
+
     /// Who shot us down (until we fly again).
     pub fn death(&self) -> Option<&Death> {
         self.death.as_ref()
@@ -536,6 +597,9 @@ impl Net {
                 info!("multiplayer: online as {handle}");
                 self.phase = Phase::Online;
                 self.backoff = 0.0;
+                for msg in std::mem::take(&mut self.outbox) {
+                    self.send(&msg);
+                }
                 if let Some(intent) = self.intent.take() {
                     self.send_intent(intent);
                 }
@@ -621,6 +685,15 @@ impl Net {
                 self.requested.remove(&did);
                 self.label = Some("DECLINED");
                 self.friends_version += 1;
+            }
+            ServerMsg::Standing(standing) => {
+                info!("leaderboard: standing {standing:?}");
+                self.standing = standing;
+            }
+            ServerMsg::LeaderboardData { kind, rows, you } => {
+                info!("leaderboard: {kind:?} board, {} rows", rows.len());
+                self.boards.insert(kind, (rows, you));
+                self.board_version += 1;
             }
             other if self.in_room => self.inbox.push(other),
             _ => {}
@@ -735,6 +808,11 @@ fn pump(
     if net.phase != Phase::Idle && net.did != user {
         net.disconnect(None, now);
         net.retry_at = now;
+        // (someone else's leaderboard)
+        net.standing = None;
+        net.boards.clear();
+        net.outbox.clear();
+        net.board_version += 1;
     }
     if net.phase == Phase::Idle && user.is_some() && !net.outdated && now >= net.retry_at {
         net.connect();

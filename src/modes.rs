@@ -60,9 +60,9 @@ impl GameMode {
     }
 }
 
-/// Points per kill, and per cleared wave (times the wave number).
-pub const KILL_POINTS: u32 = 100;
-pub const WAVE_POINTS: u32 = 250;
+/// Points per kill, and per cleared wave (times the wave number): the
+/// protocol's, so the server's leaderboard checks score runs the same way.
+pub use crate::net::protocol::{KILL_POINTS, WAVE_POINTS};
 
 /// The best challenge score.
 #[derive(Resource)]
@@ -166,6 +166,8 @@ fn spawn_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
                     button(row, &font, "RETRY", Screen::Score, 0, 0, UiAction::Retry);
                     button(row, &font, "MENU", Screen::Score, 1, 0, UiAction::Menu);
                 });
+                // (SIGN IN when signed out, see `leaderboard`)
+                button(panel, &font, "LEADERBOARD", Screen::Score, 2, 1, UiAction::Leaderboard);
             });
         });
 }
@@ -192,6 +194,7 @@ fn update_ui(
     score: Res<Score>,
     best: Res<Best>,
     intro: Res<crate::intro::Intro>,
+    net: Res<crate::net::Net>,
     mut banner_left: Local<f32>,
     mut last_wave: Local<u32>,
     mut screen: Query<&mut Node, (With<ScoreScreen>, Without<LiveScore>)>,
@@ -226,7 +229,11 @@ fn update_ui(
             let value = if is_score {
                 score.points.to_string()
             } else if is_best {
-                format!("BEST {}", best.value.max(score.points))
+                // signed in: the board's best and our global rank (once the server has the run)
+                match net.standing().filter(|_| crate::identity::current_user().is_some()) {
+                    Some(r) => format!("BEST {}  #{}", r.score, r.rank),
+                    None => format!("BEST {}", best.value.max(score.points)),
+                }
             } else {
                 continue;
             };
