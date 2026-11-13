@@ -1,6 +1,8 @@
 //! After the player is shot down (or crashes), a RESPAWN button appears
 //! after a few seconds. Click it, or press Enter / gamepad A, to fly again.
 //! (Endless only: a challenge shows its score screen instead, see `modes`.)
+//! In multiplayer it also names who got us, with our head-to-head record
+//! against them this room (ours – theirs).
 
 use bevy::{picking::hover::Hovered, prelude::*};
 
@@ -59,6 +61,13 @@ struct PromptTitle;
 #[derive(Component)]
 struct RespawnButton;
 
+/// Multiplayer: `@killer`, then the record.
+#[derive(Component)]
+enum KillerLine {
+    Name,
+    Record,
+}
+
 const GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
 const BUTTON: Color = Color::srgba(0.05, 0.18, 0.09, 0.9);
 const BUTTON_HOVER: Color = Color::srgba(0.1, 0.32, 0.16, 0.95);
@@ -93,6 +102,8 @@ fn spawn_prompt(mut commands: Commands, asset_server: Res<AssetServer>) {
         ))
         .with_children(|root| {
             root.spawn((Text::new("SHOT DOWN"), text(34.0, Color::srgb(1.0, 0.35, 0.3)), PromptTitle));
+            root.spawn((KillerLine::Name, Text::new(""), text(22.0, Color::srgb(1.0, 0.55, 0.5)), Node { display: Display::None, ..default() }));
+            root.spawn((KillerLine::Record, Text::new(""), text(26.0, GREEN), Node { display: Display::None, ..default() }));
             root.spawn((
                 RespawnButton,
                 Hovered::default(),
@@ -140,9 +151,26 @@ fn update_prompt(
     paused: Res<Paused>,
     mode: Res<crate::modes::GameMode>,
     mut root: Query<&mut Node, With<PromptRoot>>,
-    mut title: Query<&mut Text, With<PromptTitle>>,
+    mut title: Query<&mut Text, (With<PromptTitle>, Without<KillerLine>)>,
     mut button: Query<(&Hovered, &mut BackgroundColor), With<RespawnButton>>,
+    mut lines: Query<(&KillerLine, &mut Text, &mut Node), (Without<PromptRoot>, Without<PromptTitle>)>,
+    net: Res<crate::net::Net>,
 ) {
+    let death = net.death().filter(|_| *mode == crate::modes::GameMode::Multiplayer);
+    for (line, mut text, mut node) in &mut lines {
+        let s = match (line, death) {
+            (_, None) => String::new(),
+            (KillerLine::Name, Some(d)) => format!("@{}", d.killer),
+            (KillerLine::Record, Some(d)) => format!("{} \u{2013} {}", d.record.0, d.record.1),
+        };
+        let display = if s.is_empty() { Display::None } else { Display::Flex };
+        if node.display != display {
+            node.display = display;
+        }
+        if text.0 != s {
+            text.0 = s;
+        }
+    }
     let show = prompt.ready() && !paused.0 && *mode != crate::modes::GameMode::Challenge;
     if let Ok(mut node) = root.single_mut() {
         let display = if show { Display::Flex } else { Display::None };

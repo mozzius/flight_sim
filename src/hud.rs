@@ -999,22 +999,30 @@ struct HitMarker;
 
 const KILL_BANNER_TIME: f32 = 2.5;
 
-/// "SPLASH" when the player gets a kill: pops in big, settles, fades out.
+/// "SPLASH" when the player gets a kill ("SPLASH @bob" in multiplayer): pops in big, settles, fades out.
 fn kill_banner(
     time: Res<Time>,
     mut kills: MessageReader<crate::game::PlayerKill>,
     mut banner: Query<(&mut Node, &mut UiTransform), With<KillBanner>>,
-    mut texts: Query<(&KillBannerText, &mut Text, &mut TextColor)>,
+    mut texts: Query<(&KillBannerText, &mut Text, &mut TextColor, &mut TextFont)>,
     mut timer: Local<f32>,
 ) {
     if let Some(kill) = kills.read().last() {
         *timer = KILL_BANNER_TIME;
-        for (kind, mut text, _) in &mut texts {
-            text.0 = match (kind, kill.friendly) {
-                (KillBannerText::Title, false) => "SPLASH".into(),
-                (KillBannerText::Title, true) => "FRIENDLY FIRE".into(),
-                (KillBannerText::Detail, _) => format!("KILL {}", kill.total),
+        for (kind, mut text, _, mut font) in &mut texts {
+            text.0 = match (kind, kill.friendly, &kill.name) {
+                (KillBannerText::Title, false, Some(name)) => format!("SPLASH @{name}"),
+                (KillBannerText::Title, false, None) => "SPLASH".into(),
+                (KillBannerText::Title, true, _) => "FRIENDLY FIRE".into(),
+                (KillBannerText::Detail, ..) => format!("KILL {}", kill.total),
             };
+            if *kind == KillBannerText::Title {
+                // (long handles: smaller, so it stays on the screen)
+                let size = if text.0.chars().count() > 16 { 30.0 } else { 44.0 };
+                if font.font_size != FontSize::Px(size) {
+                    font.font_size = FontSize::Px(size);
+                }
+            }
         }
     }
     *timer = (*timer - time.delta_secs()).max(0.0);
@@ -1030,7 +1038,7 @@ fn kill_banner(
     // quick pop: 1.4x shrinking to 1x over 0.15 s
     transform.scale = Vec2::splat(1.0 + 0.4 * (1.0 - (age / 0.15).min(1.0)));
     let alpha = (*timer / 0.6).min(1.0);
-    for (kind, _, mut color) in &mut texts {
+    for (kind, _, mut color, _) in &mut texts {
         let base = if *kind == KillBannerText::Title { HUD_GREEN } else { HUD_GREEN.with_alpha(0.85) };
         color.0 = base.with_alpha(base.alpha() * alpha);
     }

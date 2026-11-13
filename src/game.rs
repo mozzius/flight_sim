@@ -77,10 +77,12 @@ pub struct Explosion {
 }
 
 /// The player got a kill (drives the HUD banner and the kill chime).
-#[derive(Message, Clone, Copy)]
+#[derive(Message, Clone)]
 pub struct PlayerKill {
     pub total: u32,
     pub friendly: bool,
+    /// Another player's handle (multiplayer).
+    pub name: Option<String>,
 }
 
 /// An aircraft was shot down (it still falls until it hits the ground).
@@ -324,13 +326,13 @@ fn handle_crashes(
     mut score: ResMut<Score>,
     mut queue: ResMut<RespawnQueue>,
     mode: Res<GameMode>,
-    aircraft: Query<(&Team, Has<Player>, Has<Disabled>, &Health)>,
+    aircraft: Query<(&Team, Has<Player>, Has<Disabled>, &Health, Option<&crate::net::RemoteName>)>,
     players: Query<(), With<Player>>,
     mut kills: MessageWriter<PlayerKill>,
 ) {
     // kills and deaths are counted when a plane is shot down
     for d in destroyed_reader.read() {
-        let Ok((team, is_player, _, _)) = aircraft.get(d.entity) else {
+        let Ok((team, is_player, _, _, name)) = aircraft.get(d.entity) else {
             continue;
         };
         if is_player {
@@ -348,6 +350,7 @@ fn handle_crashes(
             kills.write(PlayerKill {
                 total: score.kills,
                 friendly: *team != Team::Red,
+                name: name.map(|n| n.0.clone()),
             });
         }
     }
@@ -358,7 +361,7 @@ fn handle_crashes(
             continue;
         }
         seen.push(crash.entity);
-        let Ok((team, is_player, disabled, health)) = aircraft.get(crash.entity) else {
+        let Ok((team, is_player, disabled, health, name)) = aircraft.get(crash.entity) else {
             continue;
         };
         explosions.write(Explosion {
@@ -378,6 +381,7 @@ fn handle_crashes(
             kills.write(PlayerKill {
                 total: score.kills,
                 friendly: *team != Team::Red,
+                name: name.map(|n| n.0.clone()),
             });
         }
         commands.entity(crash.entity).despawn();
