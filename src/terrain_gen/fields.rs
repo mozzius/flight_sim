@@ -100,6 +100,44 @@ fn rand(i: i32, j: i32, salt: u32) -> Vec2 {
     hash2(i, j, terrain_seed() ^ salt) * 0.5 + 0.5
 }
 
+/// A farm: its (jittered) centre, the direction its field rows run, row width
+/// and field length (m), and whether it's woodland instead.
+struct Farm {
+    centre: Vec2,
+    dir: Vec2,
+    su: f32,
+    sv: f32,
+    wood: bool,
+}
+
+#[inline]
+fn farm_centre(i: i32, j: i32) -> Vec2 {
+    (Vec2::new(i as f32, j as f32) + 0.5 + (rand(i, j, 0xFA12) - 0.5) * 0.8) * FARM
+}
+
+fn farm(i: i32, j: i32, map: &FieldMap) -> Farm {
+    let centre = farm_centre(i, j);
+    let h = rand(i, j, 0xFA13);
+    let h2 = rand(i, j, 0xFA14);
+    // line up with the road, else a direction that wanders slowly across the map
+    let base = map.road_dir(centre).unwrap_or_else(|| {
+        let a = noised(centre / 9000.0, terrain_seed() ^ 0xFA15).x * std::f32::consts::PI;
+        Vec2::from_angle(a)
+    });
+    // half the farms run their rows across the road instead of along it
+    let base = if h2.y < 0.4 { base.perp() } else { base };
+    Farm {
+        centre,
+        dir: base.rotate(Vec2::from_angle((h.x - 0.5) * 0.15)),
+        // rows `su` wide, fields `sv` long
+        su: 80.0 + 130.0 * h.y,
+        sv: 170.0 + 260.0 * h2.x,
+        wood: rand(i, j, 0xFA18).x < 0.07,
+    }
+}
+
+/// The field at a point. (`assets/shaders/terrain.wesl` has a copy, `field_colour`,
+/// that draws the fields per pixel from [`farm_texture`]: keep the two in step.)
 pub(super) fn field_at(p: Vec2, map: &FieldMap) -> Field {
     // nearest and second-nearest farm centres
     let g = (p / FARM).floor();
@@ -109,7 +147,7 @@ pub(super) fn field_at(p: Vec2, map: &FieldMap) -> Field {
     for dj in -1..=1 {
         for di in -1..=1 {
             let (i, j) = (gi + di, gj + dj);
-            let c = (Vec2::new(i as f32, j as f32) + 0.5 + (rand(i, j, 0xFA12) - 0.5) * 0.8) * FARM;
+            let c = farm_centre(i, j);
             let d = c.distance_squared(p);
             if d < best.0 {
                 second = (best.0, best.1);
@@ -124,22 +162,12 @@ pub(super) fn field_at(p: Vec2, map: &FieldMap) -> Field {
     // distance to the bisector between the two nearest centres
     let farm_edge = (d2 - d1) / (2.0 * c1.distance(c2).max(1.0));
 
-    let h = rand(fi, fj, 0xFA13);
-    let h2 = rand(fi, fj, 0xFA14);
-    // line up with the road, else a direction that wanders slowly across the map
-    let base = map.road_dir(c1).unwrap_or_else(|| {
-        let a = noised(c1 / 9000.0, terrain_seed() ^ 0xFA15).x * std::f32::consts::PI;
-        Vec2::from_angle(a)
-    });
-    // half the farms run their rows across the road instead of along it
-    let base = if h2.y < 0.4 { base.perp() } else { base };
-    let dir = base.rotate(Vec2::from_angle((h.x - 0.5) * 0.15));
+    let f = farm(fi, fj, map);
     let d = p - c1;
-    let (u, v) = (d.dot(dir.perp()), d.dot(dir));
+    let (u, v) = (d.dot(f.dir.perp()), d.dot(f.dir));
 
-    // rows `su` wide, fields `sv` long, each row staggered
-    let su = 80.0 + 130.0 * h.y;
-    let sv = 170.0 + 260.0 * h2.x;
+    // each row staggered, like brickwork
+    let (su, sv) = (f.su, f.sv);
     let row = (u / su).floor();
     let stagger = rand(fi * 64 + row as i32, fj, 0xFA16).x * sv;
     let col = ((v + stagger) / sv).floor();
@@ -153,9 +181,67 @@ pub(super) fn field_at(p: Vec2, map: &FieldMap) -> Field {
         edge,
         across: u,
         shade: r.y,
-        wood: rand(fi, fj, 0xFA18).x < 0.07,
+        wood: f.wood,
     }
 }
+
+/// The farms out to `half_extent` (plus a cell of margin for the neighbour search) for the
+/// terrain shader, which draws the fields per pixel: two RGBA32F texels per farm cell,
+/// (centre x, centre z, dir x, dir z) and (row width, field length, woodland, 0).
+/// Returns the image and its first cell index (the same on both axes) and cell count.
+pub(super) fn farm_texture(map: &FieldMap, half_extent: f32) -> (Image, i32, u32) {
+    let first = ((-half_extent - FARM) / FARM).floor() as i32;
+    let n = (((half_extent + FARM) / FARM).ceil() as i32 - first) as u32;
+    let mut data = Vec::with_capacity((n * n * 2 * 16) as usize);
+    for j in 0..n as i32 {
+        for i in 0..n as i32 {
+            let f = farm(first + i, first + j, map);
+            for v in [f.centre.x, f.centre.y, f.dir.x, f.dir.y, f.su, f.sv, f.wood as u32 as f32, 0.0] {
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    (farm_image(data, 2 * n, n), first, n)
+}
+
+/// A stand-in for the biomes without fields.
+pub(super) fn no_farms() -> Image {
+    farm_image(vec![0; 2 * 16], 2, 1)
+}
+
+fn farm_image(data: Vec<u8>, w: u32, h: u32) -> Image {
+    use bevy::{
+        asset::RenderAssetUsages,
+        render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    };
+    Image::new(
+        Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba32Float,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+/// The crop table for the terrain shader: (linear colour, cumulative pick weight) and
+/// (stripe contrast, stripe period, 0, 0) per crop.
+pub(super) fn shader_crops() -> ([Vec4; CROP_COUNT], [Vec4; CROP_COUNT]) {
+    let total: f32 = CROPS.iter().map(|c| c.weight).sum();
+    let (mut colour, mut stripes) = ([Vec4::ZERO; CROP_COUNT], [Vec4::ZERO; CROP_COUNT]);
+    let mut acc = 0.0;
+    for (k, c) in CROPS.iter().enumerate() {
+        // accumulated exactly as `pick_crop` does (which falls back to crop 0 past the end)
+        acc += c.weight / total;
+        colour[k] = c.color.extend(acc);
+        stripes[k] = Vec4::new(c.stripes, c.period, 0.0, 0.0);
+    }
+    (colour, stripes)
+}
+
+/// Farm lattice spacing (m), for the shader.
+pub(super) const FARM_SPACING: f32 = FARM;
+/// Hedge half-width (m), for the shader.
+pub(super) const HEDGE_HALF_WIDTH: f32 = HEDGE;
 
 struct Crop {
     color: Vec3,
@@ -165,6 +251,9 @@ struct Crop {
     /// Stripe period (m).
     period: f32,
 }
+
+/// The number of crops (the shader's table is this long).
+pub(super) const CROP_COUNT: usize = 10;
 
 static CROPS: LazyLock<Vec<Crop>> = LazyLock::new(|| {
     let crop = |r, g, b, weight, stripes, period| Crop { color: srgb(r, g, b), weight, stripes, period };
@@ -214,4 +303,14 @@ pub(super) fn field_color(f: &Field, step: f32) -> (Vec3, f32) {
     let w = step.max(1.0);
     let hedge = ((HEDGE + w * 0.5 - f.edge) / w).clamp(0.0, 1.0) * (2.0 * HEDGE / w).min(1.0);
     (c, hedge)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crop_table_fits_the_shader() {
+        assert_eq!(CROPS.len(), CROP_COUNT);
+    }
 }

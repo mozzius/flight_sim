@@ -90,6 +90,9 @@ pub type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainDetail>;
 pub struct TerrainDetail {
     #[uniform(100)]
     pub params: TerrainParams,
+    /// The farms, for drawing the fields per pixel (`fields::farm_texture`).
+    #[texture(101, sample_type = "float", filterable = false)]
+    pub farms: Handle<Image>,
 }
 
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
@@ -104,6 +107,17 @@ pub struct TerrainParams {
     pub biome: Vec4,
     /// xy: slope range the snow fades out over, z: snow follows the baked colour (see `biome`)
     pub snow: Vec4,
+    /// Fields (farmland): x: first farm cell index, y: farm cells across (0 = no fields),
+    /// z: farm lattice spacing (m), w: where the fields fade out (m from the centre)
+    pub farm: Vec4,
+    /// rgb: hedge colour (linear), a: hedge half-width (m)
+    pub hedge: Vec4,
+    /// x: the terrain seed (for the field hashes)
+    pub seed: UVec4,
+    /// Crop table: rgb colour (linear), a: cumulative pick weight
+    pub crops: [Vec4; fields::CROP_COUNT],
+    /// Crop table: x: stripe contrast, y: stripe period (m)
+    pub crop_stripes: [Vec4; fields::CROP_COUNT],
 }
 
 impl MaterialExtension for TerrainDetail {
@@ -214,7 +228,14 @@ const CHUNK_CELLS: usize = 100;
 /// Colour / normal map resolution for each grid (the erosion detail lives in these).
 // The texture bake is most of the startup time. The web build is single-threaded,
 // so it bakes at half resolution (a quarter of the work).
-pub const TEXTURE_DIV: usize = if cfg!(target_arch = "wasm32") { 2 } else { 1 };
+// Natively `FLIGHT_SIM_TEXTURE_DIV=2` bakes at the web's resolution, for testing.
+pub fn texture_div() -> usize {
+    if cfg!(target_arch = "wasm32") {
+        2
+    } else {
+        std::env::var("FLIGHT_SIM_TEXTURE_DIV").ok().and_then(|s| s.parse().ok()).unwrap_or(1)
+    }
+}
 const NEAR_TEXTURE_RES: usize = 4096; // 6 m per texel
 const FINE_TEXTURE_RES: usize = 2048; // 25 m per texel
 const COARSE_TEXTURE_RES: usize = 1024; // 150 m per texel
@@ -774,7 +795,9 @@ fn srgb(r: f32, g: f32, b: f32) -> Vec3 {
 
 /// Surface colour (linear RGB) from height, normal and the erosion ridge map, in the
 /// current biome. `field` is the field here (farmland), `step` the texel size.
-fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&fields::Field>, step: f32) -> Vec3 {
+/// Also returns how much of the colour is the field (the shader redraws the fields per
+/// pixel there).
+fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&fields::Field>, step: f32) -> (Vec3, f32) {
     let b = biome::params();
     let cover = biome::cover(b, h, normal, ridge, jitter, field);
     let crease = (-ridge.clamp(-1.0, 1.0)).max(0.0);
@@ -787,6 +810,8 @@ fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&f
         let (field_col, hedge) = fields::field_color(f, step);
         c = c.lerp(field_col.lerp(b.forest, hedge), cover.field);
     }
+    // what's left of the field under the layers below
+    let mut field_weight = cover.field * (1.0 - cover.alpine) * (1.0 - cover.rock) * (1.0 - cover.snow);
     c = c.lerp(b.alpine, cover.alpine);
     // rock darker in eroded creases
     let rock_col = b.rock.lerp(b.dark_rock, crease * 0.8 + jitter.max(0.0) * 0.2);
@@ -797,13 +822,16 @@ fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&f
             // pale, sandy dune grass between the beach and the woods
             let dune = smoothstep(w.beach - 2.0, w.beach + 1.0, above) * smoothstep(w.beach + 14.0, w.beach + 4.0, above);
             let dune_col = w.sand.lerp(b.dry_meadow, 0.55 + 0.25 * jitter.clamp(-1.0, 1.0));
-            c = c.lerp(dune_col, dune * (1.0 - cover.forest) * smoothstep(0.85, 0.95, normal.y));
+            let dune = dune * (1.0 - cover.forest) * smoothstep(0.85, 0.95, normal.y);
+            c = c.lerp(dune_col, dune);
+            field_weight *= 1.0 - dune;
         }
         // wet and darker at the waterline and below it (a wider wet band on the sea's beaches)
         let wet = if w.sea { smoothstep(1.6, -0.3, above) } else { smoothstep(0.8, -1.5, above) };
         c = c.lerp(w.sand * (1.0 - 0.4 * wet), cover.sand);
+        field_weight *= 1.0 - cover.sand;
     }
-    c.lerp(b.snow, cover.snow)
+    (c.lerp(b.snow, cover.snow), field_weight)
 }
 
 /// Builds a full mip chain by 2x2 box filtering. `renormalize` is for normal maps.
@@ -894,7 +922,7 @@ fn texture_texel(
     let xz = origin + (Vec2::new(i as f32, j as f32) + 0.5) * step;
     let jitter = noised(xz / 900.0, 77).x + 0.5 * noised(xz / 310.0, 78).x;
     let field = biome::may_have_fields(biome::params(), samples[k].0, normal.y).then(|| fields::field_at(xz, fields));
-    let mut color = terrain_color(samples[k].0, normal, samples[k].1, jitter, field.as_ref(), step);
+    let (mut color, field_weight) = terrain_color(samples[k].0, normal, samples[k].1, jitter, field.as_ref(), step);
 
     // Cheap baked cavity / ambient occlusion: compare the height with its surroundings at a
     // few radii. Gully floors (concave) get darker, ridge crests (convex) a little lighter,
@@ -910,24 +938,25 @@ fn texture_texel(
         cavity += (mean - samples[k].0) / (r as f32 * step) / 3.0;
     }
     color *= 1.0 - smoothstep(0.0, 0.25, cavity) * 0.55 + smoothstep(0.0, 0.25, -cavity) * 0.2;
-    (color.extend(1.0), Vec4::new(normal.x, normal.z, normal.y, 1.0))
+    (color.extend(field_weight), Vec4::new(normal.x, normal.z, normal.y, 1.0))
 }
 
 fn quantize_texels(texels: Vec<(Vec4, Vec4)>, res: usize) -> TextureBake {
     let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-    let mut color = Vec::with_capacity(res * res * 3);
+    let mut color = Vec::with_capacity(res * res * 4);
     let mut normal = Vec::with_capacity(res * res * 2);
     for (c, n) in texels {
         let srgb = Srgba::from(LinearRgba::rgb(c.x, c.y, c.z));
-        color.extend([to_u8(srgb.red), to_u8(srgb.green), to_u8(srgb.blue)]);
+        color.extend([to_u8(srgb.red), to_u8(srgb.green), to_u8(srgb.blue), to_u8(c.w)]);
         normal.extend([to_u8(n.x * 0.5 + 0.5), to_u8(n.y * 0.5 + 0.5)]);
     }
     TextureBake { res, color, normal }
 }
 
-/// A baked terrain texture: sRGB colour (3 bytes per texel) and the normal's
-/// x and z (2 bytes; y is rebuilt). Compact, as the web build's memory never
-/// shrinks once it has grown.
+/// A baked terrain texture: sRGB colour plus the field weight in alpha (4 bytes
+/// per texel; the shader draws the fields per pixel where it's set) and the
+/// normal's x and z (2 bytes; y is rebuilt). Compact, as the web build's memory
+/// never shrinks once it has grown.
 pub struct TextureBake {
     res: usize,
     color: Vec<u8>,
@@ -946,8 +975,8 @@ impl TextureBake {
         let srgb_to_linear: Vec<f32> =
             (0..=255u8).map(|b| LinearRgba::from(Srgba::rgb_u8(b, 0, 0)).red).collect();
         let color_at = |k: usize| {
-            let c = &self.color[k * 3..k * 3 + 3];
-            Vec4::new(srgb_to_linear[c[0] as usize], srgb_to_linear[c[1] as usize], srgb_to_linear[c[2] as usize], 1.0)
+            let c = &self.color[k * 4..k * 4 + 4];
+            Vec4::new(srgb_to_linear[c[0] as usize], srgb_to_linear[c[1] as usize], srgb_to_linear[c[2] as usize], c[3] as f32 / 255.0)
         };
         let normal_at = |k: usize| {
             let x = self.normal[k * 2] as f32 / 255.0 * 2.0 - 1.0;
@@ -968,14 +997,12 @@ impl TextureBake {
 
         let mut color_data = Vec::with_capacity(res * res * 4 * 4 / 3 + 16);
         if !half_res {
-            for c in self.color.chunks_exact(3) {
-                color_data.extend_from_slice(&[c[0], c[1], c[2], 255]);
-            }
+            color_data.extend_from_slice(&self.color);
         }
         for level in mip_chain(level1(&color_at, false), half, false) {
             for v in level {
                 let s = Srgba::from(LinearRgba::rgb(v.x, v.y, v.z));
-                color_data.extend_from_slice(&[to_u8(s.red), to_u8(s.green), to_u8(s.blue), 255]);
+                color_data.extend_from_slice(&[to_u8(s.red), to_u8(s.green), to_u8(s.blue), to_u8(v.w)]);
             }
         }
         let mut normal_data = Vec::with_capacity(res * res * 4 * 4 / 3 + 16);
@@ -1340,6 +1367,14 @@ pub fn spawn_map(
     // middle instead; collision still uses the near heights) and take the
     // textures at half resolution.
     let low = crate::platform::low_memory();
+    // the farms, for the fields the shader draws per pixel (out to the edge of the fine grid)
+    let (farms, farm) = if b.field_line.is_some() {
+        let (image, first, n) = fields::farm_texture(&fields, fine_half);
+        (images.add(image), Vec4::new(first as f32, n as f32, fields::FARM_SPACING, fine_half - 1500.0))
+    } else {
+        (images.add(fields::no_farms()), Vec4::ZERO)
+    };
+    let (crops, crop_stripes) = fields::shader_crops();
     // (grid, cells, half-extent of the finer grid covering its middle)
     for ((grid, cells, hole), texture) in [
         (&near, NEAR_CELLS, 0.0),
@@ -1370,7 +1405,13 @@ pub fn spawn_map(
                     sun: look.sun_dir.extend(0.0),
                     biome: b.shader_rock.extend(b.veg_patches),
                     snow: b.shader_snow.extend(0.0),
+                    farm,
+                    hedge: b.forest.extend(fields::HEDGE_HALF_WIDTH),
+                    seed: UVec4::new(terrain_seed(), 0, 0, 0),
+                    crops,
+                    crop_stripes,
                 },
+                farms: farms.clone(),
             },
         });
 

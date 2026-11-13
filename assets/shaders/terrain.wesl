@@ -6,7 +6,10 @@
 //    fading octaves out once they're smaller than a pixel (no shimmer);
 //  - re-decides rock / vegetation / snow from the *detailed* slope and height,
 //    with noisy boundaries, so zones are crisp instead of 25 m blobs;
-//  - adds colour variation (grass patches, rock strata, snow drifts).
+//  - adds colour variation (grass patches, rock strata, snow drifts);
+//  - draws the farmland fields (crops, tramlines, hedges) from the farm layout,
+//    where the bake's alpha says there are fields, so they're crisp however
+//    coarse the texture is (phones never get the 6 m near texture).
 
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -36,10 +39,24 @@ struct TerrainDetail {
     biome: vec4<f32>,
     // xy: slope range the snow fades out over, z: 1 = snow only where the baked colour is snowy
     snow: vec4<f32>,
+    // fields: x: first farm cell, y: farm cells across (0 = none), z: farm spacing (m),
+    // w: where the fields start fading out (m from the centre)
+    farm: vec4<f32>,
+    // rgb: hedge colour, a: hedge half-width (m)
+    hedge: vec4<f32>,
+    // x: terrain seed
+    seed: vec4<u32>,
+    // crop table (src/terrain_gen/fields.rs): rgb colour, a: cumulative pick weight
+    crops: array<vec4<f32>, 10>,
+    // x: stripe contrast, y: stripe period (m)
+    crop_stripes: array<vec4<f32>, 10>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
 var<uniform> terrain: TerrainDetail;
+// two texels per farm cell: (centre, row direction), (row width, field length, woodland)
+@group(constants::MATERIAL_BIND_GROUP) @binding(101)
+var farms: texture_2d<f32>;
 
 fn hash2(p: vec2<f32>) -> f32 {
     var q = fract(p * vec2<f32>(0.1031, 0.1030));
@@ -114,6 +131,109 @@ fn smoothstep1(a: f32, b: f32, x: f32) -> f32 {
     return t * t * (3.0 - 2.0 * t);
 }
 
+// ---- farmland fields: a port of `field_at` / `field_color` in src/terrain_gen/fields.rs ----
+
+// The fields give way to the baked texture over this pixel footprint range (m).
+const FIELD_FADE: vec2<f32> = vec2<f32>(24.0, 64.0);
+
+// `rand` in fields.rs: pcg2d of a lattice point, to 0..1 (bit-exact with the CPU's).
+fn field_rand(i: i32, j: i32, salt: u32) -> vec2<f32> {
+    var vx = (bitcast<u32>(i) * 1664525u + 1013904223u) ^ (terrain.seed.x ^ salt);
+    var vy = bitcast<u32>(j) * 1664525u + 1013904223u;
+    vx += vy * 1664525u;
+    vy += vx * 1664525u;
+    vx ^= vx >> 16u;
+    vy ^= vy >> 16u;
+    vx += vy * 1664525u;
+    vy += vx * 1664525u;
+    vx ^= vx >> 16u;
+    vy ^= vy >> 16u;
+    return vec2<f32>(f32(vx >> 8u), f32(vy >> 8u)) / 16777216.0;
+}
+
+fn farm_texel(i: i32, j: i32, k: i32) -> vec4<f32> {
+    let first = i32(terrain.farm.x);
+    let n = i32(terrain.farm.y);
+    let c = clamp(vec2<i32>(i, j) - first, vec2<i32>(0), vec2<i32>(n - 1));
+    return textureLoad(farms, vec2<i32>(c.x * 2 + k, c.y), 0);
+}
+
+// The field colour at `p` (linear), over a pixel `footprint` metres wide;
+// a: how much of it to show (none in woodland farms, whose woods only cover the flat
+// parts: the baked colour shows them; fading out far away and at the edge of the farm texture).
+fn field_colour(p: vec2<f32>, footprint: f32) -> vec4<f32> {
+    // nearest and second-nearest farm centres
+    let g = vec2<i32>(floor(p / terrain.farm.z));
+    var d1 = 1e30;
+    var d2 = 1e30;
+    var c1 = vec2<f32>(0.0);
+    var c2 = vec2<f32>(0.0);
+    var cell = g;
+    for (var dj = -1; dj <= 1; dj++) {
+        for (var di = -1; di <= 1; di++) {
+            let ij = g + vec2<i32>(di, dj);
+            let c = farm_texel(ij.x, ij.y, 0).xy;
+            let d = dot(c - p, c - p);
+            if (d < d1) {
+                d2 = d1;
+                c2 = c1;
+                d1 = d;
+                c1 = c;
+                cell = ij;
+            } else if (d < d2) {
+                d2 = d;
+                c2 = c;
+            }
+        }
+    }
+    let farm_edge = (d2 - d1) / (2.0 * max(distance(c1, c2), 1.0));
+    let dir = farm_texel(cell.x, cell.y, 0).zw;
+    let shape = farm_texel(cell.x, cell.y, 1);
+    let d = p - c1;
+    let u = dot(d, vec2<f32>(-dir.y, dir.x));
+    let v = dot(d, dir);
+
+    // rows `su` wide, fields `sv` long, each row staggered
+    let su = shape.x;
+    let sv = shape.y;
+    let row = floor(u / su);
+    let stagger = field_rand(cell.x * 64 + i32(row), cell.y, 0xFA16u).x * sv;
+    let col = floor((v + stagger) / sv);
+    let fu = u / su - row;
+    let fv = (v + stagger) / sv - col;
+    let edge = min(min(min(fu, 1.0 - fu) * su, min(fv, 1.0 - fv) * sv), farm_edge);
+
+    let r = field_rand(cell.x * 64 + i32(row), cell.y * 64 + i32(col), 0xFA17u);
+    var crop = 0;
+    for (var k = 0; k < 10; k++) {
+        if (r.x < terrain.crops[k].a) {
+            crop = k;
+            break;
+        }
+    }
+    var c = terrain.crops[crop].rgb * (0.92 + 0.16 * r.y);
+    // tramlines / furrows, faded out once they're under a few pixels apart
+    let stripes = terrain.crop_stripes[crop];
+    let fp = max(footprint, 0.05);
+    let visible = smoothstep1(2.5 * fp, 4.0 * fp, stripes.y);
+    let s = cos(u / stripes.y * 6.2831853);
+    c *= 1.0 - stripes.x * visible * (0.5 + 0.5 * s);
+    // a hedge along every edge (its coverage of the pixel), ragged and patchy up close
+    let w = max(fp, 2.5);
+    let wobble = noised(p / 17.0).x * 0.6 + noised(p / 6.0).x * 0.4;
+    let ragged = 1.0 - smoothstep1(4.0, 12.0, fp);
+    let hw = terrain.hedge.a * (1.0 + 0.45 * wobble * ragged);
+    let hedge = clamp((hw + w * 0.5 - edge) / w, 0.0, 1.0) * min(2.0 * hw / w, 1.0);
+    let hedge_col = terrain.hedge.rgb * (1.0 + (0.35 * wobble + 0.1) * ragged);
+    c = mix(c, hedge_col, hedge);
+
+    let reach = max(abs(p.x), abs(p.y));
+    let show = (1.0 - shape.z)
+        * (1.0 - smoothstep1(FIELD_FADE.x, FIELD_FADE.y, footprint))
+        * (1.0 - smoothstep1(terrain.farm.w, terrain.farm.w + 1000.0, reach));
+    return vec4<f32>(c, show);
+}
+
 @fragment
 fn fragment(
     in: VertexOutput,
@@ -141,7 +261,14 @@ fn fragment(
     var snow = smoothstep1(snow_line - 60.0, snow_line + 120.0, pos.y)
         * (1.0 - smoothstep1(terrain.snow.x, terrain.snow.y, slope));
 
-    let macro_col = pbr_input.material.base_color.rgb;
+    // the baked colour, with the fields redrawn per pixel where the bake's alpha says
+    // there are fields (zero outside farmland)
+    var macro_col = pbr_input.material.base_color.rgb;
+    let field_weight = smoothstep1(0.2, 0.7, pbr_input.material.base_color.a);
+    if (terrain.farm.y > 0.0 && field_weight > 0.0 && footprint < FIELD_FADE.y) {
+        let f = field_colour(pos.xz, footprint);
+        macro_col = mix(macro_col, f.rgb, field_weight * f.a);
+    }
     // (tundra) keep the baked forest, tundra grass and rock showing through
     let macro_snowy = smoothstep1(0.3, 0.7, dot(macro_col, vec3<f32>(0.3, 0.5, 0.2)));
     snow *= mix(1.0, macro_snowy, terrain.snow.z);
