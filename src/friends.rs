@@ -1,12 +1,17 @@
 //! Online Bluesky mutuals and invites (see `net` for presence).
 //!
-//! - [`FriendsList`]: a column of rows (status dot, `@handle`, INVITE) in the
-//!   MULTIPLAYER menu and the multiplayer pause menu, rebuilt whenever the
-//!   list changes; a dash when nobody's online.
-//! - The invite card: bottom centre, wherever we are (menus, single player,
-//!   multiplayer), `@handle` with JOIN and X, gone after `net::INVITE_SECS`.
-//!   Click / tap; in menus its buttons are the last row of the focus order
-//!   (down, then A / Enter); in flight J or D-pad down joins.
+//! - [`FriendsList`]: a column of rows (status dot, `@handle`, a button) in
+//!   the MULTIPLAYER menu, the lobby and the multiplayer pause menu, rebuilt
+//!   whenever the list changes; a dash when nobody's online. The button is
+//!   INVITE (to our room, made on the fly if need be), or JOIN for a friend
+//!   who's in another room (a request to its host); none for a full room or
+//!   our own.
+//! - The card: bottom centre, wherever we are (menus, single player,
+//!   multiplayer), `@handle` with JOIN and X for an invite, or ACCEPT and X
+//!   for someone asking to join the room we host (that comes first); gone
+//!   after `net::INVITE_SECS` / `JOIN_REQUEST_SECS`. Click / tap; in menus
+//!   its buttons are the last row of the focus order (down, then A / Enter);
+//!   in flight J or D-pad down accepts.
 //!
 //! Avatars aren't drawn: cdn.bsky.app sends no CORS header, so the web
 //! build couldn't load them.
@@ -46,15 +51,19 @@ pub struct FriendsList {
 #[derive(Component)]
 pub struct FriendsSection(pub Screen);
 
-/// An INVITE button's label (INVITE / SENT) for this friend.
+/// A row button's label (INVITE / JOIN / SENT) for this friend (true: JOIN).
 #[derive(Component)]
-struct InviteLabel(String);
+struct InviteLabel(String, bool);
 
 #[derive(Component)]
 struct Card;
 
 #[derive(Component)]
 struct CardHandle;
+
+/// The card's JOIN / ACCEPT label.
+#[derive(Component)]
+struct CardAccept;
 
 /// Spawns an (empty) friends list; `sync_lists` fills it.
 pub fn spawn_list(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, screen: Screen, order: u8, row: u8) {
@@ -146,21 +155,36 @@ fn sync_lists(
                         BackgroundColor(dot_color(f.status)),
                     ));
                     r.spawn((Text::new(format!("@{}", f.handle)), font_of(font, 15.0, GREEN), Node { min_width: px(220), ..default() }));
-                    let label = if net.invite_sent(&f.did, now) { "SENT" } else { "INVITE" };
-                    let b = UiButton { screen, order: order + i as u8, row: row + i as u8, action: UiAction::Invite(i as u8) };
-                    let text = small_button(r, font, label, b);
-                    r.commands().entity(text).insert(InviteLabel(f.did.clone()));
+                    let join = f.status == FriendStatus::InRoom;
+                    if f.status == FriendStatus::RoomFull || net.in_my_room(&f.did) {
+                        // (nothing to do: keep the column lined up)
+                        r.spawn(Node { min_width: px(96), ..default() });
+                        return;
+                    }
+                    let action = if join { UiAction::RequestJoin(i as u8) } else { UiAction::Invite(i as u8) };
+                    let b = UiButton { screen, order: order + i as u8, row: row + i as u8, action };
+                    let text = small_button(r, font, label(&net, &f.did, join, now), b);
+                    r.commands().entity(text).insert(InviteLabel(f.did.clone(), join));
                 });
             }
         });
     }
 }
 
-/// SENT goes back to INVITE once the server would take another.
+fn label(net: &Net, did: &str, join: bool, now: f64) -> &'static str {
+    match join {
+        true if net.request_sent(did, now) => "SENT",
+        true => "JOIN",
+        false if net.invite_sent(did, now) => "SENT",
+        false => "INVITE",
+    }
+}
+
+/// SENT goes back to INVITE / JOIN once the server would take another (or said no).
 fn sync_labels(net: Res<Net>, time: Res<Time<Real>>, mut labels: Query<(&InviteLabel, &mut Text)>) {
     let now = time.elapsed_secs_f64();
     for (l, mut text) in &mut labels {
-        let s = if net.invite_sent(&l.0, now) { "SENT" } else { "INVITE" };
+        let s = label(&net, &l.0, l.1, now);
         if text.0 != s {
             text.0 = s.into();
         }
@@ -201,7 +225,8 @@ fn spawn_card(mut commands: Commands, asset_server: Res<AssetServer>) {
             .with_children(|card| {
                 card.spawn((CardHandle, Text::new(""), font_of(&font, 17.0, GREEN), Node { margin: UiRect::right(px(6)), ..default() }));
                 let b = |order, action| UiButton { screen: Screen::Modes, order, row: ROW_CARD, action };
-                small_button(card, &font, "JOIN", b(ORDER_CARD, UiAction::AcceptInvite));
+                let accept = small_button(card, &font, "JOIN", b(ORDER_CARD, UiAction::AcceptInvite));
+                card.commands().entity(accept).insert(CardAccept);
                 small_button(card, &font, "X", b(ORDER_CARD + 1, UiAction::DismissInvite));
             });
         });
@@ -216,12 +241,23 @@ fn sync_card(
     mode: Res<crate::modes::GameMode>,
     prompt: Res<crate::respawn::RespawnPrompt>,
     mut card: Query<&mut Node, With<Card>>,
-    mut handle: Query<&mut Text, With<CardHandle>>,
+    mut handle: Query<&mut Text, (With<CardHandle>, Without<CardAccept>)>,
+    mut accept: Query<&mut Text, (With<CardAccept>, Without<CardHandle>)>,
     mut buttons: Query<&mut UiButton>,
 ) {
-    let invite = net.pending_invite();
+    // a request to join our room first, else an invite
+    let shown = match (net.pending_request(), net.pending_invite()) {
+        (Some(r), _) => Some((&r.from.handle, "ACCEPT")),
+        (None, Some(i)) => Some((&i.from.handle, "JOIN")),
+        (None, None) => None,
+    };
+    if let (Ok(mut t), Some((_, l))) = (accept.single_mut(), shown)
+        && t.0 != l
+    {
+        t.0 = l.into();
+    }
     if let Ok(mut node) = card.single_mut() {
-        let d = if invite.is_some() { Display::Flex } else { Display::None };
+        let d = if shown.is_some() { Display::Flex } else { Display::None };
         if node.display != d {
             node.display = d;
         }
@@ -230,8 +266,8 @@ fn sync_card(
             node.bottom = bottom;
         }
     }
-    if let (Ok(mut text), Some(i)) = (handle.single_mut(), invite) {
-        let s = format!("@{}", i.from.handle);
+    if let (Ok(mut text), Some((h, _))) = (handle.single_mut(), shown) {
+        let s = format!("@{h}");
         if text.0 != s {
             text.0 = s;
         }
@@ -247,7 +283,7 @@ fn sync_card(
     }
 }
 
-/// In flight (no menu up), J or D-pad down joins the invite.
+/// In flight (no menu up), J or D-pad down accepts the card (joins the invite, or lets the asker in).
 #[allow(clippy::too_many_arguments)]
 pub fn invite_shortcut(
     net: Res<Net>,
@@ -259,7 +295,7 @@ pub fn invite_shortcut(
     gamepads: Query<&Gamepad>,
     mut pressed: ResMut<Pressed>,
 ) {
-    if net.pending_invite().is_none()
+    if (net.pending_invite().is_none() && net.pending_request().is_none())
         || crate::menu::active_screen(*state.get(), paused.0, crate::modes::challenge_over(&mode, &prompt)).is_some()
     {
         return;

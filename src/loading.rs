@@ -6,6 +6,11 @@
 //! runs and with `FLIGHT_SIM_MODE=endless|challenge` ([`begin_round`] picks a
 //! seed and the environment, then the bake starts).
 //!
+//! A multiplayer lobby bakes its room's map in the background while the
+//! players wait ([`Prebake`], a smaller slice per frame so the menu stays
+//! smooth); the round's loading screen then picks up the finished (or
+//! half-done) bake, so START is near-instant.
+//!
 //! `FLIGHT_SIM_SEED=<n>` flies a given map again. Screenshot runs default to
 //! seed 1337 so they're comparable. The round's time of day and weather
 //! (`environment`) are rolled from the same seed unless picked.
@@ -39,9 +44,11 @@ impl Plugin for LoadingPlugin {
                 app.insert_resource(MapSeed(0)).insert_resource(GameMode::Endless).insert_state(GameState::Menu);
             }
         }
-        app.add_systems(OnEnter(GameState::Loading), spawn_loading)
+        app.init_resource::<Prebake>()
+            .add_systems(OnEnter(GameState::Loading), spawn_loading)
             .add_systems(OnExit(GameState::Loading), despawn_loading)
-            .add_systems(Update, load_map.run_if(in_state(GameState::Loading)));
+            .add_systems(Update, load_map.run_if(in_state(GameState::Loading)))
+            .add_systems(Update, prebake.run_if(in_state(GameState::Menu)));
     }
 }
 
@@ -83,6 +90,45 @@ pub struct MapSeed(pub u32);
 const SCREENSHOT_SEED: u32 = 1337;
 /// Baking time per frame: the bar keeps moving and the page stays responsive.
 const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(30);
+/// In a lobby (the menu stays smooth).
+const LOBBY_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
+
+/// A lobby's map, baking (or baked) ahead of its round.
+#[derive(Resource, Default)]
+pub struct Prebake {
+    /// (seed, biome) it's for.
+    key: Option<(u32, crate::environment::Biome)>,
+    baker: Option<MapBaker>,
+    done: Option<terrain_gen::MapBake>,
+}
+
+impl Prebake {
+    /// 0..1 (the lobby's thin bar).
+    pub fn progress(&self) -> f32 {
+        if self.done.is_some() { 1.0 } else { self.baker.as_ref().map_or(0.0, |b| b.progress()) }
+    }
+}
+
+/// Bakes the lobby's map while we wait (and drops it if we leave).
+fn prebake(mut pre: ResMut<Prebake>, net: Res<crate::net::Net>) {
+    let Some(map) = net.lobby_map() else {
+        if pre.key.is_some() {
+            *pre = Prebake::default();
+        }
+        return;
+    };
+    let biome = Environment::choose(map.seed, crate::net::room_picks(map)).biome;
+    let key = Some((map.seed, biome));
+    if pre.key != key {
+        *pre = Prebake { key, baker: Some(MapBaker::new(map.seed, biome, terrain_gen::texture_div())), done: None };
+    }
+    if let Some(b) = pre.baker.as_mut()
+        && let Some(bake) = b.step(LOBBY_BUDGET)
+    {
+        pre.baker = None;
+        pre.done = Some(bake);
+    }
+}
 
 #[derive(Component)]
 struct LoadingRoot;
@@ -137,6 +183,7 @@ fn despawn_loading(mut commands: Commands, roots: Query<Entity, With<LoadingRoot
 #[allow(clippy::too_many_arguments)]
 fn load_map(
     mut baker: Local<Option<MapBaker>>,
+    mut pre: ResMut<Prebake>,
     mut frames: Local<u32>,
     seed: Res<MapSeed>,
     mut bar: Query<&mut Node, With<BarFill>>,
@@ -155,10 +202,20 @@ fn load_map(
     if *frames < 3 {
         return;
     }
-    let b = baker.get_or_insert_with(|| MapBaker::new(seed.0, env.biome, terrain_gen::texture_div()));
-    let done = b.step(FRAME_BUDGET);
+    // the lobby's bake, if it's this map: done, or carry on from where it got to
+    let mut done = None;
+    if baker.is_none() && std::mem::take(&mut pre.key) == Some((seed.0, env.biome)) {
+        done = pre.done.take();
+        *baker = pre.baker.take();
+    }
+    *pre = Prebake::default();
+    if done.is_none() {
+        let b = baker.get_or_insert_with(|| MapBaker::new(seed.0, env.biome, terrain_gen::texture_div()));
+        done = b.step(FRAME_BUDGET);
+    }
+    let b = baker.as_ref();
     // the last tenth of the bar is building the meshes
-    let progress = if done.is_some() { 1.0 } else { b.progress() * 0.9 };
+    let progress = if done.is_some() { 1.0 } else { b.map_or(0.0, |b| b.progress()) * 0.9 };
     for mut node in &mut bar {
         node.width = percent(progress * 100.0);
     }

@@ -16,12 +16,20 @@
 //! the server keeps us up to date on which Bluesky mutuals are online
 //! ([`Net::friends`]); INVITE asks one to our room (made on the fly if we're
 //! not in one), and an invite to theirs waits in [`Net::pending_invite`]
-//! (the card in `friends`).
+//! (the card in `friends`). JOIN on a friend who's in a room asks that
+//! room's host ([`Net::request_join`]); a host's incoming requests wait in
+//! [`Net::pending_request`] (the same card, ACCEPT / X).
+//!
+//! The lobby: a new room waits (in the menu, `menu`'s lobby panel) until its
+//! host starts it, baking the map meanwhile (`loading::Prebake`); joiners
+//! wait there too, and once it's started they go straight to the game.
 //!
 //! Dev: `FLIGHT_SIM_MP=create[:CODE]|join:CODE` connects straight from the
 //! menu (natively with `FLIGHT_SIM_DEV_USER`; requested codes need a dev
 //! server); `FLIGHT_SIM_DEV_INVITE=<handle>` and
-//! `FLIGHT_SIM_DEV_ACCEPT_INVITES=1` (see `dev_invites`). See `auth` for
+//! `FLIGHT_SIM_DEV_ACCEPT_INVITES=1`, `FLIGHT_SIM_DEV_START=<n>`,
+//! `FLIGHT_SIM_DEV_REQUEST=<handle>`, `FLIGHT_SIM_DEV_ACCEPT_REQUESTS=1` and
+//! `FLIGHT_SIM_DEV_HIT=1` (see `dev_hooks` and `send`). See `auth` for
 //! sign-in and the server URL.
 
 pub mod auth;
@@ -131,6 +139,21 @@ pub struct PendingInvite {
     at: f64,
 }
 
+/// Someone asking to join our room (we host it), waiting for ACCEPT or ✕.
+#[derive(Clone, Debug)]
+pub struct PendingRequest {
+    pub from: Friend,
+    at: f64,
+}
+
+/// Who shot us down last (multiplayer), for the death screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Death {
+    pub killer: String,
+    /// Our kills on them, theirs on us (this room).
+    pub record: (u16, u16),
+}
+
 #[derive(Resource, Default)]
 pub struct Net {
     phase: Phase,
@@ -143,8 +166,9 @@ pub struct Net {
     intent: Option<Intent>,
     /// Create / Join sent, waiting for the room.
     awaiting: bool,
-    /// The menu's one-word status (an error).
+    /// The menu's one-word status (an error), and since when (it clears after `LABEL_SECS`).
     label: Option<&'static str>,
+    label_seen: Option<(&'static str, f64)>,
     /// Reconnect no sooner than this (real seconds), and the next wait.
     retry_at: f64,
     backoff: f64,
@@ -157,12 +181,27 @@ pub struct Net {
     /// When we last invited each friend (DID → real seconds).
     invited: HashMap<String, f64>,
     invite: Option<PendingInvite>,
+    /// When we last asked to join each friend's room (DID → real seconds).
+    requested: HashMap<String, f64>,
+    requests: VecDeque<PendingRequest>,
     dev_invited: bool,
+    dev_requested: bool,
+    /// (dev) when the friend to ask was first seen in a room / the lobby filled up.
+    dev_since: Option<f64>,
+    dev_start_since: Option<f64>,
+    last_dev_hit: f64,
 
     // ---- the room ----
     in_room: bool,
     code: Option<String>,
     me: Option<PlayerId>,
+    host: Option<PlayerId>,
+    /// Flying (else the lobby).
+    started: bool,
+    room_map: Option<RoomMap>,
+    /// Joined a room that's in the lobby: to the menu.
+    to_lobby: bool,
+    death: Option<Death>,
     peers: HashMap<PlayerId, Peer>,
     scores: Vec<(PlayerId, u16, u16)>,
     /// Gameplay messages for `apply`.
@@ -188,6 +227,7 @@ pub struct Net {
 }
 
 struct Peer {
+    did: String,
     handle: String,
     entity: Option<Entity>,
     buffer: VecDeque<PlayerState>,
@@ -214,6 +254,8 @@ static ME: AtomicU8 = AtomicU8::new(0);
 pub const INVITE_SECS: f64 = 20.0;
 /// An invited friend's button says SENT this long (the server's per-friend limit).
 const SENT_SECS: f64 = 10.0;
+/// Errors clear after this long.
+const LABEL_SECS: f64 = 4.0;
 const FIRST_RETRY: f64 = 2.0;
 const MAX_RETRY: f64 = 60.0;
 
@@ -227,6 +269,15 @@ fn new_map(picks: Picks) -> RoomMap {
         biome: index(Biome::ALL.iter().position(|b| *b == env.biome)),
         time: index(TimeOfDay::ALL.iter().position(|t| *t == env.time)),
         weather: index(Weather::ALL.iter().position(|w| *w == env.weather)),
+    }
+}
+
+/// A room map's picks (all set: the creator resolved them).
+pub fn room_picks(map: RoomMap) -> Picks {
+    Picks {
+        biome: Biome::ALL.get(map.biome as usize).copied(),
+        time: TimeOfDay::ALL.get(map.time as usize).copied(),
+        weather: Weather::ALL.get(map.weather as usize).copied(),
     }
 }
 
@@ -247,6 +298,84 @@ impl Net {
 
     pub fn room_code(&self) -> Option<&str> {
         self.code.as_deref().filter(|_| self.in_room)
+    }
+
+    /// In a room that hasn't started: its map (being baked meanwhile).
+    pub fn lobby_map(&self) -> Option<RoomMap> {
+        self.room_map.filter(|_| self.in_room && !self.started)
+    }
+
+    pub fn in_lobby(&self) -> bool {
+        self.lobby_map().is_some()
+    }
+
+    pub fn is_host(&self) -> bool {
+        self.in_room && self.host.is_some() && self.host == self.me
+    }
+
+    /// Everyone in the room: (handle, hosts it, is us), in id order.
+    pub fn players(&self) -> Vec<(String, bool, bool)> {
+        let Some(me) = self.me.filter(|_| self.in_room) else { return vec![] };
+        let my_handle = crate::identity::current_user().map(|u| u.handle).unwrap_or_else(|| "you".into());
+        let mut rows: Vec<(PlayerId, String)> = self.peers.iter().map(|(id, p)| (*id, p.handle.clone())).collect();
+        rows.push((me, my_handle));
+        rows.sort_by_key(|r| r.0);
+        rows.into_iter().map(|(id, h)| (h, Some(id) == self.host, id == me)).collect()
+    }
+
+    /// Whether a friend (by DID) is in our room.
+    pub fn in_my_room(&self, did: &str) -> bool {
+        self.in_room && self.peers.values().any(|p| p.did == did)
+    }
+
+    /// START (the host, in the lobby).
+    pub fn start_game(&mut self) {
+        if self.is_host() && !self.started {
+            info!("multiplayer: starting room {:?}", self.code);
+            self.send(&ClientMsg::Start);
+        }
+    }
+
+    /// LEAVE (the lobby): out of the room, still online.
+    pub fn leave(&mut self) {
+        if self.in_room {
+            self.send(&ClientMsg::Leave);
+            self.clear_room();
+        }
+    }
+
+    /// JOIN on a friend who's in a room: asks its host to let us in.
+    pub fn request_join(&mut self, did: &str, now: f64) {
+        if self.phase != Phase::Online || self.request_sent(did, now) {
+            return;
+        }
+        info!("multiplayer: asking to join {did}'s room");
+        self.requested.insert(did.to_string(), now);
+        self.send(&ClientMsg::RequestJoin { to: did.to_string() });
+        self.friends_version += 1;
+    }
+
+    /// Whether a friend's JOIN button says SENT (waiting for their host).
+    pub fn request_sent(&self, did: &str, now: f64) -> bool {
+        self.requested.get(did).is_some_and(|t| now - t < JOIN_REQUEST_SECS as f64)
+    }
+
+    /// The oldest join request waiting for us (the host).
+    pub fn pending_request(&self) -> Option<&PendingRequest> {
+        self.requests.front()
+    }
+
+    /// ACCEPT / ✕ on a join request.
+    pub fn answer_request(&mut self, accept: bool) {
+        if let Some(r) = self.requests.pop_front() {
+            info!("multiplayer: {} {}", if accept { "letting in" } else { "turning down" }, r.from.handle);
+            self.send(&ClientMsg::AnswerJoin { did: r.from.did, accept });
+        }
+    }
+
+    /// Who shot us down (until we fly again).
+    pub fn death(&self) -> Option<&Death> {
+        self.death.as_ref()
     }
 
     pub fn friends(&self) -> &[Friend] {
@@ -355,6 +484,7 @@ impl Net {
         self.friends.clear();
         self.friends_version += 1;
         self.invite = None;
+        self.requested.clear();
         self.backoff = if self.backoff == 0.0 { FIRST_RETRY } else { (self.backoff * 2.0).min(MAX_RETRY) };
         self.retry_at = now + self.backoff;
     }
@@ -364,6 +494,12 @@ impl Net {
         self.in_room = false;
         self.code = None;
         self.me = None;
+        self.host = None;
+        self.started = false;
+        self.room_map = None;
+        self.to_lobby = false;
+        self.death = None;
+        self.requests.clear();
         self.peers.clear();
         self.scores.clear();
         self.inbox.clear();
@@ -417,26 +553,42 @@ impl Net {
                 self.lost |= self.in_room;
                 self.clear_room();
             }
-            ServerMsg::Joined { code, map, you, players } => {
-                info!("multiplayer: room {code}, player {you}, {} here", players.len());
+            ServerMsg::Joined { code, map, you, players, host, started } => {
+                info!("multiplayer: room {code}, player {you}, {} here{}", players.len(), if started { "" } else { " (lobby)" });
                 self.clear_room();
                 self.awaiting = false;
                 self.in_room = true;
                 self.code = Some(code);
                 self.me = Some(you);
+                self.host = Some(host);
+                self.started = started;
+                self.room_map = Some(map);
                 ME.store(you, Ordering::Relaxed);
-                self.peers = players.into_iter().filter(|p| p.id != you).map(|p| (p.id, Peer::new(p.handle))).collect();
+                self.peers = players.into_iter().filter(|p| p.id != you).map(|p| (p.id, Peer::new(p.did, p.handle))).collect();
                 self.label = None;
-                self.joined = Some(map);
+                if started {
+                    self.joined = Some(map);
+                } else {
+                    self.to_lobby = true;
+                }
                 self.lost = false;
+                self.friends_version += 1;
+            }
+            ServerMsg::Host(id) if self.in_room => self.host = Some(id),
+            ServerMsg::Started if self.in_room && !self.started => {
+                info!("multiplayer: the room's started");
+                self.started = true;
+                self.joined = self.room_map;
             }
             ServerMsg::PlayerJoined(info) if Some(info.id) != self.me => {
-                self.peers.insert(info.id, Peer::new(info.handle));
+                self.peers.insert(info.id, Peer::new(info.did, info.handle));
+                self.friends_version += 1;
             }
             ServerMsg::PlayerLeft(id) => {
                 if let Some(p) = self.peers.remove(&id) {
                     p.despawn(commands);
                 }
+                self.friends_version += 1;
             }
             ServerMsg::Scores(scores) => self.scores = scores,
             ServerMsg::Friends(mut list) => {
@@ -459,6 +611,17 @@ impl Net {
                 self.invited.remove(&did);
                 self.friends_version += 1;
             }
+            ServerMsg::JoinRequest(from) if self.is_host() => {
+                info!("multiplayer: {} asks to join", from.handle);
+                self.requests.retain(|r| r.from.did != from.did);
+                self.requests.push_back(PendingRequest { from, at: now });
+            }
+            ServerMsg::JoinDeclined(did) => {
+                info!("multiplayer: join request to {did} declined");
+                self.requested.remove(&did);
+                self.label = Some("DECLINED");
+                self.friends_version += 1;
+            }
             other if self.in_room => self.inbox.push(other),
             _ => {}
         }
@@ -470,8 +633,8 @@ impl Net {
 }
 
 impl Peer {
-    fn new(handle: String) -> Self {
-        Self { handle, entity: None, buffer: default(), offset: None, fire: default(), missiles: default() }
+    fn new(did: String, handle: String) -> Self {
+        Self { did, handle, entity: None, buffer: default(), offset: None, fire: default(), missiles: default() }
     }
 
     fn despawn(&self, commands: &mut Commands) {
@@ -549,11 +712,11 @@ fn dev_auto_start(mut net: ResMut<Net>, mut done: Local<bool>) {
     }
 }
 
-/// Back at the menu: out of the room (still online).
+/// Back at the menu from a game: out of the room (still online). (A room
+/// that's in the lobby is why we're here: it stays.)
 fn leave_room(mut net: ResMut<Net>) {
-    if net.in_room {
-        net.send(&ClientMsg::Leave);
-        net.clear_room();
+    if net.in_room && net.started {
+        net.leave();
     }
 }
 
@@ -619,14 +782,26 @@ fn pump(
     if net.invite.as_ref().is_some_and(|i| now - i.at > INVITE_SECS) {
         net.invite = None;
     }
-    dev_invites(&mut net, now);
+    while net.requests.front().is_some_and(|r| now - r.at > JOIN_REQUEST_SECS as f64) {
+        net.requests.pop_front();
+    }
+    // errors clear after a few seconds
+    match (net.label, net.label_seen) {
+        (Some(l), Some((seen, at))) if l == seen => {
+            if now - at > LABEL_SECS {
+                net.label = None;
+                net.label_seen = None;
+            }
+        }
+        (Some(l), _) => net.label_seen = Some((l, now)),
+        (None, _) => net.label_seen = None,
+    }
+    dev_hooks(&mut net, now);
+    if std::mem::take(&mut net.to_lobby) && *state.get() != GameState::Menu {
+        next.set(GameState::Menu);
+    }
     if let Some(map) = net.joined.take() {
-        let picks = Picks {
-            biome: Biome::ALL.get(map.biome as usize).copied(),
-            time: TimeOfDay::ALL.get(map.time as usize).copied(),
-            weather: Weather::ALL.get(map.weather as usize).copied(),
-        };
-        begin_map(&mut commands, &mut next, GameMode::Multiplayer, map.seed, picks);
+        begin_map(&mut commands, &mut next, GameMode::Multiplayer, map.seed, room_picks(map));
     }
     if std::mem::take(&mut net.lost) && *state.get() != GameState::Menu {
         next.set(GameState::Menu);
@@ -638,8 +813,41 @@ fn pump(
 }
 
 /// Dev: `FLIGHT_SIM_DEV_INVITE=<handle>` invites that friend once they're
-/// online; `FLIGHT_SIM_DEV_ACCEPT_INVITES=1` joins any invite after 2 s.
-fn dev_invites(net: &mut Net, now: f64) {
+/// online; `FLIGHT_SIM_DEV_ACCEPT_INVITES=1` joins any invite after 2 s;
+/// `FLIGHT_SIM_DEV_START=<n>` (a host) starts the room 3 s after `n` players
+/// are in its lobby; `FLIGHT_SIM_DEV_REQUEST=<handle>` asks to join that
+/// friend's room 4 s after they're seen in one; `FLIGHT_SIM_DEV_ACCEPT_REQUESTS=1`
+/// lets in any join request after 2 s.
+fn dev_hooks(net: &mut Net, now: f64) {
+    use crate::environment::setting;
+    if let Some(n) = setting("FLIGHT_SIM_DEV_START").and_then(|n| n.parse::<usize>().ok())
+        && net.is_host()
+        && net.in_lobby()
+    {
+        if net.players().len() < n {
+            net.dev_start_since = None;
+        } else if now - *net.dev_start_since.get_or_insert(now) > 3.0 {
+            net.dev_start_since = None;
+            net.start_game();
+        }
+    }
+    if !net.dev_requested
+        && let Some(handle) = setting("FLIGHT_SIM_DEV_REQUEST")
+    {
+        let friend = net.friends.iter().find(|f| f.handle == handle && f.status == FriendStatus::InRoom).map(|f| f.did.clone());
+        match friend {
+            Some(did) if !net.in_my_room(&did) => {
+                if now - *net.dev_since.get_or_insert(now) > 4.0 {
+                    net.dev_requested = true;
+                    net.request_join(&did, now);
+                }
+            }
+            _ => net.dev_since = None,
+        }
+    }
+    if net.requests.front().is_some_and(|r| now - r.at > 2.0) && setting("FLIGHT_SIM_DEV_ACCEPT_REQUESTS").as_deref() == Some("1") {
+        net.answer_request(true);
+    }
     if !net.dev_invited
         && let Some(handle) = crate::environment::setting("FLIGHT_SIM_DEV_INVITE")
         && let Some(did) = net.friends.iter().find(|f| f.handle == handle).map(|f| f.did.clone())
@@ -743,8 +951,13 @@ fn apply(
                     h.last_attacker = attacker;
                 }
             }
-            ServerMsg::Killed { victim, killer } => {
-                info!("multiplayer: player {victim} down (killer {killer:?})");
+            ServerMsg::Killed { victim, killer, record } => {
+                info!("multiplayer: player {victim} down (killer {killer:?}, {record:?})");
+                if Some(victim) == net.me {
+                    let handle = killer.and_then(|k| net.peers.get(&k)).map(|p| p.handle.clone());
+                    // (theirs on us, ours on them) → ours first
+                    net.death = handle.map(|killer| Death { killer, record: (record.1, record.0) });
+                }
                 let killer = killer.and_then(|k| net.entity_of(k, me));
                 if Some(victim) == net.me {
                     if !net.awaiting_respawn {
@@ -1006,7 +1219,7 @@ fn send(
     bullets: Query<(&Bullet, &Transform), Added<Bullet>>,
     flares: Query<(&Flare, &Transform), Added<Flare>>,
     missiles: Query<(&OwnMissile, &Transform, &Missile)>,
-    remotes: Query<&Remote>,
+    remotes: Query<(&Remote, &Transform, Has<Disabled>)>,
     mut hits: MessageReader<NetHit>,
 ) {
     if !net.in_room {
@@ -1016,17 +1229,30 @@ fn send(
     let now = time.elapsed_secs_f64();
     if !spawned.is_empty() {
         net.flown = true;
+        net.death = None;
         if net.dead_on_server {
             net.awaiting_respawn = true;
         }
         net.send(&ClientMsg::Respawn);
     }
     for hit in hits.read() {
-        if let Ok(r) = remotes.get(hit.target) {
+        if let Ok((r, ..)) = remotes.get(hit.target) {
             net.send(&ClientMsg::Hit { target: r.id, weapon: hit.weapon, damage: hit.damage });
         }
     }
     let me = player.single().ok();
+    // dev: `FLIGHT_SIM_DEV_HIT=1` lands gun hits on anyone in range (a quick, sure kill for tests)
+    if let Some((_, t, ..)) = me
+        && now - net.last_dev_hit > 0.05
+        && crate::environment::setting("FLIGHT_SIM_DEV_HIT").as_deref() == Some("1")
+    {
+        net.last_dev_hit = now;
+        for (r, rt, down) in &remotes {
+            if !down && rt.translation.distance(t.translation) < GUN_MAX_RANGE * 0.9 {
+                net.send(&ClientMsg::Hit { target: r.id, weapon: Weapon::Gun, damage: GUN_DAMAGE });
+            }
+        }
+    }
     let mine = |owner: Entity| me.is_some_and(|m| m.0 == owner);
     for (b, t) in &bullets {
         if mine(b.owner) {
@@ -1101,7 +1327,7 @@ fn send(
             id: id.0,
             pos: t.translation.into(),
             vel: m.velocity.into(),
-            target: m.target.and_then(|e| remotes.get(e).ok()).map(|r| r.id),
+            target: m.target.and_then(|e| remotes.get(e).ok()).map(|(r, ..)| r.id),
         })
         .collect();
     if !list.is_empty() || net.had_missiles {
@@ -1144,7 +1370,7 @@ mod tests {
 
     #[test]
     fn clock_offset_tracks_the_quickest_arrival() {
-        let mut p = Peer::new("a".into());
+        let mut p = Peer::new("did:dev:a".into(), "a".into());
         p.push_state(state(10.0, 0.0, 0.0), 100.2);
         p.push_state(state(10.05, 0.0, 0.0), 100.21);
         assert!((p.offset.unwrap() - 90.16).abs() < 1e-9);

@@ -5,6 +5,10 @@
 //! keyboard or a gamepad: arrows / D-pad / left stick move the focus,
 //! Enter / Space / (A) press, left and right cycle a picker, Esc / (B) closes
 //! the endless pickers.
+//!
+//! In a multiplayer room that hasn't started, the menu is the lobby: the
+//! room code, who's in (and who hosts), the friends list, a thin bar for the
+//! map baking meanwhile, START (the host) and LEAVE (Esc / (B) too).
 
 use bevy::{picking::hover::Hovered, prelude::*};
 
@@ -35,7 +39,12 @@ impl Plugin for MenuPlugin {
             .insert_resource(panel)
             .add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), despawn_menu)
-            .add_systems(Update, (navigate, handle_pressed, style_buttons, layout_menu, layout_account).chain().in_set(MenuSystems))
+            .add_systems(
+                Update,
+                (lobby_focus, navigate, handle_pressed, style_buttons, layout_menu, layout_lobby, layout_account)
+                    .chain()
+                    .in_set(MenuSystems),
+            )
             .add_systems(Update, crate::friends::invite_shortcut.before(handle_pressed));
     }
 }
@@ -81,9 +90,14 @@ pub enum UiAction {
     Account,
     /// INVITE on a friends row (an index into `Net::friends`).
     Invite(u8),
-    /// The invite card's JOIN and ✕.
+    /// JOIN on a friends row: ask to join their room.
+    RequestJoin(u8),
+    /// The card's JOIN / ACCEPT and ✕ (an invite, or a join request when we host).
     AcceptInvite,
     DismissInvite,
+    /// The lobby's START (the host) and LEAVE.
+    StartRoom,
+    Leave,
     /// The native sign-in prompt's SIGN IN and CANCEL.
     SignInSubmit,
     SignInCancel,
@@ -145,6 +159,8 @@ const ORDER_START: u8 = 8;
 const ORDER_KEYS: u8 = 20;
 const ROW_KEYS: u8 = 11;
 const KEYS_PER_ROW: usize = 8;
+const ORDER_LOBBY: u8 = 60;
+const ROW_LOBBY: u8 = 25;
 const ORDER_FRIENDS: u8 = 100;
 const ROW_FRIENDS: u8 = 30;
 
@@ -224,6 +240,22 @@ struct CodeText;
 
 #[derive(Component)]
 struct StatusText;
+
+#[derive(Component)]
+struct LobbyPanel;
+
+#[derive(Component)]
+struct LobbyCode;
+
+#[derive(Component)]
+struct LobbyPlayers;
+
+#[derive(Component)]
+struct LobbyBar;
+
+/// Wraps START (only the host sees it).
+#[derive(Component)]
+struct LobbyStart;
 
 /// A small square keypad key.
 fn key(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, order: u8, row: u8, action: UiAction) {
@@ -343,6 +375,29 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     });
                 }
             });
+            root.spawn((
+                LobbyPanel,
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: px(14),
+                    display: Display::None,
+                    ..default()
+                },
+            ))
+            .with_children(|panel| {
+                panel.spawn((LobbyCode, Text::new(""), font_of(&font, 64.0, GREEN)));
+                panel.spawn((LobbyPlayers, Text::new(""), font_of(&font, 16.0, GREEN)));
+                panel
+                    .spawn((Node { width: px(220), height: px(2), ..default() }, BackgroundColor(GREEN.with_alpha(0.15))))
+                    .with_child((LobbyBar, Node { width: percent(0), height: percent(100), ..default() }, BackgroundColor(GREEN.with_alpha(0.6))));
+                panel.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
+                    row.spawn((LobbyStart, Node::default())).with_children(|w| {
+                        button(w, &font, "START", Screen::Modes, ORDER_LOBBY, ROW_LOBBY, UiAction::StartRoom);
+                    });
+                    button(row, &font, "LEAVE", Screen::Modes, ORDER_LOBBY + 1, ROW_LOBBY, UiAction::Leave);
+                });
+            });
             root.spawn((StatusText, Text::new(""), font_of(&font, 15.0, DIM)));
             if crate::net::auth::available() {
                 crate::friends::spawn_list(root, &font, Screen::Modes, ORDER_FRIENDS, ROW_FRIENDS);
@@ -416,6 +471,7 @@ fn navigate(
     hovered: Query<(&UiButton, &Hovered), Changed<Hovered>>,
     mut moved: MessageReader<CursorMoved>,
     sign_in: Res<crate::signin::SignInPrompt>,
+    net: Res<crate::net::Net>,
 ) {
     // (only when the mouse moves: not when the layout shifts under it)
     let mouse_moved = moved.read().count() > 0;
@@ -508,6 +564,8 @@ fn navigate(
     }
     if back && screen == Screen::SignIn {
         pressed.0.push((UiAction::SignInCancel, 1));
+    } else if back && net.in_lobby() {
+        pressed.0.push((UiAction::Leave, 1));
     } else if back {
         *panel = match *panel {
             Panel::Create | Panel::Join => Panel::Multi,
@@ -605,11 +663,21 @@ fn handle_pressed(
                     net.invite(&did, p, time.elapsed_secs_f64());
                 }
             }
+            UiAction::RequestJoin(i) => {
+                if let Some(did) = net.friends().get(i as usize).map(|f| f.did.clone()) {
+                    net.request_join(&did, time.elapsed_secs_f64());
+                }
+            }
+            // (a join request for our room comes first: it's what the card shows)
+            UiAction::AcceptInvite if net.pending_request().is_some() => net.answer_request(true),
+            UiAction::DismissInvite if net.pending_request().is_some() => net.answer_request(false),
             UiAction::AcceptInvite => {
                 paused.0 = false;
                 net.accept_invite();
             }
             UiAction::DismissInvite => net.dismiss_invite(),
+            UiAction::StartRoom => net.start_game(),
+            UiAction::Leave => net.leave(),
             UiAction::Account => {
                 if crate::identity::current_user().is_some() {
                     crate::identity::sign_out();
@@ -660,10 +728,29 @@ fn layout_menu(
     net: Res<crate::net::Net>,
     mut root: Query<&mut Node, (With<MenuRoot>, Without<EndlessPanel>)>,
     mut sections: Query<
-        (&mut Node, Has<EndlessPanel>, Has<ModesRow>, Has<MultiRow>, Has<JoinPanel>, Option<&crate::friends::FriendsSection>, Option<&SignedIn>),
+        (
+            &mut Node,
+            Has<EndlessPanel>,
+            Has<ModesRow>,
+            Has<MultiRow>,
+            Has<JoinPanel>,
+            Option<&crate::friends::FriendsSection>,
+            Option<&SignedIn>,
+            Has<MultiButton>,
+            Has<LobbyPanel>,
+        ),
         (
             Without<MenuRoot>,
-            Or<(With<EndlessPanel>, With<ModesRow>, With<MultiRow>, With<JoinPanel>, With<SignedIn>, With<crate::friends::FriendsSection>)>,
+            Or<(
+                With<EndlessPanel>,
+                With<ModesRow>,
+                With<MultiRow>,
+                With<JoinPanel>,
+                With<SignedIn>,
+                With<crate::friends::FriendsSection>,
+                With<MultiButton>,
+                With<LobbyPanel>,
+            )>,
         ),
     >,
     mut values: Query<(&PickValue, &mut Text), (Without<CodeText>, Without<StatusText>)>,
@@ -671,13 +758,21 @@ fn layout_menu(
     mut status: Query<&mut Text, (With<StatusText>, Without<CodeText>)>,
 ) {
     let signed_in = crate::identity::current_user().is_some();
-    for (mut node, endless, modes, multi, join, friends, signed) in &mut sections {
+    let lobby = net.in_lobby();
+    for (mut node, endless, modes, multi, join, friends, signed, multi_button, lobby_panel) in &mut sections {
         let show = if let Some(f) = friends {
             // (the pause menu's list is the friends module's)
             if f.0 != Screen::Modes {
                 continue;
             }
-            panel.multiplayer() && signed_in
+            (panel.multiplayer() || lobby) && signed_in
+        } else if lobby_panel {
+            lobby
+        } else if lobby {
+            // the lobby replaces the rest of the menu
+            false
+        } else if multi_button {
+            true
         } else if endless {
             matches!(*panel, Panel::Endless | Panel::Create)
         } else if modes {
@@ -704,7 +799,7 @@ fn layout_menu(
         }
     }
     if let Ok(mut text) = status.single_mut() {
-        let value = if panel.multiplayer() { net.label().unwrap_or("") } else { "" };
+        let value = if panel.multiplayer() || net.in_lobby() { net.label().unwrap_or("") } else { "" };
         if text.0 != value {
             text.0 = value.into();
         }
@@ -726,6 +821,61 @@ fn layout_menu(
         let s = format!("< {} >", name.unwrap_or("random").to_ascii_uppercase());
         if text.0 != s {
             text.0 = s;
+        }
+    }
+}
+
+/// Into the lobby: the multiplayer panel underneath (for when we leave), and
+/// the focus on START (the host) or LEAVE.
+fn lobby_focus(net: Res<crate::net::Net>, mut was: Local<bool>, mut panel: ResMut<Panel>, mut focus: ResMut<Focus>) {
+    let lobby = net.in_lobby();
+    if lobby && !*was {
+        *panel = Panel::Multi;
+        focus.order = if net.is_host() { ORDER_LOBBY } else { ORDER_LOBBY + 1 };
+    }
+    *was = lobby;
+}
+
+/// The lobby's code, players, bake bar and START.
+#[allow(clippy::type_complexity)]
+fn layout_lobby(
+    net: Res<crate::net::Net>,
+    pre: Res<crate::loading::Prebake>,
+    mut code: Query<&mut Text, (With<LobbyCode>, Without<LobbyPlayers>)>,
+    mut players: Query<&mut Text, (With<LobbyPlayers>, Without<LobbyCode>)>,
+    mut bar: Query<&mut Node, (With<LobbyBar>, Without<LobbyStart>)>,
+    mut start: Query<&mut Node, (With<LobbyStart>, Without<LobbyBar>)>,
+) {
+    if !net.in_lobby() {
+        return;
+    }
+    if let Ok(mut t) = code.single_mut() {
+        let c = net.room_code().unwrap_or("");
+        if t.0 != c {
+            t.0 = c.into();
+        }
+    }
+    if let Ok(mut t) = players.single_mut() {
+        let rows: Vec<String> = net
+            .players()
+            .iter()
+            .map(|(h, host, me)| format!("{}@{h:<24}{}", if *me { "> " } else { "  " }, if *host { "HOST" } else { "    " }))
+            .collect();
+        let s = rows.join("\n");
+        if t.0 != s {
+            t.0 = s;
+        }
+    }
+    if let Ok(mut node) = bar.single_mut() {
+        let w = percent(pre.progress() * 100.0);
+        if node.width != w {
+            node.width = w;
+        }
+    }
+    if let Ok(mut node) = start.single_mut() {
+        let d = if net.is_host() { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
         }
     }
 }
