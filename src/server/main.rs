@@ -8,7 +8,9 @@
 //! Env: `PORT` (default 8080), `FLIGHT_SIM_DEV_AUTH=1` (accept `dev:<handle>`
 //! tokens and honour requested room codes, for local testing),
 //! `FLIGHT_SIM_DEV_MUTUALS=1` (dev users are all each other's mutuals),
-//! `FLIGHT_SIM_APPVIEW` (default the public Bluesky AppView).
+//! `FLIGHT_SIM_APPVIEW` (default the public Bluesky AppView),
+//! `FLIGHT_SIM_DB` (the leaderboard's SQLite file, default `./flight_sim.db`;
+//! on Railway a path on the attached volume, `/data/flight_sim.db`).
 //!
 //! Presence and invites: see `presence` and `hub`. AppView lookups run on a
 //! tokio task, at most [`LOOKUPS_PER_SEC`], and come back to the game loop as
@@ -23,6 +25,7 @@ mod atproto;
 #[path = "../net/protocol.rs"]
 mod protocol;
 mod hub;
+mod leaderboard;
 mod presence;
 mod rooms;
 
@@ -95,6 +98,15 @@ fn main() {
     let dev = std::env::var("FLIGHT_SIM_DEV_AUTH").as_deref() == Ok("1");
     let dev_mutuals = std::env::var("FLIGHT_SIM_DEV_MUTUALS").as_deref() == Ok("1");
     let appview = std::env::var("FLIGHT_SIM_APPVIEW").unwrap_or_else(|_| presence::PUBLIC_APPVIEW.to_string());
+    let db_path = std::env::var("FLIGHT_SIM_DB").unwrap_or_else(|_| leaderboard::DEFAULT_DB.to_string());
+    let store = match leaderboard::Store::open(std::path::Path::new(&db_path)) {
+        Ok(store) => store,
+        Err(e) => {
+            // (the rest of the game still works; scores just don't last)
+            eprintln!("can't open the leaderboard at {db_path}: {e}; keeping it in memory");
+            leaderboard::Store::memory()
+        }
+    };
     let (events, inbox) = unbounded_channel();
     let (jobs, jobs_rx) = unbounded_channel();
     let shared = Shared { events: events.clone(), next_conn: Default::default() };
@@ -113,10 +125,11 @@ fn main() {
         .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / TICK_HZ))))
         .add_plugins(LogPlugin::default())
         .insert_resource(Inbox(Mutex::new(inbox)))
-        .insert_resource(Game { hub: hub::Hub::new(dev), outs: HashMap::new(), jobs, last_report: Instant::now() })
+        .insert_resource(Game { hub: hub::Hub::with_store(dev, store), outs: HashMap::new(), jobs, last_report: Instant::now() })
         .add_systems(Startup, move || {
             let flags = [(dev, " (dev auth)"), (dev_mutuals, " (dev mutuals)")];
             info!("flight sim server on :{port}{}", flags.iter().filter(|f| f.0).map(|f| f.1).collect::<String>());
+            info!("leaderboard: {db_path}");
         })
         .add_systems(Update, pump)
         .run();
@@ -141,7 +154,9 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
                 | ClientMsg::Invite { .. }
                 | ClientMsg::Start
                 | ClientMsg::RequestJoin { .. }
-                | ClientMsg::AnswerJoin { .. } = &msg
+                | ClientMsg::AnswerJoin { .. }
+                | ClientMsg::ChallengeStart { .. }
+                | ClientMsg::Leaderboard(_) = &msg
                 {
                     info!("conn {conn}: {msg:?}");
                 }
@@ -176,6 +191,8 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
             ServerMsg::Respawned(id) => info!("player {id} respawned"),
             ServerMsg::Invited { from, code } => info!("invite from {} to room {code} -> conns {:?}", from.handle, o.to),
             ServerMsg::InviteFailed(_) => info!("invite failed (conn {:?})", o.to),
+            ServerMsg::Standing(s) => info!("standing {s:?} -> conn {:?}", o.to),
+            ServerMsg::LeaderboardData { kind, rows, you } => info!("{kind:?} board: {} rows, you {you:?} -> conn {:?}", rows.len(), o.to),
             ServerMsg::FriendUpdate(f) => info!("friend {} ({:?}) -> conns {:?}", f.handle, f.status, o.to),
             _ => {}
         }
