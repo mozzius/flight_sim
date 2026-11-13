@@ -1,8 +1,11 @@
 //! Rooms: who's in which, relaying, and the rules (damage, kills, score).
 //!
-//! A room starts as a lobby: its first player is the host, and nothing is
-//! flown until they `Start` it. When the host leaves, the longest-standing
-//! player takes over.
+//! Two kinds of room ([`RoomKind`]). A hosted room starts as a lobby: its
+//! first player is the host, and nothing is flown until they `Start` it.
+//! When the host leaves, the longest-standing player takes over. A public
+//! (quick-play) room has no host: it's flying from the start, anyone the
+//! matchmaker sends drops in, and it goes soon after its last player
+//! leaves. [`choose_public`] is the matchmaker's pick.
 //!
 //! Pure logic with no I/O, so it's testable: every call returns the
 //! messages to send ([`Out`]) and the caller delivers them.
@@ -26,6 +29,27 @@ pub struct Out {
 
 /// Empty rooms stay open this long (so a dropped creator can come back).
 const EMPTY_ROOM_TTL: Duration = Duration::from_secs(120);
+/// Empty public rooms, this long (nobody's coming back for them).
+const EMPTY_PUBLIC_TTL: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomKind {
+    /// Quick play: no host, no lobby, no visible code.
+    Public,
+    /// Made by a host (or an invite): a lobby with a code, START and join requests.
+    Hosted,
+}
+
+/// The matchmaker: of the public rooms (code, players, our online mutuals
+/// in it), one with a seat, preferring our mutuals, then the fullest.
+pub fn choose_public<'a>(rooms: impl IntoIterator<Item = (&'a str, usize, usize)>) -> Option<&'a str> {
+    rooms
+        .into_iter()
+        .filter(|(_, players, _)| *players < MAX_PLAYERS)
+        // (ties by code: the same pick every time)
+        .max_by(|a, b| (a.2, a.1).cmp(&(b.2, b.1)).then(b.0.cmp(a.0)))
+        .map(|(code, _, _)| code)
+}
 const MAX_ROOMS: usize = 2_000;
 /// Hits need fresh positions for both aircraft.
 const STATE_STALE: Duration = Duration::from_secs(3);
@@ -49,6 +73,7 @@ struct Conn {
 pub struct Room {
     pub code: String,
     pub map: RoomMap,
+    pub kind: RoomKind,
     players: BTreeMap<PlayerId, Player>,
     next_id: PlayerId,
     empty_since: Option<Instant>,
@@ -114,7 +139,10 @@ impl Server {
 
     /// Drops empty rooms and forgotten missiles.
     pub fn tick(&mut self, now: Instant) {
-        self.rooms.retain(|_, r| r.empty_since.is_none_or(|t| now.duration_since(t) < EMPTY_ROOM_TTL));
+        self.rooms.retain(|_, r| {
+            let ttl = if r.kind == RoomKind::Public { EMPTY_PUBLIC_TTL } else { EMPTY_ROOM_TTL };
+            r.empty_since.is_none_or(|t| now.duration_since(t) < ttl)
+        });
         for room in self.rooms.values_mut() {
             for p in room.players.values_mut() {
                 p.missiles.retain(|_, m| now.duration_since(m.seen) < MISSILE_MEMORY);
@@ -130,10 +158,10 @@ impl Server {
         match msg {
             // (auth is done by the connection before it gets here)
             ClientMsg::Hello { .. } | ClientMsg::Ping => {}
-            // (the hub handles join requests: they need presence)
-            ClientMsg::RequestJoin { .. } | ClientMsg::AnswerJoin { .. } => {}
+            // (the hub handles join requests and matchmaking: they need presence)
+            ClientMsg::RequestJoin { .. } | ClientMsg::AnswerJoin { .. } | ClientMsg::QuickPlay { .. } | ClientMsg::JoinFriend { .. } => {}
             ClientMsg::Create { map, code } => {
-                self.create_room(conn, map, code, now, &mut out);
+                self.create_room(conn, map, code, RoomKind::Hosted, now, &mut out);
             }
             ClientMsg::Leave => self.leave(conn, now, &mut out),
             // (the hub handles invites: they need presence)
@@ -151,7 +179,15 @@ impl Server {
 
     /// A new room on `map` with `conn` in it (leaving any room it was in).
     /// Returns the code, or None if the server is full.
-    pub fn create_room(&mut self, conn: ConnId, map: RoomMap, code: Option<String>, now: Instant, out: &mut Vec<Out>) -> Option<String> {
+    pub fn create_room(
+        &mut self,
+        conn: ConnId,
+        map: RoomMap,
+        code: Option<String>,
+        kind: RoomKind,
+        now: Instant,
+        out: &mut Vec<Out>,
+    ) -> Option<String> {
         self.leave(conn, now, out);
         if self.rooms.len() >= MAX_ROOMS {
             out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::Full) });
@@ -167,11 +203,13 @@ impl Server {
             Room {
                 code: code.clone(),
                 map,
+                kind,
                 players: BTreeMap::new(),
                 next_id: 1,
                 empty_since: Some(now),
                 host: 0,
-                started: false,
+                // (public rooms have no lobby)
+                started: kind == RoomKind::Public,
                 records: HashMap::new(),
                 next_seq: 0,
             },
@@ -192,10 +230,28 @@ impl Server {
         self.join(conn, &code, now, out);
     }
 
-    /// The connection of room `code`'s host.
+    /// The connection of room `code`'s host (public rooms have none).
     pub fn host_conn(&self, code: &str) -> Option<ConnId> {
-        let room = self.rooms.get(code)?;
+        let room = self.rooms.get(code).filter(|r| r.kind == RoomKind::Hosted)?;
         room.players.get(&room.host).map(|p| p.conn)
+    }
+
+    pub fn is_public(&self, code: &str) -> bool {
+        self.rooms.get(code).is_some_and(|r| r.kind == RoomKind::Public)
+    }
+
+    /// Every public room: (code, its players' DIDs).
+    pub fn public_rooms(&self) -> Vec<(&str, Vec<&str>)> {
+        self.rooms
+            .values()
+            .filter(|r| r.kind == RoomKind::Public)
+            .map(|r| (r.code.as_str(), r.players.values().map(|p| p.info.did.as_str()).collect()))
+            .collect()
+    }
+
+    /// Out of whatever room `conn` is in.
+    pub fn leave_room(&mut self, conn: ConnId, now: Instant, out: &mut Vec<Out>) {
+        self.leave(conn, now, out);
     }
 
     /// Whether `did` has a seat in room `code`.
@@ -239,7 +295,7 @@ impl Server {
         }
         let id = room.free_id();
         let info = PlayerInfo { id, did, handle };
-        if room.players.is_empty() {
+        if room.players.is_empty() && room.kind == RoomKind::Hosted {
             room.host = id;
         }
         let seq = room.next_seq;
@@ -271,6 +327,7 @@ impl Server {
                 players: room.players.values().map(|p| p.info.clone()).collect(),
                 host: room.host,
                 started: room.started,
+                public: room.kind == RoomKind::Public,
             },
         });
         out.push(Out { to: room.others(id), msg: ServerMsg::PlayerJoined(info) });
@@ -321,6 +378,7 @@ impl Room {
         } else {
             out.push(Out { to: self.all(), msg: ServerMsg::PlayerLeft(id) });
             if id == self.host
+                && self.kind == RoomKind::Hosted
                 && let Some(next) = self.players.values().min_by_key(|p| p.seq).map(|p| p.info.id)
             {
                 self.host = next;
@@ -371,7 +429,7 @@ impl Room {
             }
             ClientMsg::Hit { target, weapon, damage } => self.hit(id, target, weapon, damage, now, out),
             ClientMsg::Start => {
-                if id == self.host && !self.started {
+                if self.kind == RoomKind::Hosted && id == self.host && !self.started {
                     self.started = true;
                     out.push(Out { to: self.all(), msg: ServerMsg::Started });
                 }
@@ -394,7 +452,9 @@ impl Room {
             | ClientMsg::AnswerJoin { .. }
             | ClientMsg::ChallengeStart { .. }
             | ClientMsg::SubmitScore(_)
-            | ClientMsg::Leaderboard(_) => {}
+            | ClientMsg::Leaderboard(_)
+            | ClientMsg::QuickPlay { .. }
+            | ClientMsg::JoinFriend { .. } => {}
         }
     }
 
@@ -662,6 +722,50 @@ mod tests {
         s.disconnect(3, now);
         let out = s.handle(1, ClientMsg::Join { code: "TEST".into() }, now);
         assert!(matches!(&out[0].msg, ServerMsg::Joined { you, host, started: true, .. } if you == host));
+    }
+
+    #[test]
+    fn the_matchmaker_prefers_mutuals_then_full_rooms() {
+        // (code, players, our mutuals in it)
+        assert_eq!(choose_public([]), None);
+        assert_eq!(choose_public([("AAAA", 2, 0), ("BBBB", 5, 0), ("CCCC", 3, 0)]), Some("BBBB"), "the fullest");
+        assert_eq!(choose_public([("AAAA", 2, 1), ("BBBB", 5, 0)]), Some("AAAA"), "a mutual beats a fuller room");
+        assert_eq!(choose_public([("AAAA", 2, 1), ("BBBB", 6, 2), ("CCCC", 7, 1)]), Some("BBBB"), "more mutuals first");
+        assert_eq!(choose_public([("AAAA", 4, 1), ("BBBB", 6, 1)]), Some("BBBB"), "then the fuller");
+        assert_eq!(choose_public([("AAAA", MAX_PLAYERS, 3), ("BBBB", 1, 0)]), Some("BBBB"), "never a full one");
+        assert_eq!(choose_public([("AAAA", MAX_PLAYERS, 0)]), None);
+        assert_eq!(choose_public([("BBBB", 3, 0), ("AAAA", 3, 0)]), Some("AAAA"), "ties by code");
+        // an empty room (in its grace period) still beats making another
+        assert_eq!(choose_public([("AAAA", 0, 0)]), Some("AAAA"));
+    }
+
+    #[test]
+    fn public_rooms_fly_at_once_with_no_host() {
+        let now = Instant::now();
+        let mut s = Server::new(true);
+        for (c, h) in [(1, "a"), (2, "b"), (3, "c")] {
+            s.connect(c, format!("did:dev:{h}"), h.into());
+        }
+        let mut out = vec![];
+        let code = s.create_room(1, MAP, None, RoomKind::Public, now, &mut out).unwrap();
+        assert!(matches!(&out[0].msg, ServerMsg::Joined { host: 0, started: true, public: true, .. }));
+        assert!(s.is_public(&code));
+        assert_eq!(s.host_conn(&code), None);
+        // Start does nothing; nobody hosts after a leave
+        assert!(s.handle(1, ClientMsg::Start, now).is_empty());
+        s.handle(2, ClientMsg::Join { code: code.clone() }, now);
+        let out = s.handle(1, ClientMsg::Leave, now);
+        assert!(!out.iter().any(|o| matches!(o.msg, ServerMsg::Host(_))), "{out:?}");
+        let out = s.handle(3, ClientMsg::Join { code: code.clone() }, now);
+        assert!(matches!(&out[0].msg, ServerMsg::Joined { host: 0, started: true, public: true, .. }));
+        assert_eq!(s.public_rooms(), vec![(code.as_str(), vec!["did:dev:b", "did:dev:c"])]);
+        // empty: gone after a short grace (a hosted room would stay for minutes)
+        s.disconnect(2, now);
+        s.disconnect(3, now);
+        s.tick(now + Duration::from_secs(5));
+        assert_eq!(s.room_count(), 1);
+        s.tick(now + EMPTY_PUBLIC_TTL + Duration::from_secs(1));
+        assert_eq!(s.room_count(), 0);
     }
 
     #[test]

@@ -7,8 +7,9 @@
 //! `FLIGHT_SIM_DIE_AT=<secs>` shoots the player down that many (real) seconds in.
 //! `FLIGHT_SIM_SCREENSHOT_EXTRA=<event>:<path>[,...]` takes more shots on the
 //! way (without exiting), each once, about a second after its event:
-//! `t<secs>`, `lobby<n>` (in a lobby with n players), `request` (a join
-//! request card), `kill` (our kill banner), `death` (the multiplayer death
+//! `t<secs>`, `lobby<n>` (in a lobby with n players), `room<n>` (flying in
+//! a room with n players, 7 s in), `friendjoin` (a friend in a public room,
+//! their row showing JOIN), `request` (a join request card), `kill` (our kill banner), `death` (the multiplayer death
 //! screen, killer named), `rank` (the challenge score screen with our rank),
 //! `board` (the leaderboard screen with its rows).
 
@@ -180,6 +181,7 @@ fn extra_screenshots(
     mut kills: MessageReader<crate::game::PlayerKill>,
     mut last_kill: Local<Option<f32>>,
     board: Res<crate::leaderboard::BoardUi>,
+    state: Res<State<crate::loading::GameState>>,
 ) {
     let now = time.elapsed_secs();
     if kills.read().count() > 0 {
@@ -191,9 +193,17 @@ fn extra_screenshots(
             t.parse::<f32>().is_ok_and(|t| now >= t)
         } else if let Some(n) = e.strip_prefix("lobby") {
             net.in_lobby() && net.players().len() >= n.parse().unwrap_or(1)
+        } else if let Some(n) = e.strip_prefix("room") {
+            // flying in a room with at least n players
+            *state.get() == crate::loading::GameState::Playing
+                && net.in_room()
+                && !net.in_lobby()
+                && net.players().len() >= n.parse().unwrap_or(1)
         } else {
             match e {
                 "request" => net.pending_request().is_some(),
+                // a friend in a public room (their row shows JOIN)
+                "friendjoin" => net.friends().iter().any(|f| f.status == crate::net::protocol::FriendStatus::InPublic && !net.in_my_room(&f.did)),
                 "kill" => last_kill.is_some_and(|t| now - t < 2.0),
                 "death" => prompt.ready() && net.death().is_some(),
                 "rank" => prompt.ready() && net.standing().is_some(),
@@ -207,7 +217,16 @@ fn extra_screenshots(
         }
         let since = *shot.since.get_or_insert(now);
         // (time events go at once; the others wait for the screen to settle)
-        let wait = if e.starts_with('t') { 0.0 } else if e == "kill" { 0.6 } else { 1.0 };
+        let wait = if e.starts_with('t') {
+            0.0
+        } else if e == "kill" {
+            0.6
+        } else if e.starts_with("room") {
+            // (past the intro)
+            7.0
+        } else {
+            1.0
+        };
         if now - since >= wait {
             shot.done = true;
             info!("dev: screenshot {} ({e})", shot.path);

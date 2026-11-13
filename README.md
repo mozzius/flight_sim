@@ -157,21 +157,29 @@ that fails looks the same whether the target is offline or not a mutual. Invites
 mutual, one per friend per 10 s and 10 a minute. Join requests (protocol v3: `RequestJoin` →
 the host's `JoinRequest` → `AnswerJoin`, else `JoinDeclined` after 20 s) need the friend and the
 room's host to be online mutuals of the requester, one per host per 10 s and 6 a minute, and any
-failure is the same decline. Rooms start as lobbies (`Joined { host, started }`, `Start` →
+failure is the same decline. MULTIPLAYER offers QUICK PLAY, HOST GAME and JOIN GAME (a code).
+Quick play (protocol v5: `QuickPlay { map }`) puts you in a public room with a seat, preferring
+rooms with your online mutuals, then the fullest; with none it makes a new one on the random map
+the client sent. Public rooms have no host, lobby or visible code, fly from the start (late joiners
+drop in) and go 15 s after the last player leaves. A mutual in a public room with a seat shows
+JOIN (`FriendStatus::InPublic`), which hops straight in (`JoinFriend { did }`, checked for
+mutuals and a seat; any failure is a plain `JoinDeclined`); JOIN on a hosted room (`InRoom`)
+is still a request to its host, and a full room shows only its dot. Invites work from either
+kind of room; INVITE from the menu makes a hosted room. Hosted rooms start as lobbies (`Joined { host, started }`, `Start` →
 `Started`, `Host` on handover); `Killed` carries the pair's head-to-head record, counted per
 pair of DIDs for the room's lifetime (a crash credited to an attacker counts). Avatar URLs are sent but not drawn: cdn.bsky.app
 sends no CORS header, so the web build can't load them.
 
 Client switches: `FLIGHT_SIM_SERVER=<url>` (`?server=` on the web; default
-`wss://mp.flight.mozzius.dev`; `/ws` is appended), `FLIGHT_SIM_MP=create[:CODE]|join:CODE`
+`wss://mp.flight.mozzius.dev`; `/ws` is appended), `FLIGHT_SIM_MP=quick|create[:CODE]|join:CODE`
 (connect straight from the menu; a requested code needs a dev server),
 `FLIGHT_SIM_DEV_INVITE=<handle>` (invite that friend as soon as they're online),
 `FLIGHT_SIM_DEV_ACCEPT_INVITES=1` (join any invite after 2 s), `FLIGHT_SIM_DEV_START=<n>` (a host
-starts its lobby 3 s after n players are in), `FLIGHT_SIM_DEV_REQUEST=<handle>` (ask to join that
-friend's room 4 s after they're seen in one), `FLIGHT_SIM_DEV_ACCEPT_REQUESTS=1` (let any join
+starts its lobby 3 s after n players are in), `FLIGHT_SIM_DEV_REQUEST=<handle>` (press JOIN on that
+friend 4 s after they're seen in a room: straight into a public room, a request for a hosted one), `FLIGHT_SIM_DEV_ACCEPT_REQUESTS=1` (let any join
 request in after 2 s), `FLIGHT_SIM_DEV_HIT=1` (land gun hits on anyone within range: a quick
 kill), `FLIGHT_SIM_SCREENSHOT_EXTRA=<event>:<path>,...` (extra shots without exiting on
-`t<secs>`, `lobby<n>`, `request`, `kill`, `death`),
+`t<secs>`, `lobby<n>`, `room<n>`, `friendjoin`, `request`, `kill`, `death`),
 `FLIGHT_SIM_MODE=menu-multiplayer|menu-create|menu-join` (open that panel in a screenshot run).
 
 Run a server locally and two headless clients that fight each other:

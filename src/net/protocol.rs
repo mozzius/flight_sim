@@ -15,6 +15,12 @@
 //! (`JoinRequest` / `AnswerJoin`), without the room code ever leaving the
 //! server until they say yes.
 //!
+//! Quick play (v5): `QuickPlay` puts us in a public room with a seat (one
+//! with our mutuals first, then the fullest), or makes one on the map we
+//! sent. Public rooms have no host, no lobby and no visible code: they're
+//! flying from the start and last while anyone's in them. `JoinFriend`
+//! hops straight into the public room a mutual is in.
+//!
 //! Challenge leaderboard (v4): a signed-in client says `ChallengeStart` when
 //! a challenge round begins and `SubmitScore` when it ends; the server checks
 //! the run against the scoring rules and its own clock ([`check_run`]),
@@ -31,7 +37,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the messages change shape.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Service-auth audience and method the server checks tokens against.
 pub const AUTH_AUDIENCE: &str = "did:web:flight.mozzius.dev";
@@ -178,6 +184,11 @@ pub enum ClientMsg {
     SubmitScore(Run),
     /// Asks for a board (`LeaderboardData`).
     Leaderboard(BoardKind),
+    /// Into a public room with a seat; none: a new one on `map`.
+    QuickPlay { map: RoomMap },
+    /// Into the public room an online mutual (by DID) is in, if it has a
+    /// seat (else `JoinDeclined`).
+    JoinFriend { did: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -194,6 +205,9 @@ pub enum FriendStatus {
     InRoom,
     /// In a room with no seat left.
     RoomFull,
+    /// In a public room with a seat (JOIN hops straight in; `InRoom` is a
+    /// hosted room, where JOIN asks its host).
+    InPublic,
 }
 
 /// An online mutual (they follow us and we follow them on Bluesky).
@@ -233,8 +247,9 @@ pub enum ServerMsg {
     /// Signed in; send `Create` or `Join`.
     Welcome { handle: String },
     Error(ErrorCode),
-    /// In a room. `started`: flying already (else the lobby).
-    Joined { code: String, map: RoomMap, you: PlayerId, players: Vec<PlayerInfo>, host: PlayerId, started: bool },
+    /// In a room. `started`: flying already (else the lobby). `public`: a
+    /// quick-play room (no host: `host` is 0; always started).
+    Joined { code: String, map: RoomMap, you: PlayerId, players: Vec<PlayerInfo>, host: PlayerId, started: bool, public: bool },
     /// The room's host changed (the old one left).
     Host(PlayerId),
     /// The host started the game.
@@ -408,6 +423,7 @@ mod tests {
             players: vec![PlayerInfo { id: 1, did: "did:dev:a".into(), handle: "a".into() }],
             host: 1,
             started: false,
+            public: false,
         };
         assert_eq!(decode::<ServerMsg>(&encode(&msg)), Some(msg));
         let friend = Friend {
@@ -433,6 +449,12 @@ mod tests {
         }
         let msg = ClientMsg::Invite { to: "did:plc:b".into(), map: RoomMap { seed: 1, biome: 0, time: 0, weather: 0 } };
         assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
+        for msg in [
+            ClientMsg::QuickPlay { map: RoomMap { seed: 3, biome: 2, time: 1, weather: 0 } },
+            ClientMsg::JoinFriend { did: "did:plc:b".into() },
+        ] {
+            assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
+        }
         for msg in [ClientMsg::Start, ClientMsg::RequestJoin { to: "did:plc:b".into() }, ClientMsg::AnswerJoin { did: "did:plc:b".into(), accept: true }] {
             assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
         }

@@ -180,8 +180,8 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
     }
     for o in step.out {
         match &o.msg {
-            ServerMsg::Joined { code, you, players, started, .. } => {
-                info!("room {code}: player {you} joined ({} in the room, started {started})", players.len())
+            ServerMsg::Joined { code, you, players, started, public, .. } => {
+                info!("room {code}: player {you} joined ({} in the room, started {started}, public {public})", players.len())
             }
             ServerMsg::Killed { victim, killer, record } => info!("player {victim} down, killer {killer:?} {record:?}"),
             ServerMsg::Started => info!("room started -> conns {:?}", o.to),

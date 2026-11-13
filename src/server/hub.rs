@@ -4,6 +4,10 @@
 //! (asking the host of the room a mutual is in to let us in: the requester
 //! only learns the code by being admitted).
 //!
+//! Matchmaking too: `QuickPlay` picks a public room by who's in it (our
+//! online mutuals first: see `rooms::choose_public`), and `JoinFriend` hops
+//! into a mutual's public room, both needing presence.
+//!
 //! The challenge leaderboard (`leaderboard`) hangs off the hub too: it
 //! needs the player's DID and presence's relationship cache.
 //!
@@ -16,7 +20,7 @@ use std::time::{Duration, Instant};
 use crate::leaderboard::{Board, Store};
 use crate::presence::{Did, Job, JobResult, Presence};
 use crate::protocol::*;
-use crate::rooms::{self, ConnId, Out};
+use crate::rooms::{self, ConnId, Out, RoomKind};
 
 #[derive(Default, Debug)]
 pub struct Step {
@@ -84,8 +88,13 @@ impl Hub {
 
     pub fn handle(&mut self, conn: ConnId, msg: ClientMsg, now: Instant) -> Step {
         let mut step = Step::default();
-        let roomy = matches!(msg, ClientMsg::Create { .. } | ClientMsg::Join { .. } | ClientMsg::Leave);
+        let roomy = matches!(
+            msg,
+            ClientMsg::Create { .. } | ClientMsg::Join { .. } | ClientMsg::Leave | ClientMsg::QuickPlay { .. } | ClientMsg::JoinFriend { .. }
+        );
         match msg {
+            ClientMsg::QuickPlay { map } => self.quick_play(conn, map, now, &mut step.out),
+            ClientMsg::JoinFriend { did } => self.join_friend(conn, &did, now, &mut step.out),
             ClientMsg::Invite { to, map } => self.invite(conn, &to, map, now, &mut step.out),
             ClientMsg::RequestJoin { to } => self.request_join(conn, &to, now, &mut step.out),
             ClientMsg::AnswerJoin { did, accept } => {
@@ -136,6 +145,45 @@ impl Hub {
         });
         out.extend(self.board.tick(&self.presence, now));
         Step { out, jobs: self.presence.tick(now) }
+    }
+
+    /// QUICK PLAY: into the public room with the most of our online mutuals,
+    /// then the fullest (with a seat); none, a new one on `map`.
+    fn quick_play(&mut self, conn: ConnId, map: RoomMap, now: Instant, out: &mut Vec<Out>) {
+        let Some(from) = self.dids.get(&conn).cloned() else { return };
+        self.rooms.leave_room(conn, now, out);
+        let rooms = self.rooms.public_rooms();
+        let candidates: Vec<(&str, usize, usize)> = rooms
+            .iter()
+            .map(|(code, dids)| (*code, dids.len(), dids.iter().filter(|d| self.presence.online_mutuals(&from, d)).count()))
+            .collect();
+        match rooms::choose_public(candidates).map(str::to_string) {
+            Some(code) => self.rooms.join_code(conn, &code, now, out),
+            None => {
+                self.rooms.create_room(conn, map, None, RoomKind::Public, now, out);
+            }
+        }
+    }
+
+    /// JOIN on a mutual in a public room: straight in if it has a seat.
+    /// Anything else is a plain decline (like a join request's).
+    fn join_friend(&mut self, conn: ConnId, to: &str, now: Instant, out: &mut Vec<Out>) {
+        let Some(from) = self.dids.get(&conn).cloned() else { return };
+        let room = self
+            .presence
+            .conns(to)
+            .iter()
+            .find_map(|c| self.rooms.room_of(*c).map(|(code, full)| (code.to_string(), full)));
+        match room {
+            Some((code, false))
+                if self.presence.online_mutuals(&from, to)
+                    && self.rooms.is_public(&code)
+                    && self.rooms.room_of(conn).is_none_or(|(mine, _)| mine != code) =>
+            {
+                self.rooms.join_code(conn, &code, now, out)
+            }
+            _ => out.push(Out { to: vec![conn], msg: ServerMsg::JoinDeclined(to.to_string()) }),
+        }
     }
 
     /// `conn` asks to join the room their mutual `to` is in: the request goes
@@ -194,7 +242,7 @@ impl Hub {
         }
         let code = match self.rooms.room_of(conn) {
             Some((code, _)) => code.to_string(),
-            None => match self.rooms.create_room(conn, map, None, now, out) {
+            None => match self.rooms.create_room(conn, map, None, RoomKind::Hosted, now, out) {
                 Some(code) => code,
                 None => return,
             },
@@ -208,11 +256,16 @@ impl Hub {
     fn sync_statuses(&mut self) -> Vec<Out> {
         let mut out = vec![];
         for did in self.presence.online_dids() {
-            let rooms: Vec<bool> = self.presence.conns(&did).iter().filter_map(|c| self.rooms.room_of(*c).map(|(_, f)| f)).collect();
-            let status = match rooms.first() {
+            let room = self
+                .presence
+                .conns(&did)
+                .iter()
+                .find_map(|c| self.rooms.room_of(*c).map(|(code, full)| (full, self.rooms.is_public(code))));
+            let status = match room {
                 None => FriendStatus::Online,
-                Some(true) => FriendStatus::RoomFull,
-                Some(false) => FriendStatus::InRoom,
+                Some((true, _)) => FriendStatus::RoomFull,
+                Some((false, true)) => FriendStatus::InPublic,
+                Some((false, false)) => FriendStatus::InRoom,
             };
             out.extend(self.presence.set_status(&did, status));
         }
@@ -363,6 +416,160 @@ mod tests {
         assert!(step.jobs.is_empty());
         let [ServerMsg::LeaderboardData { kind: BoardKind::Friends, rows, .. }] = &sent_to(&step.out, 1)[..] else { panic!("{:?}", step.out) };
         assert_eq!(rows.len(), 2);
+    }
+
+    fn joined(out: &[Out], conn: ConnId) -> Option<(String, bool, usize)> {
+        sent_to(out, conn).iter().find_map(|m| match m {
+            ServerMsg::Joined { code, public, players, .. } => Some((code.clone(), *public, players.len())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn quick_play_makes_a_room_then_fills_it() {
+        let now = Instant::now();
+        let graph = DevAware { inner: MockAppView::default(), dev_mutuals: false };
+        let mut hub = Hub::new(true);
+        for (c, h) in [(1, "alice"), (2, "bob")] {
+            online(&mut hub, &graph, c, h, now);
+        }
+        // nobody's playing: a new public room on our map
+        let step = hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        let (code, public, n) = joined(&step.out, 1).expect("alice gets a room");
+        assert!(public && n == 1);
+        assert!(sent_to(&step.out, 1).iter().any(|m| matches!(m, ServerMsg::Joined { map, started: true, host: 0, .. } if *map == MAP)));
+        // the next player lands in it (strangers too: it's public)
+        let other = RoomMap { seed: 1, ..MAP };
+        let step = hub.handle(2, ClientMsg::QuickPlay { map: other }, now);
+        assert_eq!(joined(&step.out, 2), Some((code.clone(), true, 2)));
+        assert_eq!(hub.rooms.room_count(), 1);
+        // a hosted room is never matched
+        online(&mut hub, &graph, 3, "carol", now);
+        hub.handle(3, ClientMsg::Create { map: MAP, code: Some("HOST".into()) }, now);
+        online(&mut hub, &graph, 4, "dave", now);
+        let step = hub.handle(4, ClientMsg::QuickPlay { map: other }, now);
+        assert_eq!(joined(&step.out, 4), Some((code, true, 3)));
+    }
+
+    #[test]
+    fn quick_play_prefers_mutuals_and_skips_full_rooms() {
+        let now = Instant::now();
+        // real-looking DIDs, so the mock AppView decides: only me and friend are mutuals
+        let mut graph = MockAppView::default();
+        graph.mutual("did:plc:me", "did:plc:friend");
+        let mut hub = Hub::new(true);
+        let on = |hub: &mut Hub, conn: ConnId, h: &str| {
+            let step = hub.connect(conn, format!("did:plc:{h}"), h.into(), now);
+            settle(&mut hub.presence, &graph, step.jobs, now);
+        };
+        // a fuller room of strangers, and a room with our friend
+        let mut out = vec![];
+        on(&mut hub, 10, "s0");
+        let big = hub.rooms.create_room(10, MAP, Some("BIGG".into()), RoomKind::Public, now, &mut out).unwrap();
+        let mut c = 10;
+        for i in 1..5 {
+            c += 1;
+            on(&mut hub, c, &format!("s{i}"));
+            hub.handle(c, ClientMsg::Join { code: big.clone() }, now);
+        }
+        on(&mut hub, 2, "friend");
+        let small = hub.rooms.create_room(2, MAP, Some("SMAL".into()), RoomKind::Public, now, &mut out).unwrap();
+        on(&mut hub, 1, "me");
+        assert!(hub.presence.online_mutuals("did:plc:me", "did:plc:friend"));
+        let step = hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        assert_eq!(joined(&step.out, 1).map(|j| j.0), Some(small.clone()), "with the mutual");
+        // a stranger goes to the fuller one
+        on(&mut hub, 3, "stranger");
+        let step = hub.handle(3, ClientMsg::QuickPlay { map: MAP }, now);
+        assert_eq!(joined(&step.out, 3).map(|j| j.0), Some(big.clone()), "the fullest");
+        // fill the big one up: the next stranger goes to the small one
+        for i in 0..(MAX_PLAYERS - 6) {
+            c += 1;
+            on(&mut hub, c, &format!("t{i}"));
+            hub.handle(c, ClientMsg::Join { code: big.clone() }, now);
+        }
+        on(&mut hub, 4, "late");
+        let step = hub.handle(4, ClientMsg::QuickPlay { map: MAP }, now);
+        assert_eq!(joined(&step.out, 4).map(|j| j.0), Some(small), "never a full room");
+    }
+
+    #[test]
+    fn mutuals_hop_into_public_rooms_only() {
+        let now = Instant::now();
+        let (mut hub, _) = party(now);
+        // alice hosts TEST (bob's in it); carol may not hop into a hosted room
+        let step = hub.handle(3, ClientMsg::JoinFriend { did: "did:dev:bob".into() }, now);
+        assert_eq!(step.out, vec![Out { to: vec![3], msg: ServerMsg::JoinDeclined("did:dev:bob".into()) }]);
+        assert!(!mentions_code(&step.out, 3));
+        // bob goes quick-playing: carol sees him in a public room and hops in
+        let step = hub.handle(2, ClientMsg::QuickPlay { map: MAP }, now);
+        let (code, true, _) = joined(&step.out, 2).unwrap() else { panic!() };
+        assert!(sent_to(&step.out, 3).iter().any(|m| matches!(m, ServerMsg::FriendUpdate(f) if f.handle == "bob" && f.status == FriendStatus::InPublic)));
+        let step = hub.handle(3, ClientMsg::JoinFriend { did: "did:dev:bob".into() }, now);
+        assert_eq!(joined(&step.out, 3), Some((code.clone(), true, 2)));
+        // again from inside: nothing to do
+        let step = hub.handle(3, ClientMsg::JoinFriend { did: "did:dev:bob".into() }, now);
+        assert_eq!(step.out, vec![Out { to: vec![3], msg: ServerMsg::JoinDeclined("did:dev:bob".into()) }]);
+        // a friend in no room
+        hub.handle(2, ClientMsg::Leave, now);
+        let step = hub.handle(1, ClientMsg::JoinFriend { did: "did:dev:bob".into() }, now);
+        assert_eq!(step.out, vec![Out { to: vec![1], msg: ServerMsg::JoinDeclined("did:dev:bob".into()) }]);
+
+        // a stranger can't hop in, even into a public room
+        let strangers = DevAware { inner: MockAppView::default(), dev_mutuals: false };
+        let mut hub2 = Hub::new(true);
+        online(&mut hub2, &strangers, 1, "alice", now);
+        online(&mut hub2, &strangers, 4, "dave", now);
+        hub2.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        let step = hub2.handle(4, ClientMsg::JoinFriend { did: "did:dev:alice".into() }, now);
+        assert_eq!(step.out, vec![Out { to: vec![4], msg: ServerMsg::JoinDeclined("did:dev:alice".into()) }]);
+        assert!(hub2.rooms.room_of(4).is_none());
+    }
+
+    #[test]
+    fn full_public_rooms_show_full_and_turn_mutuals_away() {
+        let now = Instant::now();
+        let graph = DevAware { inner: MockAppView::default(), dev_mutuals: true };
+        let mut hub = Hub::new(true);
+        online(&mut hub, &graph, 1, "alice", now);
+        hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        for i in 1..MAX_PLAYERS as u64 {
+            online(&mut hub, &graph, 10 + i, &format!("p{i}"), now);
+            hub.handle(10 + i, ClientMsg::QuickPlay { map: MAP }, now);
+        }
+        assert_eq!(hub.rooms.room_count(), 1);
+        let out = online(&mut hub, &graph, 2, "bob", now);
+        let alice = sent_to(&out, 2)
+            .iter()
+            .find_map(|m| match m {
+                ServerMsg::Friends(l) => l.iter().find(|f| f.handle == "alice").cloned(),
+                ServerMsg::FriendUpdate(f) if f.handle == "alice" => Some(f.clone()),
+                _ => None,
+            })
+            .expect("bob sees alice");
+        assert_eq!(alice.status, FriendStatus::RoomFull);
+        let step = hub.handle(2, ClientMsg::JoinFriend { did: "did:dev:alice".into() }, now);
+        assert_eq!(step.out, vec![Out { to: vec![2], msg: ServerMsg::JoinDeclined("did:dev:alice".into()) }]);
+        // and quick play makes bob a new room
+        let step = hub.handle(2, ClientMsg::QuickPlay { map: MAP }, now);
+        assert_eq!(joined(&step.out, 2).map(|j| (j.1, j.2)), Some((true, 1)));
+        assert_eq!(hub.rooms.room_count(), 2);
+    }
+
+    #[test]
+    fn invites_from_a_public_room_bring_the_friend_in() {
+        let now = Instant::now();
+        let graph = DevAware { inner: MockAppView::default(), dev_mutuals: true };
+        let mut hub = Hub::new(true);
+        online(&mut hub, &graph, 1, "alice", now);
+        online(&mut hub, &graph, 2, "bob", now);
+        let step = hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        let (code, ..) = joined(&step.out, 1).unwrap();
+        let step = hub.handle(1, ClientMsg::Invite { to: "did:dev:bob".into(), map: MAP }, now);
+        assert!(sent_to(&step.out, 2).iter().any(|m| matches!(m, ServerMsg::Invited { code: c, .. } if *c == code)));
+        assert_eq!(hub.rooms.room_count(), 1, "no new room");
+        let step = hub.handle(2, ClientMsg::Join { code: code.clone() }, now);
+        assert_eq!(joined(&step.out, 2), Some((code, true, 2)));
     }
 
     #[test]

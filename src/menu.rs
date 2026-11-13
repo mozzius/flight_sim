@@ -88,6 +88,9 @@ pub enum UiAction {
     Menu,
     Retry,
     Multiplayer,
+    /// QUICK PLAY: matchmaking into a public room.
+    QuickPlay,
+    /// HOST GAME (the pickers for a new hosted room) and JOIN GAME (the code keypad).
     Create,
     Join,
     SignIn,
@@ -98,7 +101,7 @@ pub enum UiAction {
     Account,
     /// INVITE on a friends row (an index into `Net::friends`).
     Invite(u8),
-    /// JOIN on a friends row: ask to join their room.
+    /// JOIN on a friends row: into their public room, or ask their room's host.
     RequestJoin(u8),
     /// The card's JOIN / ACCEPT and ✕ (an invite, or a join request when we host).
     AcceptInvite,
@@ -146,9 +149,9 @@ enum Panel {
     Closed,
     /// The endless pickers.
     Endless,
-    /// CREATE / JOIN (or SIGN IN).
+    /// QUICK PLAY / HOST GAME / JOIN GAME (or SIGN IN).
     Multi,
-    /// The pickers, for a new room.
+    /// The pickers, for a new hosted room.
     Create,
     /// The code keypad.
     Join,
@@ -166,10 +169,10 @@ impl Panel {
 #[derive(Resource, Default)]
 struct JoinCode(String);
 
-// Focus orders and rows on the mode menu (the account corner button, if
-// any, is order 10 / row 9).
-const ORDER_PICKERS: u8 = 5;
-const ORDER_START: u8 = 11;
+// Focus orders and rows on the mode menu (the leaderboard and account corner
+// buttons are orders 9 and 10 on row 9; up / down go by row).
+const ORDER_PICKERS: u8 = 12;
+const ORDER_START: u8 = 16;
 const ROW_START: u8 = 7;
 const ORDER_SETTINGS: u8 = 50;
 const ROW_SETTINGS: u8 = 16;
@@ -368,9 +371,17 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     button(row, &font, "MULTIPLAYER", Screen::Modes, 2, 1, UiAction::Multiplayer);
                 });
                 root.spawn((MultiRow, Node { column_gap: px(14), ..default() })).with_children(|row| {
-                    row.spawn((SignedIn(true), Node { column_gap: px(14), ..default() })).with_children(|row| {
-                        button(row, &font, "CREATE", Screen::Modes, 3, 2, UiAction::Create);
-                        button(row, &font, "JOIN", Screen::Modes, 4, 2, UiAction::Join);
+                    let wrap = Node {
+                        column_gap: px(14),
+                        row_gap: px(10),
+                        flex_wrap: FlexWrap::Wrap,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    };
+                    row.spawn((SignedIn(true), wrap)).with_children(|row| {
+                        button(row, &font, "QUICK PLAY", Screen::Modes, 3, 2, UiAction::QuickPlay);
+                        button(row, &font, "HOST GAME", Screen::Modes, 4, 2, UiAction::Create);
+                        button(row, &font, "JOIN GAME", Screen::Modes, 5, 2, UiAction::Join);
                     });
                     row.spawn((SignedIn(false), Node::default())).with_children(|row| {
                         button(row, &font, "SIGN IN", Screen::Modes, 3, 2, UiAction::SignIn);
@@ -606,6 +617,7 @@ fn navigate(
         let row = if up { b.row.checked_sub(1) } else { Some(b.row + 1) };
         if let Some(i) = row.and_then(|r| {
             let mut rows: Vec<u8> = live.iter().map(|x| x.row).collect();
+            rows.sort();
             rows.dedup();
             // skip rows that aren't there
             let r = if up { rows.iter().rev().find(|x| **x <= r) } else { rows.iter().find(|x| **x >= r) }?;
@@ -705,6 +717,7 @@ fn handle_pressed(
             UiAction::Multiplayer => {
                 *panel = if panel.multiplayer() { Panel::Closed } else { Panel::Multi };
             }
+            UiAction::QuickPlay => net.quick_play(),
             UiAction::Create => {
                 *panel = if *panel == Panel::Create { Panel::Multi } else { Panel::Create };
                 if *panel == Panel::Create {
@@ -753,7 +766,7 @@ fn handle_pressed(
             }
             UiAction::RequestJoin(i) => {
                 if let Some(did) = net.friends().get(i as usize).map(|f| f.did.clone()) {
-                    net.request_join(&did, time.elapsed_secs_f64());
+                    net.press_join(&did, time.elapsed_secs_f64());
                 }
             }
             // (a join request for our room comes first: it's what the card shows)

@@ -16,9 +16,14 @@
 //! the server keeps us up to date on which Bluesky mutuals are online
 //! ([`Net::friends`]); INVITE asks one to our room (made on the fly if we're
 //! not in one), and an invite to theirs waits in [`Net::pending_invite`]
-//! (the card in `friends`). JOIN on a friend who's in a room asks that
-//! room's host ([`Net::request_join`]); a host's incoming requests wait in
-//! [`Net::pending_request`] (the same card, ACCEPT / X).
+//! (the card in `friends`). JOIN on a friend who's in a hosted room asks
+//! that room's host ([`Net::request_join`]); a host's incoming requests wait
+//! in [`Net::pending_request`] (the same card, ACCEPT / X). JOIN on a friend
+//! in a public room hops straight in ([`Net::join_friend`]).
+//!
+//! QUICK PLAY ([`Net::quick_play`]): the server finds a public room (or
+//! makes one on the random map we send), which is flying from the start:
+//! no lobby, no host, no code shown.
 //!
 //! The challenge leaderboard rides the same connection: `crate::leaderboard`
 //! calls [`Net::challenge_start`], [`Net::submit_score`] and
@@ -29,7 +34,7 @@
 //! host starts it, baking the map meanwhile (`loading::Prebake`); joiners
 //! wait there too, and once it's started they go straight to the game.
 //!
-//! Dev: `FLIGHT_SIM_MP=create[:CODE]|join:CODE` connects straight from the
+//! Dev: `FLIGHT_SIM_MP=quick|create[:CODE]|join:CODE` connects straight from the
 //! menu (natively with `FLIGHT_SIM_DEV_USER`; requested codes need a dev
 //! server); `FLIGHT_SIM_DEV_INVITE=<handle>` and
 //! `FLIGHT_SIM_DEV_ACCEPT_INVITES=1`, `FLIGHT_SIM_DEV_START=<n>`,
@@ -134,6 +139,7 @@ enum Phase {
 enum Intent {
     Create(RoomMap, Option<String>),
     Join(String),
+    QuickPlay(RoomMap),
 }
 
 /// An invite to a friend's room, waiting for JOIN or ✕.
@@ -213,6 +219,8 @@ pub struct Net {
     host: Option<PlayerId>,
     /// Flying (else the lobby).
     started: bool,
+    /// A quick-play room (no host, no code shown).
+    public: bool,
     room_map: Option<RoomMap>,
     /// Joined a room that's in the lobby: to the menu.
     to_lobby: bool,
@@ -306,13 +314,23 @@ impl Net {
         self.start(Intent::Join(normalize_code(code)));
     }
 
+    /// QUICK PLAY: a public room with a seat, or a new one on a random map.
+    pub fn quick_play(&mut self) {
+        self.start(Intent::QuickPlay(new_map(Picks::from_settings())));
+    }
+
     /// The menu's status word: what went wrong, or that we're on our way.
     pub fn label(&self) -> Option<&'static str> {
         if self.intent.is_some() || self.awaiting { Some("CONNECTING") } else { self.label }
     }
 
+    /// The room's code (public rooms don't show theirs).
     pub fn room_code(&self) -> Option<&str> {
-        self.code.as_deref().filter(|_| self.in_room)
+        self.code.as_deref().filter(|_| self.in_room && !self.public)
+    }
+
+    pub fn in_room(&self) -> bool {
+        self.in_room
     }
 
     /// In a room that hasn't started: its map (being baked meanwhile).
@@ -359,7 +377,28 @@ impl Net {
         }
     }
 
-    /// JOIN on a friend who's in a room: asks its host to let us in.
+    /// JOIN on a friends row: straight into a public room, or a request to
+    /// a hosted room's host.
+    pub fn press_join(&mut self, did: &str, now: f64) {
+        match self.friends.iter().find(|f| f.did == did).map(|f| f.status) {
+            Some(FriendStatus::InPublic) => self.join_friend(did),
+            Some(FriendStatus::InRoom) => self.request_join(did, now),
+            _ => {}
+        }
+    }
+
+    /// JOIN on a friend in a public room: the server puts us in if there's a seat.
+    pub fn join_friend(&mut self, did: &str) {
+        if self.phase != Phase::Online || self.awaiting {
+            return;
+        }
+        info!("multiplayer: joining {did}'s game");
+        self.label = None;
+        self.awaiting = true;
+        self.send(&ClientMsg::JoinFriend { did: did.to_string() });
+    }
+
+    /// JOIN on a friend who's in a hosted room: asks its host to let us in.
     pub fn request_join(&mut self, did: &str, now: f64) {
         if self.phase != Phase::Online || self.request_sent(did, now) {
             return;
@@ -516,6 +555,7 @@ impl Net {
         match intent {
             Intent::Create(map, code) => self.send(&ClientMsg::Create { map, code }),
             Intent::Join(code) => self.send(&ClientMsg::Join { code }),
+            Intent::QuickPlay(map) => self.send(&ClientMsg::QuickPlay { map }),
         }
     }
 
@@ -557,6 +597,7 @@ impl Net {
         self.me = None;
         self.host = None;
         self.started = false;
+        self.public = false;
         self.room_map = None;
         self.to_lobby = false;
         self.death = None;
@@ -617,8 +658,9 @@ impl Net {
                 self.lost |= self.in_room;
                 self.clear_room();
             }
-            ServerMsg::Joined { code, map, you, players, host, started } => {
-                info!("multiplayer: room {code}, player {you}, {} here{}", players.len(), if started { "" } else { " (lobby)" });
+            ServerMsg::Joined { code, map, you, players, host, started, public } => {
+                let kind = if public { " (public)" } else if started { "" } else { " (lobby)" };
+                info!("multiplayer: room {code}, player {you}, {} here{kind}", players.len());
                 self.clear_room();
                 self.awaiting = false;
                 self.in_room = true;
@@ -626,6 +668,7 @@ impl Net {
                 self.me = Some(you);
                 self.host = Some(host);
                 self.started = started;
+                self.public = public;
                 self.room_map = Some(map);
                 ME.store(you, Ordering::Relaxed);
                 self.peers = players.into_iter().filter(|p| p.id != you).map(|p| (p.id, Peer::new(p.did, p.handle))).collect();
@@ -683,6 +726,7 @@ impl Net {
             ServerMsg::JoinDeclined(did) => {
                 info!("multiplayer: join request to {did} declined");
                 self.requested.remove(&did);
+                self.awaiting = false;
                 self.label = Some("DECLINED");
                 self.friends_version += 1;
             }
@@ -758,15 +802,17 @@ pub fn spawn_point() -> (Vec3, Vec3) {
 pub enum DevAuto {
     Create(Option<String>),
     Join(String),
+    Quick,
 }
 
-/// `FLIGHT_SIM_MP=create[:CODE]|join:CODE`.
+/// `FLIGHT_SIM_MP=quick|create[:CODE]|join:CODE`.
 pub fn dev_auto() -> Option<DevAuto> {
     let s = crate::environment::setting("FLIGHT_SIM_MP")?;
     let (verb, code) = s.split_once(':').map_or((s.as_str(), None), |(v, c)| (v, Some(c.to_string())));
     match verb.to_ascii_lowercase().as_str() {
         "create" => Some(DevAuto::Create(code)),
         "join" => code.map(DevAuto::Join),
+        "quick" => Some(DevAuto::Quick),
         _ => {
             warn!("unknown FLIGHT_SIM_MP {s:?}");
             None
@@ -781,6 +827,7 @@ fn dev_auto_start(mut net: ResMut<Net>, mut done: Local<bool>) {
     match dev_auto() {
         Some(DevAuto::Create(code)) => net.start(Intent::Create(new_map(Picks::from_settings()), code)),
         Some(DevAuto::Join(code)) => net.join(&code),
+        Some(DevAuto::Quick) => net.quick_play(),
         None => {}
     }
 }
@@ -893,8 +940,9 @@ fn pump(
 /// Dev: `FLIGHT_SIM_DEV_INVITE=<handle>` invites that friend once they're
 /// online; `FLIGHT_SIM_DEV_ACCEPT_INVITES=1` joins any invite after 2 s;
 /// `FLIGHT_SIM_DEV_START=<n>` (a host) starts the room 3 s after `n` players
-/// are in its lobby; `FLIGHT_SIM_DEV_REQUEST=<handle>` asks to join that
-/// friend's room 4 s after they're seen in one; `FLIGHT_SIM_DEV_ACCEPT_REQUESTS=1`
+/// are in its lobby; `FLIGHT_SIM_DEV_REQUEST=<handle>` presses JOIN on that
+/// friend 4 s after they're seen in a room (a join request to a hosted room's
+/// host, or straight into a public one); `FLIGHT_SIM_DEV_ACCEPT_REQUESTS=1`
 /// lets in any join request after 2 s.
 fn dev_hooks(net: &mut Net, now: f64) {
     use crate::environment::setting;
@@ -912,12 +960,16 @@ fn dev_hooks(net: &mut Net, now: f64) {
     if !net.dev_requested
         && let Some(handle) = setting("FLIGHT_SIM_DEV_REQUEST")
     {
-        let friend = net.friends.iter().find(|f| f.handle == handle && f.status == FriendStatus::InRoom).map(|f| f.did.clone());
+        let friend = net
+            .friends
+            .iter()
+            .find(|f| f.handle == handle && matches!(f.status, FriendStatus::InRoom | FriendStatus::InPublic))
+            .map(|f| f.did.clone());
         match friend {
             Some(did) if !net.in_my_room(&did) => {
                 if now - *net.dev_since.get_or_insert(now) > 4.0 {
                     net.dev_requested = true;
-                    net.request_join(&did, now);
+                    net.press_join(&did, now);
                 }
             }
             _ => net.dev_since = None,

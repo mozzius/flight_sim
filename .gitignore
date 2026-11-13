@@ -18,3 +18,4 @@ target/
 # local claude worktrees and settings
 .claude/
 /dist
+/flight_sim.db*

@@ -233,7 +233,7 @@ fn update_menu(
         .unwrap_or(0.0);
     let room = net.room_code();
     if let Ok((mut text, mut node)) = board.single_mut() {
-        node.display = if room.is_some() { Display::Flex } else { Display::None };
+        node.display = if net.in_room() { Display::Flex } else { Display::None };
         text.0 = net
             .scoreboard()
             .iter()
@@ -243,6 +243,11 @@ fn update_menu(
     }
     if let (Ok(mut text), Some(room)) = (stats.single_mut(), room) {
         text.0 = format!("ROOM {room}      {fps:.0} fps");
+        return;
+    }
+    // (a public room: no code to show)
+    if let (Ok(mut text), true) = (stats.single_mut(), net.in_room()) {
+        text.0 = format!("{fps:.0} fps");
         return;
     }
     if let Ok(mut text) = stats.single_mut() {

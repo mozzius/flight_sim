@@ -4,8 +4,8 @@
 //!   the MULTIPLAYER menu, the lobby and the multiplayer pause menu, rebuilt
 //!   whenever the list changes; a dash when nobody's online. The button is
 //!   INVITE (to our room, made on the fly if need be), or JOIN for a friend
-//!   who's in another room (a request to its host); none for a full room or
-//!   our own.
+//!   who's in another room (straight in for a public room, a request to the
+//!   host for a hosted one); none for a full room or our own.
 //! - The card: bottom centre, wherever we are (menus, single player,
 //!   multiplayer), `@handle` with JOIN and X for an invite, or ACCEPT and X
 //!   for someone asking to join the room we host (that comes first); gone
@@ -117,6 +117,7 @@ fn dot_color(status: FriendStatus) -> Color {
         FriendStatus::Online => Color::srgb(0.4, 1.0, 0.55),
         FriendStatus::InRoom => Color::srgb(1.0, 0.75, 0.3),
         FriendStatus::RoomFull => Color::srgb(0.55, 0.55, 0.55),
+        FriendStatus::InPublic => Color::srgb(0.35, 0.75, 1.0),
     }
 }
 
@@ -133,7 +134,7 @@ fn sync_lists(
         if list.screen == Screen::Pause
             && let Ok(mut node) = nodes.get_mut(parent.parent())
         {
-            let d = if net.room_code().is_some() { Display::Flex } else { Display::None };
+            let d = if net.in_room() { Display::Flex } else { Display::None };
             if node.display != d {
                 node.display = d;
             }
@@ -155,7 +156,7 @@ fn sync_lists(
                         BackgroundColor(dot_color(f.status)),
                     ));
                     r.spawn((Text::new(format!("@{}", f.handle)), font_of(font, 15.0, GREEN), Node { min_width: px(220), ..default() }));
-                    let join = f.status == FriendStatus::InRoom;
+                    let join = matches!(f.status, FriendStatus::InRoom | FriendStatus::InPublic);
                     if f.status == FriendStatus::RoomFull || net.in_my_room(&f.did) {
                         // (nothing to do: keep the column lined up)
                         r.spawn(Node { min_width: px(96), ..default() });
