@@ -2,6 +2,8 @@
 //!
 //! `FLIGHT_SIM_SCREENSHOT=out.png cargo run` saves a screenshot after a few
 //! seconds and exits. `FLIGHT_SIM_SCREENSHOT_AFTER=<secs>` changes the delay.
+//! `FLIGHT_SIM_SCREENSHOT_BURST=<count>,<secs>` saves `count` frames `secs`
+//! apart instead (`out_00.png`, `out_01.png`, ...), for catching flicker.
 //! `FLIGHT_SIM_DIE_AT=<secs>` shoots the player down that many (real) seconds in.
 
 use bevy::{
@@ -27,6 +29,19 @@ struct AutoScreenshot {
     path: String,
     after: f32,
     taken_at: Option<f32>,
+    /// (shots left after the current one, seconds between shots)
+    burst: Option<(u32, f32)>,
+    index: u32,
+}
+
+impl AutoScreenshot {
+    fn current_path(&self) -> String {
+        if self.burst.is_none() && self.index == 0 {
+            return self.path.clone();
+        }
+        let (stem, ext) = self.path.rsplit_once('.').unwrap_or((&self.path, "png"));
+        format!("{stem}_{:02}.{ext}", self.index)
+    }
 }
 
 impl Plugin for DevPlugin {
@@ -76,6 +91,11 @@ impl Plugin for DevPlugin {
                 path,
                 after,
                 taken_at: None,
+                burst: std::env::var("FLIGHT_SIM_SCREENSHOT_BURST").ok().and_then(|s| {
+                    let (n, dt) = s.split_once(',')?;
+                    Some((n.trim().parse::<u32>().ok()?.saturating_sub(1), dt.trim().parse().ok()?))
+                }),
+                index: 0,
             })
             .add_systems(Update, auto_screenshot);
         }
@@ -97,17 +117,29 @@ fn auto_screenshot(
                 Some(t) => Screenshot::image(t.0.clone()),
                 None => Screenshot::primary_window(),
             };
+            let path = state.current_path();
             // (a stale file would end the wait below early)
-            let _ = std::fs::remove_file(&state.path);
-            commands
-                .spawn(screenshot)
-                .observe(save_to_disk(state.path.clone()));
+            let _ = std::fs::remove_file(&path);
+            commands.spawn(screenshot).observe(save_to_disk(path));
             state.taken_at = Some(now);
         }
-        // wait for the capture to be written before quitting (it can take a while
-        // when the machine is busy), giving up after 20 s
-        Some(t) if (now - t > 1.0 && std::path::Path::new(&state.path).exists()) || now - t > 20.0 => {
-            exit.write(AppExit::Success);
+        Some(t) => {
+            if let Some((left, dt)) = state.burst
+                && left > 0
+            {
+                if now - t >= dt {
+                    state.burst = Some((left - 1, dt));
+                    state.index += 1;
+                    state.taken_at = None;
+                    state.after = now;
+                }
+                return;
+            }
+            // wait for the capture to be written before quitting (it can take a
+            // while when the machine is busy), giving up after 20 s
+            if (now - t > 1.0 && std::path::Path::new(&state.current_path()).exists()) || now - t > 20.0 {
+                exit.write(AppExit::Success);
+            }
         }
         _ => {}
     }
