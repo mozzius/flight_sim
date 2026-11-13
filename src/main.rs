@@ -1,3 +1,6 @@
+// release builds on Windows: no console window behind the game
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use bevy::prelude::*;
 use bevy_transform_interpolation::prelude::*;
 

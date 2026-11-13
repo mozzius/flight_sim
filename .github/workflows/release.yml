@@ -1,0 +1,94 @@
+name: release
+
+# push a tag like v0.2.0 to build and publish, or run by hand (builds only, no release)
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: build (universal)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+      - name: bundle .app
+        run: |
+          APP="Flight Sim.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          lipo -create -output "$APP/Contents/MacOS/flight_sim" \
+            target/aarch64-apple-darwin/release/flight_sim \
+            target/x86_64-apple-darwin/release/flight_sim
+          # bevy looks for assets next to the executable
+          cp -R assets "$APP/Contents/MacOS/assets"
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > "$APP/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Flight Sim</string>
+            <key>CFBundleDisplayName</key><string>Flight Sim</string>
+            <key>CFBundleIdentifier</key><string>dev.mozzius.flightsim</string>
+            <key>CFBundleExecutable</key><string>flight_sim</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          EOF
+          # ad-hoc sign so Apple Silicon will run it (not notarised)
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" flight-sim-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: flight-sim-macos.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release
+      - name: package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "Flight Sim" | Out-Null
+          Copy-Item target/release/flight_sim.exe "Flight Sim/Flight Sim.exe"
+          Copy-Item -Recurse assets "Flight Sim/assets"
+          Compress-Archive -Path "Flight Sim" -DestinationPath flight-sim-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: flight-sim-windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            flight-sim-macos.zip
+            flight-sim-windows.zip
+          generate_release_notes: true

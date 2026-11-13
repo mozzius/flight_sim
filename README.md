@@ -81,6 +81,10 @@ the farmland fields in `src/terrain_gen/fields.rs` (the terrain shader redraws t
 (shader `assets/shaders/water.wesl`).
 Screenshot runs are headless (no window) and silent.
 
+## Desktop builds
+
+Pushing a `v*` tag builds a universal macOS .app and a Windows .exe in GitHub Actions (`.github/workflows/release.yml`) and attaches them to a GitHub release. The macOS app is ad-hoc signed but not notarised, so the first launch needs right-click → Open (or `xattr -dr com.apple.quarantine "Flight Sim.app"`).
+
 ## Web build
 
 Live at <https://flight.mozzius.dev> (needs a WebGPU browser). Build and deploy:
