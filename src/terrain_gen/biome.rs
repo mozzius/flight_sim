@@ -280,8 +280,8 @@ fn archipelago() -> BiomeParams {
             level: 0.0,
             sea: true,
             frozen: false,
-            beach: 4.5,
-            sand: srgb(0.80, 0.74, 0.58),
+            beach: 6.0,
+            sand: srgb(0.86, 0.79, 0.62),
             shallow: srgb(0.18, 0.62, 0.60),
             deep: srgb(0.02, 0.15, 0.30),
             depth_scale: 26.0,
@@ -357,9 +357,11 @@ pub(super) fn cover(b: &BiomeParams, h: f32, normal: Vec3, ridge: f32, jitter: f
         dry = smoothstep(w.beach * 0.6, w.beach + 3.0, above);
         sand = smoothstep(w.beach + 1.0, w.beach - 1.0, above) * smoothstep(0.80, 0.93, flatness);
         sand = sand.max(smoothstep(0.5, -0.5, above));
-        // sea cliffs: bare rock on the steep coasts
         if w.sea {
+            // sea cliffs: bare rock on the steep coasts
             coast = smoothstep(120.0, 20.0, above);
+            // dune grass behind the beaches before the woods start
+            dry = smoothstep(w.beach + 2.0, w.beach + 12.0, above);
         }
         forest *= dry;
     }

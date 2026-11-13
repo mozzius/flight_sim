@@ -29,7 +29,7 @@
 //! terrain shader. Farmland adds fields on flat low ground (`fields`). Each biome has a water
 //! level (`water`): lakes in the deepest basins, or for the archipelago a sea over about half
 //! the map (`sample_terrain` drops the ground by `sea_shift`, varies the relief by region and
-//! eases the slope at the waterline into beaches).
+//! reshapes the coast with `coast_profile`: shelves, beaches and coastal flats, or sea cliffs).
 //!
 //! Debug: `TERRAIN_DEBUG_CAM=<n>` overrides the `Camera3d` transform with one of a few fixed
 //! viewpoints (or `x,y,z,tx,ty,tz`) for looking at the terrain.
@@ -673,14 +673,14 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
     let mut height = (eroded - SEA_LEVEL) * WORLD_SCALE * VERTICAL_SCALE * b.relief;
 
     // Islands: drop about half the map under the sea, vary the relief from region to region
-    // (tall peaks in some places, low sandy islands and lagoons in others), and ease the
-    // slope at the waterline into shelves and beaches (monotonic: 1 - 0.7 e^-x²).
+    // (tall peaks in some places, low sandy islands and lagoons in others), then reshape the
+    // coast (`coast_profile`).
     if b.sea_shift > 0.0 {
         let region = noised(p * 1.4, terrain_seed() ^ 0x05EA).x;
         let relief = lerp(0.3, 1.0, smoothstep(-0.4, 0.4, region));
         height = (height - b.sea_shift) * relief;
-        let x = height / 30.0;
-        height *= 1.0 - 0.7 * (-x * x).exp();
+        let kind = noised(p * 5.0, terrain_seed() ^ 0xC0A5).x;
+        height = coast_profile(height, smoothstep(-0.42, -0.2, kind));
     }
 
     // Squash the deepest basins into broad, nearly flat floors that bottom out just below 0
@@ -700,6 +700,19 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
         height,
         ridge_map: e.ridge_map,
     }
+}
+
+/// Reshapes the height `s` around sea level (archipelago). `beachy` is the coast type: at 1
+/// the slope eases to almost flat across the waterline (`s - (1 - m) w tanh(s / w)`, slope
+/// `m` at the waterline and 1 far from it), so the band either side of the coast spreads out
+/// into shallow shelves and lagoons below and wide beaches and coastal flats above, with the
+/// hills set back inland; at 0 the slope steepens instead (m > 1) into sea cliffs. Monotonic
+/// and smooth, and it keeps the waterline where it was (so the sea covers about as much).
+fn coast_profile(s: f32, beachy: f32) -> f32 {
+    let m = lerp(2.6, 0.05, beachy);
+    // (the shelf below reaches further out than the flats above)
+    let w = if s < 0.0 { lerp(55.0, 220.0, beachy) } else { lerp(45.0, 280.0, beachy) };
+    s - (1.0 - m) * w * (s / w).tanh()
 }
 
 /// Erosion octave count used at a world position (fewer far away, where the mesh is coarse).
@@ -779,8 +792,15 @@ fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&f
     let rock_col = b.rock.lerp(b.dark_rock, crease * 0.8 + jitter.max(0.0) * 0.2);
     c = c.lerp(rock_col, cover.rock);
     if let Some(w) = &b.water {
-        // wet and darker at the waterline and below it
-        let wet = smoothstep(w.level + 0.8, w.level - 1.5, h);
+        let above = h - w.level;
+        if w.sea {
+            // pale, sandy dune grass between the beach and the woods
+            let dune = smoothstep(w.beach - 2.0, w.beach + 1.0, above) * smoothstep(w.beach + 14.0, w.beach + 4.0, above);
+            let dune_col = w.sand.lerp(b.dry_meadow, 0.55 + 0.25 * jitter.clamp(-1.0, 1.0));
+            c = c.lerp(dune_col, dune * (1.0 - cover.forest) * smoothstep(0.85, 0.95, normal.y));
+        }
+        // wet and darker at the waterline and below it (a wider wet band on the sea's beaches)
+        let wet = if w.sea { smoothstep(1.6, -0.3, above) } else { smoothstep(0.8, -1.5, above) };
         c = c.lerp(w.sand * (1.0 - 0.4 * wet), cover.sand);
     }
     c.lerp(b.snow, cover.snow)
