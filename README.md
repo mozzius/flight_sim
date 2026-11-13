@@ -41,6 +41,10 @@ crosshair, right stick look around.
 Guns: put the boresight cross on the red lead pipper; it turns white with
 SHOOT when you have a firing solution.
 
+Flares: you carry four, regaining one every 8 s. Each press drops a pair, and
+holding the button keeps them coming. AI pilots sometimes lose their nerve
+when you sit locked on their tail and waste theirs before you've fired.
+
 Every round flies a freshly generated map (mountains, roads and forests) in one of four
 biomes (alpine valleys; winter tundra with a low snow line, sparse snowy conifers and
 frozen lakes; gentle farmland with a patchwork of fields and hedgerows on the valley

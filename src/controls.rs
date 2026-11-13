@@ -66,6 +66,8 @@ pub struct PlayerActions {
     pub firing_gun: bool,
     pub fire_missile: bool,
     pub drop_flares: bool,
+    /// The flare button is held: keep dropping pairs until it's released.
+    pub holding_flares: bool,
     pub next_target: bool,
     pub previous_target: bool,
     /// Select the hostile closest to the crosshair.
@@ -196,6 +198,7 @@ fn gather_actions(
         || (mouse_mode && mouse.just_pressed(MouseButton::Right))
         || pad_just(GamepadButton::East);
     actions.drop_flares |= keys.just_pressed(KeyCode::KeyX) || pad_just(GamepadButton::West);
+    actions.holding_flares = keys.pressed(KeyCode::KeyX) || pad_pressed(GamepadButton::West);
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     actions.next_target |= (keys.just_pressed(KeyCode::Tab) && !shift)
         || pad_just(GamepadButton::DPadRight);

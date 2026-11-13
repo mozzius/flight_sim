@@ -199,6 +199,7 @@ fn read_touches(
     input.afterburner = false;
     input.airbrake = false;
     let mut firing = false;
+    let mut flaring = false;
     let fingers: Vec<(u64, Role)> = input.fingers.iter().map(|(k, v)| (*k, *v)).collect();
     for (id, role) in fingers {
         let Some(t) = touches.get_pressed(id) else {
@@ -206,6 +207,7 @@ fn read_touches(
         };
         match role {
             Role::Gun => firing = true,
+            Role::Flare => flaring = true,
             Role::Pan => input.pan += t.delta(),
             Role::Throttle => {
                 let (lever, ab, brake) = layout.throttle_at(t.position().y);
@@ -218,6 +220,7 @@ fn read_touches(
     }
     if controls_live {
         actions.firing_gun |= firing;
+        actions.holding_flares |= flaring;
     }
 }
 

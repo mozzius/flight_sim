@@ -584,8 +584,8 @@ fn update_readouts(
                     String::new()
                 };
                 format!(
-                    "GUN {:>3}   MSL {}{reload}   FLR {}",
-                    w.gun_ammo, w.missiles, w.flares
+                    "GUN {:>3}   MSL {}{reload}   FLR {}/{}",
+                    w.gun_ammo, w.missiles, w.flares, crate::weapons::MAX_FLARES
                 )
             }
             (Readout::Health, Some((_, _, _, h, _))) => {

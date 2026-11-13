@@ -46,10 +46,16 @@ const MISSILE_DAMAGE: f32 = 95.0;
 const SEEKER_GIMBAL: f32 = 0.87; // ~50 degrees
 
 pub const MAX_MISSILES: u32 = 6;
-const MAX_FLARES: u32 = 40;
-/// Seconds to regenerate one missile / one flare salvo's worth.
+/// A jet only carries a few flares, so wasting them early costs you later.
+pub const MAX_FLARES: u32 = 4;
+/// Flares per salvo (one press, or every [`FLARE_INTERVAL`] while held).
+pub const FLARE_SALVO: u32 = 2;
+/// Seconds between salvos while the flare button is held.
+const FLARE_INTERVAL: f32 = 0.4;
+/// Seconds to regenerate one missile.
 pub const MISSILE_RELOAD_TIME: f32 = 12.0;
-const FLARE_RELOAD_TIME: f32 = 2.5;
+/// Seconds to regenerate one flare (while below [`MAX_FLARES`]).
+pub const FLARE_RELOAD_TIME: f32 = 8.0;
 pub const MAX_GUN_AMMO: u32 = 600;
 /// Tracer rounds regained per second while the trigger is released.
 const GUN_RELOAD_RATE: f32 = 30.0;
@@ -96,7 +102,8 @@ pub struct Weapons {
     pub flares: u32,
     /// Progress (0..1) toward the next missile being reloaded.
     pub missile_reload: f32,
-    flare_reload: f32,
+    /// Progress (0..1) toward the next flare being reloaded.
+    pub flare_reload: f32,
     gun_reload: f32,
     gun_idle: f32,
     gun_cooldown: f32,
@@ -127,6 +134,26 @@ impl Weapons {
             trigger_gun: false,
             fire_missile: false,
             drop_flares: false,
+        }
+    }
+
+    /// Back to a full load of flares (a cleared challenge wave).
+    pub fn refill_flares(&mut self) {
+        self.flares = MAX_FLARES;
+        self.flare_reload = 0.0;
+    }
+
+    /// One flare every [`FLARE_RELOAD_TIME`] while below [`MAX_FLARES`].
+    fn regen_flares(&mut self, dt: f32) {
+        if self.flares < MAX_FLARES {
+            self.flare_reload += dt / FLARE_RELOAD_TIME;
+            if self.flare_reload >= 1.0 {
+                self.flare_reload -= 1.0;
+                self.flares += 1;
+            }
+        }
+        if self.flares >= MAX_FLARES {
+            self.flare_reload = 0.0;
         }
     }
 }
@@ -258,7 +285,8 @@ fn player_weapon_intents(
     };
     weapons.trigger_gun = actions.firing_gun;
     weapons.fire_missile = std::mem::take(&mut actions.fire_missile);
-    weapons.drop_flares = std::mem::take(&mut actions.drop_flares);
+    // a tap drops one salvo; holding the button keeps them coming
+    weapons.drop_flares = std::mem::take(&mut actions.drop_flares) || actions.holding_flares;
     let next = std::mem::take(&mut actions.next_target);
     let previous = std::mem::take(&mut actions.previous_target);
     let under_crosshair = std::mem::take(&mut actions.target_under_crosshair);
@@ -370,13 +398,7 @@ fn fire_weapons(
         } else {
             weapons.missile_reload = 0.0;
         }
-        if weapons.flares < MAX_FLARES {
-            weapons.flare_reload += dt / FLARE_RELOAD_TIME;
-            if weapons.flare_reload >= 1.0 {
-                weapons.flare_reload = 0.0;
-                weapons.flares += 1;
-            }
-        }
+        weapons.regen_flares(dt);
         // the gun reloads once you let go of the trigger for a moment
         if weapons.trigger_gun {
             weapons.gun_idle = 0.0;
@@ -473,15 +495,15 @@ fn fire_weapons(
             && weapons.flares > 0
             && weapons.flare_cooldown <= 0.0
         {
-            weapons.flare_cooldown = 0.6;
+            weapons.flare_cooldown = FLARE_INTERVAL;
             let mut decoy = None;
-            for i in 0..4 {
+            for i in 0..FLARE_SALVO {
                 if weapons.flares == 0 {
                     break;
                 }
                 weapons.flares -= 1;
                 let kick = transform.rotation
-                    * Vec3::new(if i % 2 == 0 { 25.0 } else { -25.0 }, -15.0, 10.0 + i as f32 * 8.0);
+                    * Vec3::new(if i % 2 == 0 { 25.0 } else { -25.0 }, -15.0, 10.0 + i as f32 * 16.0);
                 let flare = commands
                     .spawn((
                         Flare {
@@ -841,6 +863,38 @@ mod tests {
     fn hit_rate(evasion: Evasion, up: bool) -> (usize, Vec<f32>) {
         let misses: Vec<f32> = SHOTS.iter().map(|(r, a)| engage(*r, *a, evasion, up)).collect();
         (misses.iter().filter(|m| **m < MISSILE_FUSE).count(), misses)
+    }
+
+    #[test]
+    fn flares_regenerate_one_at_a_time_up_to_the_cap() {
+        let mut w = Weapons::fighter();
+        assert_eq!(w.flares, MAX_FLARES);
+        w.flares = 0;
+        let dt = 1.0 / 60.0;
+        let mut t = 0.0;
+        let mut first = None;
+        while w.flares < MAX_FLARES {
+            let before = w.flares;
+            w.regen_flares(dt);
+            t += dt;
+            if before == 0 && w.flares == 1 {
+                first = Some(t);
+            }
+            assert!(t < 100.0);
+        }
+        let first = first.unwrap();
+        assert!((first - FLARE_RELOAD_TIME).abs() < 0.05, "first flare after {first}s");
+        assert!((t - FLARE_RELOAD_TIME * MAX_FLARES as f32).abs() < 0.1, "full after {t}s");
+        // and it stops at the cap with no banked progress
+        for _ in 0..600 {
+            w.regen_flares(dt);
+        }
+        assert_eq!(w.flares, MAX_FLARES);
+        assert_eq!(w.flare_reload, 0.0);
+        w.flares = 1;
+        w.flare_reload = 0.5;
+        w.refill_flares();
+        assert_eq!((w.flares, w.flare_reload), (MAX_FLARES, 0.0));
     }
 
     #[test]

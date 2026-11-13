@@ -409,7 +409,7 @@ pub fn wave_system(
     mode: Res<GameMode>,
     mut score: ResMut<Score>,
     reds: Query<&Team, Without<Disabled>>,
-    mut player: Query<(&Transform, &mut Health), (With<Player>, Without<Disabled>)>,
+    mut player: Query<(&Transform, &mut Health, &mut Weapons), (With<Player>, Without<Disabled>)>,
     mut cooldown: Local<f32>,
     mut cleared: Local<bool>,
     time: Res<Time>,
@@ -421,9 +421,10 @@ pub fn wave_system(
     }
     // a challenge wave cleared (alive): bonus points, and patched up for the next
     if !*cleared && score.wave > 0 && *mode == GameMode::Challenge {
-        if let Ok((_, mut health)) = player.single_mut() {
+        if let Ok((_, mut health, mut weapons)) = player.single_mut() {
             score.points += WAVE_POINTS * score.wave;
             health.current = health.max;
+            weapons.refill_flares();
         }
         *cleared = true;
     }
@@ -431,7 +432,7 @@ pub fn wave_system(
     if *cooldown > 0.0 {
         return;
     }
-    let Ok((t, _)) = player.single() else {
+    let Ok((t, ..)) = player.single() else {
         return;
     };
     spawn_enemy_wave(&mut commands, &models, &terrain, *mode, &mut score, t.translation, t.forward().as_vec3());
