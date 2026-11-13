@@ -3,9 +3,10 @@
 //! and exposes `window.flightSimAuth`; this reads them live, so the menu
 //! follows a sign-in or sign-out without a restart.
 //!
-//! Natively there's no sign-in: `FLIGHT_SIM_DEV_USER=<handle>` plays as a dev
-//! user whose token is `dev:<handle>` (which the server accepts only with
-//! `FLIGHT_SIM_DEV_AUTH=1`, see `atproto`).
+//! Natively it's the same atproto OAuth from Rust (`crate::oauth`), started
+//! from the in-game prompt (`crate::signin`). `FLIGHT_SIM_DEV_USER=<handle>`
+//! plays as a dev user instead, whose token is `dev:<handle>` (which the
+//! server accepts only with `FLIGHT_SIM_DEV_AUTH=1`, see `atproto`).
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -67,7 +68,10 @@ pub fn current_user() -> Option<User> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        dev_handle().map(|h| User { did: format!("did:dev:{h}"), handle: h, display_name: None, avatar: None })
+        if let Some(h) = dev_handle() {
+            return Some(User { did: format!("did:dev:{h}"), handle: h, display_name: None, avatar: None });
+        }
+        crate::oauth::user().map(|s| User { did: s.did, handle: s.handle, display_name: s.display_name, avatar: s.avatar })
     }
 }
 
@@ -76,8 +80,8 @@ fn dev_handle() -> Option<String> {
     std::env::var("FLIGHT_SIM_DEV_USER").ok().filter(|h| !h.is_empty())
 }
 
-/// Whether this build can sign in at all (the web page, on its own domain or
-/// localhost).
+/// Whether this build can sign in at all (the web page on its own domain or
+/// localhost; natively always, unless playing as a dev user).
 pub fn can_sign_in() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
@@ -85,14 +89,15 @@ pub fn can_sign_in() -> bool {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        false
+        dev_handle().is_none()
     }
 }
 
-/// Opens the handle prompt; the page then redirects to the account's
-/// authorization server and comes back signed in.
+/// The web page's handle prompt (it then redirects to the account's
+/// authorization server and comes back signed in). Natively the prompt is
+/// the game's own (`crate::signin`), which calls `crate::oauth::begin`.
+#[cfg(target_arch = "wasm32")]
 pub fn sign_in() {
-    #[cfg(target_arch = "wasm32")]
     if let Err(e) = web::call("signIn") {
         bevy::log::warn!("sign in: {e}");
     }
@@ -103,6 +108,8 @@ pub fn sign_out() {
     if let Err(e) = web::call("signOut") {
         bevy::log::warn!("sign out: {e}");
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::oauth::sign_out();
 }
 
 /// A fresh service-auth JWT for the game server (`aud`
@@ -115,6 +122,9 @@ pub async fn service_token() -> Result<String, String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        dev_handle().map(|h| format!("dev:{h}")).ok_or_else(|| "signed out".into())
+        match dev_handle() {
+            Some(h) => Ok(format!("dev:{h}")),
+            None => crate::oauth::service_token().await,
+        }
     }
 }

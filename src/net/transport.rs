@@ -1,7 +1,7 @@
 //! A WebSocket that never blocks the game: binary frames in and out,
 //! polled once a frame. The browser's own WebSocket on the web, and
-//! tokio-tungstenite on a background thread natively (plain `ws://` only for
-//! now: native multiplayer is a dev feature).
+//! tokio-tungstenite on a background thread natively (`ws://` and `wss://`,
+//! rustls with bundled webpki roots).
 
 pub enum TransportEvent {
     Open,

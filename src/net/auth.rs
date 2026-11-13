@@ -13,18 +13,18 @@ pub fn server_url() -> String {
     if base.ends_with("/ws") { base.to_string() } else { format!("{base}/ws") }
 }
 
-/// Whether the menu offers multiplayer at all: always on the web (it can
-/// sign in), natively only for a dev user (`FLIGHT_SIM_DEV_USER`).
+/// Whether the menu offers multiplayer at all: always (signed out, it offers
+/// SIGN IN).
 pub fn available() -> bool {
-    cfg!(target_arch = "wasm32") || crate::identity::current_user().is_some()
+    true
 }
 
-/// A token on its way ([`crate::identity::service_token`] is async on the web).
+/// A token on its way ([`crate::identity::service_token`] asks the PDS).
 pub struct TokenRequest {
     #[cfg(target_arch = "wasm32")]
     slot: std::rc::Rc<std::cell::RefCell<Option<Result<String, String>>>>,
     #[cfg(not(target_arch = "wasm32"))]
-    ready: Option<Result<String, String>>,
+    slot: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
 }
 
 // (the web's slot never leaves the main thread)
@@ -36,8 +36,14 @@ unsafe impl Sync for TokenRequest {}
 pub fn request_token() -> TokenRequest {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // natively it's just an env var: ready at once
-        TokenRequest { ready: Some(bevy::tasks::block_on(crate::identity::service_token())) }
+        // (on the sign-in thread, off the game's)
+        let slot: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>> = Default::default();
+        let out = slot.clone();
+        crate::oauth::spawn(async move {
+            let token = crate::identity::service_token().await;
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(token);
+        });
+        TokenRequest { slot }
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -53,7 +59,7 @@ pub fn request_token() -> TokenRequest {
 impl TokenRequest {
     pub fn poll(&mut self) -> Option<Result<String, String>> {
         #[cfg(not(target_arch = "wasm32"))]
-        return self.ready.take();
+        return self.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         #[cfg(target_arch = "wasm32")]
         return self.slot.borrow_mut().take();
     }

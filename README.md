@@ -114,9 +114,9 @@ The player and their token come from `src/identity.rs` (see Sign-in below):
 the client sends a service-auth JWT (`aud=did:web:flight.mozzius.dev`,
 `lxm=dev.mozzius.flight.join`) and the server verifies it with
 `atproto::verify_service_auth`, naming players by their verified handle.
-Natively there's no sign-in yet: multiplayer only shows with
-`FLIGHT_SIM_DEV_USER=<handle>`, which sends a `dev:<handle>` token, and native
-clients only speak plain `ws://`.
+Native builds sign in too (see Sign-in) and speak `wss://` (tokio-tungstenite with rustls
+and bundled webpki roots) as well as `ws://`; `FLIGHT_SIM_DEV_USER=<handle>` still plays as a
+dev user, sending a `dev:<handle>` token.
 
 Presence and invites: while signed in the game keeps that one connection open in every mode
 (menus and single player too; it just doesn't join a room), and `Leave` takes it out of a room
@@ -200,6 +200,37 @@ bsky.social, no typing) and redirects to the account's server via atproto OAuth.
   did:web; the `atproto` cargo feature, which `server` turns on, so the client
   doesn't build it). Natively, `FLIGHT_SIM_DEV_USER=<handle>` plays as `did:dev:<handle>`
   with token `dev:<handle>`, which the server accepts only with `FLIGHT_SIM_DEV_AUTH=1`.
+
+Native builds (macOS, Windows, Linux) do the same OAuth from Rust (`src/oauth`, the prompt in
+`src/signin.rs`): SIGN IN opens an in-game prompt (handle field, typing and paste; empty starts
+at bsky.social), then the system browser on the authorization page.
+
+- A discoverable public "native" client: `web/oauth-native-client-metadata.json`, served at
+  `https://flight.mozzius.dev/oauth-native-client-metadata.json` (`application_type: native`,
+  `token_endpoint_auth_method: none`, DPoP-bound tokens, the same scope as the web).
+- Redirect: a loopback `http://127.0.0.1/callback`, registered without a port. The game listens
+  on a free port for one callback and the page says to return to the game. RFC 8252 §7.3 has
+  the server accept any port for loopback redirects; the atproto PDS does
+  (`compareRedirectUri` in `@atproto/oauth-provider`), and allows loopback redirects for any
+  `native` client. (The atproto spec only spells out custom schemes and https for native
+  clients; a custom scheme would need per-OS URL handler registration.)
+- Handle → DID (the AppView's `resolveHandle`, then `/.well-known/atproto-did`) → DID document
+  → PDS → `/.well-known/oauth-protected-resource` → the authorization server's metadata (an
+  entryway like bsky.social is its own). PAR with PKCE (S256) and an ES256 DPoP key, nonces
+  retried on `use_dpop_nonce`, the `iss` and `state` checked on the callback, and the token's
+  `sub` checked to live on a PDS this authorization server protects. Tokens refresh when
+  they're about to expire or the PDS refuses them; a refused refresh signs out.
+- The game server's token comes from `com.atproto.server.getServiceAuth` on the PDS, as on the web.
+- The session (DPoP key, tokens, DID, PDS and server URLs, the cached profile) is
+  `<data dir>/flight_sim/session.json`, owner-only (0600). Not the OS keychain: macOS asks
+  for the password whenever a differently signed binary reads an item (every rebuild and
+  ad-hoc-signed release), Windows caps a secret at 2.5 KB, and Linux needs a Secret Service.
+  SIGN OUT revokes the tokens and deletes the file. Screenshot runs never touch it.
+- Dev: `FLIGHT_SIM_DEV_SIGN_IN=<handle>|entryway` starts signing in at launch,
+  `FLIGHT_SIM_OAUTH_PRINT_URL=1` logs the authorization URL (`FLIGHT_SIM_OAUTH_URL=...` on
+  stdout) instead of opening the browser, and `FLIGHT_SIM_MODE=menu-signin` shows the prompt
+  in a screenshot run. `cargo test par_against_bsky_social -- --ignored` pushes a real
+  authorization request to bsky.social with the deployed metadata and loads the page.
 
 ## Desktop builds
 

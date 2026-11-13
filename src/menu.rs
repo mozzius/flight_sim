@@ -35,10 +35,14 @@ impl Plugin for MenuPlugin {
             .insert_resource(panel)
             .add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), despawn_menu)
-            .add_systems(Update, (navigate, handle_pressed, style_buttons, layout_menu, layout_account).chain())
+            .add_systems(Update, (navigate, handle_pressed, style_buttons, layout_menu, layout_account).chain().in_set(MenuSystems))
             .add_systems(Update, crate::friends::invite_shortcut.before(handle_pressed));
     }
 }
+
+/// The menu's systems (navigation, presses, layout).
+#[derive(SystemSet, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct MenuSystems;
 
 /// Which set of buttons takes the keyboard / gamepad.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,6 +50,8 @@ pub enum Screen {
     Modes,
     Pause,
     Score,
+    /// The native sign-in prompt (over the mode menu).
+    SignIn,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -78,6 +84,9 @@ pub enum UiAction {
     /// The invite card's JOIN and ✕.
     AcceptInvite,
     DismissInvite,
+    /// The native sign-in prompt's SIGN IN and CANCEL.
+    SignInSubmit,
+    SignInCancel,
 }
 
 /// A menu button. `order` is the focus order on its screen; buttons sharing a
@@ -406,10 +415,15 @@ fn navigate(
     buttons: Query<(&UiButton, &ComputedNode)>,
     hovered: Query<(&UiButton, &Hovered), Changed<Hovered>>,
     mut moved: MessageReader<CursorMoved>,
+    sign_in: Res<crate::signin::SignInPrompt>,
 ) {
     // (only when the mouse moves: not when the layout shifts under it)
     let mouse_moved = moved.read().count() > 0;
-    let screen = active_screen(*state.get(), paused.0, crate::modes::challenge_over(&mode, &prompt));
+    let screen = if sign_in.open && *state.get() == GameState::Menu {
+        Some(Screen::SignIn)
+    } else {
+        active_screen(*state.get(), paused.0, crate::modes::challenge_over(&mode, &prompt))
+    };
     if focus.screen != screen {
         focus.screen = screen;
         focus.order = 0;
@@ -464,7 +478,7 @@ fn navigate(
     let left = key(&[KeyCode::ArrowLeft, wasd(KeyCode::KeyA)]) || pad(GamepadButton::DPadLeft) || stick_dir.x < 0;
     let right = key(&[KeyCode::ArrowRight, wasd(KeyCode::KeyD)]) || pad(GamepadButton::DPadRight) || stick_dir.x > 0;
     let press = key(&[KeyCode::Enter, KeyCode::NumpadEnter]) || (!typing && key(&[KeyCode::Space])) || pad(GamepadButton::South);
-    let back = (screen == Screen::Modes) && (key(&[KeyCode::Escape]) || pad(GamepadButton::East));
+    let back = matches!(screen, Screen::Modes | Screen::SignIn) && (key(&[KeyCode::Escape]) || pad(GamepadButton::East));
 
     let b = live[current];
     let is_picker = matches!(b.action, UiAction::Pick(_));
@@ -492,7 +506,9 @@ fn navigate(
     if press {
         pressed.0.push((live[target].action, 1));
     }
-    if back {
+    if back && screen == Screen::SignIn {
+        pressed.0.push((UiAction::SignInCancel, 1));
+    } else if back {
         *panel = match *panel {
             Panel::Create | Panel::Join => Panel::Multi,
             _ => Panel::Closed,
@@ -529,6 +545,8 @@ fn handle_pressed(
     mut net: ResMut<crate::net::Net>,
     mut next: ResMut<NextState<GameState>>,
     time: Res<Time<Real>>,
+    mut sign_in: ResMut<crate::signin::SignInPrompt>,
+    handle_field: Query<&bevy::text::EditableText, With<crate::signin::HandleField>>,
 ) {
     for (action, step) in std::mem::take(&mut pressed.0) {
         match action {
@@ -554,7 +572,9 @@ fn handle_pressed(
                     focus.order = ORDER_KEYS;
                 }
             }
-            UiAction::SignIn => crate::identity::sign_in(),
+            UiAction::SignIn => crate::signin::sign_in(&mut sign_in),
+            UiAction::SignInSubmit => crate::signin::submit(crate::signin::typed(&handle_field).trim()),
+            UiAction::SignInCancel => crate::signin::cancel(&mut sign_in),
             UiAction::Key(i) => {
                 let alphabet = crate::net::protocol::CODE_ALPHABET;
                 if code.0.len() >= crate::net::protocol::CODE_LEN {
@@ -594,7 +614,7 @@ fn handle_pressed(
                 if crate::identity::current_user().is_some() {
                     crate::identity::sign_out();
                 } else {
-                    crate::identity::sign_in();
+                    crate::signin::sign_in(&mut sign_in);
                 }
             }
         }
@@ -719,7 +739,7 @@ fn layout_account(
 ) {
     let Ok(mut corner) = corner.single_mut() else { return };
     let user = crate::identity::current_user();
-    // natively there's no sign-in: a dev user's handle shows, without a button
+    // a dev user's handle shows, without a button
     let can = crate::identity::can_sign_in();
     let d = if user.is_some() || can { Display::Flex } else { Display::None };
     if corner.display != d {

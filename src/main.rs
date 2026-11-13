@@ -31,6 +31,10 @@ mod loading;
 mod menu;
 mod modes;
 mod net;
+// native sign-in (atproto OAuth); the web build's is web/auth.js
+#[cfg(not(target_arch = "wasm32"))]
+mod oauth;
+mod signin;
 mod touch;
 mod weapons;
 mod world;
@@ -101,6 +105,6 @@ fn main() {
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
-        .add_plugins((loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin))
+        .add_plugins((loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin, signin::SignInPlugin))
         .run();
 }
