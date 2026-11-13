@@ -2,15 +2,20 @@
 //! baked a slice per frame (`terrain_gen::MapBaker`) under a progress bar,
 //! then spawned, and the round starts (`GameState::Playing`, the intro shot).
 //!
+//! Rounds start from the mode menu (`menu`), or straight away in screenshot
+//! runs and with `FLIGHT_SIM_MODE=endless|challenge` ([`begin_round`] picks a
+//! seed and the environment, then the bake starts).
+//!
 //! `FLIGHT_SIM_SEED=<n>` flies a given map again. Screenshot runs default to
 //! seed 1337 so they're comparable. The round's time of day and weather
-//! (`environment`) are rolled from the same seed.
+//! (`environment`) are rolled from the same seed unless picked.
 
 use bevy::prelude::*;
 
 use crate::{
-    environment::Environment,
+    environment::{Environment, Picks},
     intro::KeepDuringIntro,
+    modes::GameMode,
     terrain_gen::{self, MapBaker, SceneryMaterial, TerrainMaterial},
     world::Terrain,
 };
@@ -19,10 +24,22 @@ pub struct LoadingPlugin;
 
 impl Plugin for LoadingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<GameState>()
-            .insert_resource(MapSeed(map_seed()))
-            .insert_resource(Environment::current())
-            .add_systems(OnEnter(GameState::Loading), spawn_loading)
+        // the scene behind the menu (replaced by the round's own before the bake)
+        app.insert_resource(Environment::default());
+        match GameMode::from_settings() {
+            // screenshot runs and FLIGHT_SIM_MODE skip the menu
+            Some(mode) => {
+                let seed = round_seed();
+                app.insert_resource(MapSeed(seed))
+                    .insert_resource(Environment::choose(seed, Picks::from_settings()))
+                    .insert_resource(mode)
+                    .insert_state(GameState::Loading);
+            }
+            None => {
+                app.insert_resource(MapSeed(0)).insert_resource(GameMode::Endless).insert_state(GameState::Menu);
+            }
+        }
+        app.add_systems(OnEnter(GameState::Loading), spawn_loading)
             .add_systems(OnExit(GameState::Loading), despawn_loading)
             .add_systems(Update, load_map.run_if(in_state(GameState::Loading)));
     }
@@ -30,22 +47,29 @@ impl Plugin for LoadingPlugin {
 
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GameState {
+    /// The mode menu.
     #[default]
+    Menu,
     Loading,
     Playing,
 }
 
-/// This session's map seed: `FLIGHT_SIM_SEED`, else random (fixed for
-/// screenshot runs). Chosen once; the environment is rolled from it too.
-pub fn map_seed() -> u32 {
-    static SEED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *SEED.get_or_init(|| {
-        std::env::var("FLIGHT_SIM_SEED")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .or_else(|| crate::dev::headless().then_some(SCREENSHOT_SEED))
-            .unwrap_or_else(rand::random)
-    })
+/// A fresh map seed: `FLIGHT_SIM_SEED`, else random (fixed for screenshot runs).
+pub fn round_seed() -> u32 {
+    std::env::var("FLIGHT_SIM_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .or_else(|| crate::dev::headless().then_some(SCREENSHOT_SEED))
+        .unwrap_or_else(rand::random)
+}
+
+/// Starts a new round: a fresh seed and the environment, then the bake.
+pub fn begin_round(commands: &mut Commands, next: &mut NextState<GameState>, mode: GameMode, picks: Picks) {
+    let seed = round_seed();
+    commands.insert_resource(MapSeed(seed));
+    commands.insert_resource(Environment::choose(seed, picks));
+    commands.insert_resource(mode);
+    next.set(GameState::Loading);
 }
 
 /// The seed of the map being flown.

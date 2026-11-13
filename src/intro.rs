@@ -14,8 +14,7 @@ pub struct IntroPlugin;
 
 impl Plugin for IntroPlugin {
     fn build(&self, app: &mut App) {
-        let skip = std::env::var("FLIGHT_SIM_NO_INTRO").is_ok();
-        app.insert_resource(Intro { t: if skip { INTRO_LEN } else { 0.0 } })
+        app.insert_resource(Intro::new())
             .add_systems(Startup, spawn_letterbox)
             .add_systems(Update, (advance, hide_hud, letterbox).chain());
     }
@@ -35,6 +34,12 @@ pub struct Intro {
 }
 
 impl Intro {
+    /// Ready for the next round (`FLIGHT_SIM_NO_INTRO` skips it).
+    pub fn new() -> Self {
+        let skip = std::env::var("FLIGHT_SIM_NO_INTRO").is_ok();
+        Intro { t: if skip { INTRO_LEN } else { 0.0 } }
+    }
+
     pub fn playing(&self) -> bool {
         self.t < INTRO_LEN
     }

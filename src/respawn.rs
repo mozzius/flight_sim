@@ -1,5 +1,6 @@
 //! After the player is shot down (or crashes), a RESPAWN button appears
 //! after a few seconds. Click it, or press Enter / gamepad A, to fly again.
+//! (Endless only: a challenge shows its score screen instead, see `modes`.)
 
 use bevy::{picking::hover::Hovered, prelude::*};
 
@@ -137,11 +138,12 @@ fn track_player(
 fn update_prompt(
     prompt: Res<RespawnPrompt>,
     paused: Res<Paused>,
+    mode: Res<crate::modes::GameMode>,
     mut root: Query<&mut Node, With<PromptRoot>>,
     mut title: Query<&mut Text, With<PromptTitle>>,
     mut button: Query<(&Hovered, &mut BackgroundColor), With<RespawnButton>>,
 ) {
-    let show = prompt.ready() && !paused.0;
+    let show = prompt.ready() && !paused.0 && *mode == crate::modes::GameMode::Endless;
     if let Ok(mut node) = root.single_mut() {
         let display = if show { Display::Flex } else { Display::None };
         if node.display != display {
@@ -164,6 +166,7 @@ fn respawn_on_request(
     mut commands: Commands,
     mut prompt: ResMut<RespawnPrompt>,
     paused: Res<Paused>,
+    mode: Res<crate::modes::GameMode>,
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     mut clicked: ResMut<ButtonClicked>,
@@ -174,7 +177,7 @@ fn respawn_on_request(
     friendlies: Query<(&Transform, &Team), (With<Pilot>, Without<Player>)>,
 ) {
     let clicked = std::mem::take(&mut clicked.0);
-    if !prompt.ready() || paused.0 {
+    if !prompt.ready() || paused.0 || *mode == crate::modes::GameMode::Challenge {
         return;
     }
     let pressed = keys.just_pressed(KeyCode::Enter)

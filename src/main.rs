@@ -18,6 +18,8 @@ mod platform;
 mod respawn;
 mod terrain_gen;
 mod loading;
+mod menu;
+mod modes;
 mod touch;
 mod weapons;
 mod world;
@@ -88,6 +90,6 @@ fn main() {
             effects::EffectsPlugin,
             dev::DevPlugin,
         ))
-        .add_plugins(loading::LoadingPlugin)
+        .add_plugins((loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin))
         .run();
 }

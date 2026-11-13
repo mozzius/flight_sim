@@ -1239,6 +1239,25 @@ impl MapBaker {
     }
 }
 
+/// Parent of a spawned map's meshes and roads.
+#[derive(Component)]
+pub struct MapRoot;
+
+/// Removes the current map (meshes, roads, trees, collision) before the next one.
+pub fn clear_map(
+    mut commands: Commands,
+    roots: Query<Entity, With<MapRoot>>,
+    mut loaded: ResMut<trees::LoadedTrees>,
+    mut terrain: ResMut<crate::world::Terrain>,
+) {
+    for e in &roots {
+        commands.entity(e).despawn();
+    }
+    loaded.clear(&mut commands);
+    commands.remove_resource::<trees::TreeField>();
+    *terrain = default();
+}
+
 /// Turns a baked map into meshes, materials, roads and the tree field, and
 /// returns the heightfield for collision queries.
 pub fn spawn_map(
@@ -1259,6 +1278,7 @@ pub fn spawn_map(
     let root = commands
         .spawn((
             Name::new("Terrain"),
+            MapRoot,
             Transform::default(),
             Visibility::default(),
         ))

@@ -86,7 +86,15 @@ impl TreeField {
 }
 
 #[derive(Resource, Default)]
-pub(super) struct LoadedTrees(HashMap<(i32, i32), Vec<Entity>>);
+pub struct LoadedTrees(HashMap<(i32, i32), Vec<Entity>>);
+
+impl LoadedTrees {
+    pub fn clear(&mut self, commands: &mut Commands) {
+        for e in self.0.drain().flat_map(|(_, v)| v) {
+            commands.entity(e).despawn();
+        }
+    }
+}
 
 fn hash(i: u32, j: u32, seed: u32) -> u32 {
     let mut h = i.wrapping_mul(0x8da6_b343) ^ j.wrapping_mul(0xd816_3841) ^ seed.wrapping_mul(0xcb1a_b31f);

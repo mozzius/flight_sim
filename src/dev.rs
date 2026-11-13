@@ -2,6 +2,7 @@
 //!
 //! `FLIGHT_SIM_SCREENSHOT=out.png cargo run` saves a screenshot after a few
 //! seconds and exits. `FLIGHT_SIM_SCREENSHOT_AFTER=<secs>` changes the delay.
+//! `FLIGHT_SIM_DIE_AT=<secs>` shoots the player down that many (real) seconds in.
 
 use bevy::{
     prelude::*,
@@ -50,6 +51,15 @@ impl Plugin for DevPlugin {
         }
         if std::env::var("FLIGHT_SIM_KILL_TEST").is_ok() {
             app.add_systems(Update, kill_test);
+        }
+        if let Some(at) = std::env::var("FLIGHT_SIM_DIE_AT").ok().and_then(|s| s.parse::<f32>().ok()) {
+            app.add_systems(Update, move |time: Res<Time<Real>>, mut player: Query<&mut crate::game::Health, With<crate::game::Player>>| {
+                if time.elapsed_secs() >= at {
+                    for mut health in &mut player {
+                        health.current = 0.0;
+                    }
+                }
+            });
         }
         if std::env::var("FLIGHT_SIM_AUTOPILOT").is_ok() {
             app.add_systems(Update, autopilot_player);

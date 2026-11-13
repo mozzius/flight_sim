@@ -4,6 +4,16 @@ Built using [Bevy](https://bevy.org) 0.20.
 
 Run the game using `cargo run`
 
+## Modes
+
+- **Endless**: waves forever, respawn when shot down. Pick the location, weather and
+  time first (each defaults to random).
+- **Challenge**: a random map, one life, bigger and sharper waves. Kills and cleared
+  waves score points; the best score is kept (`localStorage` on the web, a file in the
+  OS data dir natively).
+
+Esc → MENU goes back to the mode menu; every round bakes a fresh map.
+
 The world is procedurally generated eroded mountains (Rune Skovbo Johansen's
 erosion filter), and all sound is synthesised at startup.
 
@@ -61,7 +71,9 @@ seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene), `FLIGHT_SIM_NO_A
 (the plain gradient sky), `FLIGHT_SIM_BIOME=alpine|tundra|farmland`,
 `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` (pin the environment; screenshot runs
-default to alpine, clear midday). Biome parameter sets live in `src/terrain_gen/biome.rs`,
+default to alpine, clear midday), `FLIGHT_SIM_MODE=endless|challenge` (skip the menu;
+screenshot runs default to endless), `FLIGHT_SIM_MODE=menu|menu-endless` (show the menu in a
+screenshot run), `FLIGHT_SIM_DIE_AT=<secs>` (shoot the player down, for the score screen). Biome parameter sets live in `src/terrain_gen/biome.rs`,
 the farmland fields in `src/terrain_gen/fields.rs`.
 Screenshot runs are headless (no window) and silent.
 
@@ -80,4 +92,5 @@ The web build is single-threaded, so it bakes the terrain textures at half
 resolution, a slice per frame under a loading bar, and plants trees a couple of
 chunks per frame. `?debug` shows the log and GPU state on the page; `?low` /
 `?high` force the phone/tablet scene on or off; `?noatmo` forces the plain sky;
-`?biome=`, `?weather=` and `?time=` pin the environment (same values as the env vars above).
+`?biome=`, `?weather=` and `?time=` preselect the environment, `?mode=endless|challenge` skips
+the menu (same values as the env vars above).

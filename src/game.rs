@@ -1,4 +1,5 @@
-//! Teams, health, spawning, death and respawn.
+//! Teams, health, spawning, death and respawn, and the waves (bigger and
+//! sharper ones in challenge mode, see `modes`).
 
 use bevy::prelude::*;
 use bevy_transform_interpolation::prelude::*;
@@ -7,6 +8,7 @@ use rand::RngExt;
 use crate::{
     ai::Pilot,
     controls::MouseAim,
+    modes::{GameMode, KILL_POINTS, WAVE_POINTS},
     flight::{Aircraft, AircraftCrashed, ControlInput, Disabled, FlightState, FlightSystems},
     weapons::{Targeting, Weapons},
     world::Terrain,
@@ -23,6 +25,7 @@ impl Plugin for GamePlugin {
             .add_message::<PlayerKill>()
             .add_systems(Startup, load_models)
             .add_systems(OnEnter(crate::loading::GameState::Playing), initial_spawn)
+            .add_systems(OnExit(crate::loading::GameState::Playing), (end_round, crate::terrain_gen::clear_map))
             .add_systems(
                 FixedUpdate,
                 (handle_damage, handle_crashes, respawn, wave_system)
@@ -86,6 +89,8 @@ pub struct Score {
     pub kills: u32,
     pub deaths: u32,
     pub wave: u32,
+    /// Challenge score: kills and cleared waves.
+    pub points: u32,
     /// Shown briefly on the HUD ("TARGET DESTROYED").
     pub last_event: Option<(String, f32)>,
 }
@@ -162,31 +167,71 @@ pub fn spawn_aircraft(
     entity.id()
 }
 
-fn initial_spawn(mut commands: Commands, models: Res<Models>, terrain: Res<Terrain>, mut score: ResMut<Score>, mut aim: ResMut<MouseAim>) {
+fn initial_spawn(
+    mut commands: Commands,
+    models: Res<Models>,
+    terrain: Res<Terrain>,
+    mode: Res<GameMode>,
+    mut score: ResMut<Score>,
+    mut aim: ResMut<MouseAim>,
+) {
     let north = Vec3::NEG_Z;
     spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0), north, true);
     aim.reset = true;
-    // wingmen in a loose finger-four
+    // wingmen in a loose finger-four (a pair in a challenge, and they don't come back)
+    let wingmen = if *mode == GameMode::Challenge { 2 } else { 3 };
     for offset in [
         Vec3::new(-150.0, 20.0, 120.0),
         Vec3::new(150.0, -20.0, 120.0),
         Vec3::new(300.0, 0.0, 240.0),
-    ] {
+    ]
+    .into_iter()
+    .take(wingmen)
+    {
         spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0) + offset, north, false);
     }
-    spawn_enemy_wave(&mut commands, &models, &terrain, &mut score, Vec3::new(0.0, 1500.0, 6000.0), north);
+    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, &mut score, Vec3::new(0.0, 1500.0, 6000.0), north);
+}
+
+/// Resets the round's state when it ends (back to the menu, or a retry).
+#[allow(clippy::too_many_arguments)]
+fn end_round(
+    mut commands: Commands,
+    leftovers: Query<
+        Entity,
+        Or<(With<Aircraft>, With<crate::weapons::Bullet>, With<crate::weapons::Missile>, With<crate::weapons::Flare>)>,
+    >,
+    mut score: ResMut<Score>,
+    mut queue: ResMut<RespawnQueue>,
+    mut prompt: ResMut<crate::respawn::RespawnPrompt>,
+    mut intro: ResMut<crate::intro::Intro>,
+    mut paused: ResMut<crate::pause::Paused>,
+    mut time: ResMut<Time<Virtual>>,
+) {
+    for e in &leftovers {
+        commands.entity(e).despawn();
+    }
+    *score = Score::default();
+    queue.pending.clear();
+    *prompt = default();
+    *intro = crate::intro::Intro::new();
+    paused.0 = false;
+    time.unpause();
 }
 
 fn spawn_enemy_wave(
     commands: &mut Commands,
     models: &Models,
     terrain: &Terrain,
+    mode: GameMode,
     score: &mut Score,
     player_pos: Vec3,
     player_heading: Vec3,
 ) {
     score.wave += 1;
-    let count = (4 + score.wave * 2).min(12);
+    let challenge = mode == GameMode::Challenge;
+    // challenge: 3, 5, 7... hostiles, sharper each wave
+    let count = if challenge { (1 + score.wave * 2).min(25) } else { (4 + score.wave * 2).min(12) };
     let mut rng = rand::rng();
     let ahead = Vec3::new(player_heading.x, 0.0, player_heading.z).normalize_or(Vec3::NEG_Z);
     let centre = Vec3::new(player_pos.x, 0.0, player_pos.z) + ahead * 10_000.0;
@@ -197,7 +242,13 @@ fn spawn_enemy_wave(
             + side * lateral
             + ahead * rng.random_range(-300.0..300.0)
             + Vec3::Y * rng.random_range(1300.0..2600.0);
-        spawn_aircraft(commands, models, terrain, Team::Red, pos, -ahead, false);
+        let e = spawn_aircraft(commands, models, terrain, Team::Red, pos, -ahead, false);
+        if challenge {
+            let mut pilot = Pilot::new();
+            let base = 0.4 + 0.06 * (score.wave - 1) as f32;
+            pilot.skill = (base + rng.random_range(0.0..0.3)).min(1.0);
+            commands.entity(e).insert(pilot);
+        }
     }
     score.last_event = Some((format!("WAVE {}: {} HOSTILES", score.wave, count), 4.0));
 }
@@ -234,6 +285,7 @@ fn handle_crashes(
     mut explosions: MessageWriter<Explosion>,
     mut score: ResMut<Score>,
     mut queue: ResMut<RespawnQueue>,
+    mode: Res<GameMode>,
     aircraft: Query<(&Team, Has<Player>, Has<Disabled>, &Health)>,
     players: Query<(), With<Player>>,
     mut kills: MessageWriter<PlayerKill>,
@@ -248,6 +300,9 @@ fn handle_crashes(
             score.last_event = Some(("YOU WERE SHOT DOWN".into(), 4.0));
         } else if d.killer.is_some_and(|k| players.contains(k)) {
             score.kills += 1;
+            if *team == Team::Red {
+                score.points += KILL_POINTS;
+            }
             score.last_event = Some((
                 if *team == Team::Red { "TARGET DESTROYED" } else { "FRIENDLY FIRE!" }.into(),
                 2.5,
@@ -278,6 +333,9 @@ fn handle_crashes(
         } else if !disabled && health.last_attacker.is_some_and(|k| players.contains(k)) {
             // chased into the ground counts
             score.kills += 1;
+            if *team == Team::Red {
+                score.points += KILL_POINTS;
+            }
             score.last_event = Some(("TARGET DESTROYED".into(), 2.5));
             kills.write(PlayerKill {
                 total: score.kills,
@@ -286,7 +344,7 @@ fn handle_crashes(
         }
         commands.entity(crash.entity).despawn();
         // the player respawns from the RESPAWN button (see `respawn`)
-        if !is_player && *team == Team::Blue {
+        if !is_player && *team == Team::Blue && *mode == GameMode::Endless {
             queue.pending.push((20.0, *team, false));
         }
     }
@@ -348,23 +406,34 @@ pub fn wave_system(
     mut commands: Commands,
     models: Res<Models>,
     terrain: Res<Terrain>,
+    mode: Res<GameMode>,
     mut score: ResMut<Score>,
     reds: Query<&Team, Without<Disabled>>,
-    player: Query<&Transform, With<Player>>,
+    mut player: Query<(&Transform, &mut Health), (With<Player>, Without<Disabled>)>,
     mut cooldown: Local<f32>,
+    mut cleared: Local<bool>,
     time: Res<Time>,
 ) {
     if reds.iter().any(|t| *t == Team::Red) {
         *cooldown = 5.0;
+        *cleared = false;
         return;
+    }
+    // a challenge wave cleared (alive): bonus points, and patched up for the next
+    if !*cleared && score.wave > 0 && *mode == GameMode::Challenge {
+        if let Ok((_, mut health)) = player.single_mut() {
+            score.points += WAVE_POINTS * score.wave;
+            health.current = health.max;
+        }
+        *cleared = true;
     }
     *cooldown -= time.delta_secs();
     if *cooldown > 0.0 {
         return;
     }
-    let Ok(t) = player.single() else {
+    let Ok((t, _)) = player.single() else {
         return;
     };
-    spawn_enemy_wave(&mut commands, &models, &terrain, &mut score, t.translation, t.forward().as_vec3());
+    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, &mut score, t.translation, t.forward().as_vec3());
     *cooldown = 5.0;
 }

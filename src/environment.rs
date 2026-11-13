@@ -13,10 +13,10 @@
 //! `FLIGHT_SIM_WEATHER` and `FLIGHT_SIM_TIME`). Screenshot runs default to alpine, clear midday so they stay
 //! comparable.
 //!
-//! Everything is applied once at startup (the map, and so the environment,
-//! is chosen once per session), so it costs nothing per frame.
-
-use std::sync::OnceLock;
+//! The mode menu's pickers fill in a [`Picks`] (each one "random" or a fixed
+//! value; the overrides above preselect them). The chosen environment is
+//! inserted as a resource before each map bake, and the sun, sky, camera and
+//! clouds follow it whenever it changes.
 
 use bevy::{light::light_consts::lux, prelude::*};
 
@@ -77,7 +77,7 @@ impl Biome {
 }
 
 impl TimeOfDay {
-    const ALL: [Self; 5] = [Self::Dawn, Self::Morning, Self::Midday, Self::Afternoon, Self::Golden];
+    pub const ALL: [Self; 5] = [Self::Dawn, Self::Morning, Self::Midday, Self::Afternoon, Self::Golden];
 
     fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
@@ -88,6 +88,16 @@ impl TimeOfDay {
             "golden" | "goldenhour" | "golden-hour" | "evening" | "sunset" => Self::Golden,
             _ => return None,
         })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dawn => "dawn",
+            Self::Morning => "morning",
+            Self::Midday => "midday",
+            Self::Afternoon => "afternoon",
+            Self::Golden => "golden",
+        }
     }
 
     /// Sun elevation above the horizon, radians.
@@ -105,7 +115,7 @@ impl TimeOfDay {
 }
 
 impl Weather {
-    const ALL: [Self; 4] = [Self::Clear, Self::Broken, Self::Overcast, Self::Hazy];
+    pub const ALL: [Self; 4] = [Self::Clear, Self::Broken, Self::Overcast, Self::Hazy];
 
     fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
@@ -116,9 +126,46 @@ impl Weather {
             _ => return None,
         })
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clear => "clear",
+            Self::Broken => "broken",
+            Self::Overcast => "overcast",
+            Self::Hazy => "hazy",
+        }
+    }
 }
 
-/// The round's time of day and weather. Inserted by `loading::LoadingPlugin`.
+/// What the player picked for the round: `None` is "random" (rolled from the
+/// seed; screenshot runs use alpine, clear midday instead).
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Picks {
+    pub biome: Option<Biome>,
+    pub time: Option<TimeOfDay>,
+    pub weather: Option<Weather>,
+}
+
+impl Picks {
+    /// The `FLIGHT_SIM_BIOME` / `_WEATHER` / `_TIME` overrides (or `?biome=` etc.).
+    pub fn from_settings() -> Self {
+        fn read<T>(name: &str, parse: fn(&str) -> Option<T>) -> Option<T> {
+            let s = setting(name)?;
+            let v = parse(&s);
+            if v.is_none() {
+                warn!("unknown {name} {s:?}");
+            }
+            v
+        }
+        Self {
+            biome: read("FLIGHT_SIM_BIOME", Biome::parse),
+            time: read("FLIGHT_SIM_TIME", TimeOfDay::parse),
+            weather: read("FLIGHT_SIM_WEATHER", Weather::parse),
+        }
+    }
+}
+
+/// The round's biome, time of day and weather. Inserted before each bake (`loading::begin_round`).
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct Environment {
     pub biome: Biome,
@@ -133,41 +180,24 @@ pub struct Environment {
 const MIDDAY_ELEVATION_DEG: f32 = 42.876;
 const DEFAULT_AZIMUTH: f32 = 0.3805;
 
-impl Environment {
-    /// This session's environment (rolled from the map seed once, then fixed).
-    pub fn current() -> Self {
-        static ENV: OnceLock<Environment> = OnceLock::new();
-        *ENV.get_or_init(|| Self::choose(crate::loading::map_seed()))
+impl Default for Environment {
+    /// Alpine, clear midday (what screenshot runs fly; also the scene behind the menu).
+    fn default() -> Self {
+        Self { biome: Biome::Alpine, time: TimeOfDay::Midday, weather: Weather::Clear, sun_azimuth: DEFAULT_AZIMUTH }
     }
+}
 
-    fn choose(seed: u32) -> Self {
+impl Environment {
+    /// The round's environment: the picks, the rest rolled from the map seed
+    /// (screenshot runs default to alpine, clear midday).
+    pub fn choose(seed: u32, picks: Picks) -> Self {
         let headless = crate::dev::headless();
-        let biome = match setting("FLIGHT_SIM_BIOME") {
-            Some(s) => Biome::parse(&s).unwrap_or_else(|| {
-                warn!("unknown FLIGHT_SIM_BIOME {s:?}");
-                Self::roll(seed, None).biome
-            }),
-            None if headless => Biome::Alpine,
-            None => Self::roll(seed, None).biome,
-        };
-        // the weather dice depend on the biome (pinned or rolled)
+        let fixed = Self::default();
+        let biome = picks.biome.unwrap_or(if headless { fixed.biome } else { Self::roll(seed, None).biome });
+        // the weather dice depend on the biome (picked or rolled)
         let rolled = Self::roll(seed, Some(biome));
-        let time = match setting("FLIGHT_SIM_TIME") {
-            Some(s) => TimeOfDay::parse(&s).unwrap_or_else(|| {
-                warn!("unknown FLIGHT_SIM_TIME {s:?}");
-                rolled.time
-            }),
-            None if headless => TimeOfDay::Midday,
-            None => rolled.time,
-        };
-        let weather = match setting("FLIGHT_SIM_WEATHER") {
-            Some(s) => Weather::parse(&s).unwrap_or_else(|| {
-                warn!("unknown FLIGHT_SIM_WEATHER {s:?}");
-                rolled.weather
-            }),
-            None if headless => Weather::Clear,
-            None => rolled.weather,
-        };
+        let time = picks.time.unwrap_or(if headless { fixed.time } else { rolled.time });
+        let weather = picks.weather.unwrap_or(if headless { fixed.weather } else { rolled.weather });
         let sun_azimuth = if headless { DEFAULT_AZIMUTH } else { rolled.sun_azimuth };
         let env = Self { biome, time, weather, sun_azimuth };
         info!("environment: {:?} {:?} {:?}, sun bearing {:.0}°", env.biome, env.time, env.weather, env.sun_azimuth.to_degrees());
@@ -502,7 +532,7 @@ fn transmittance(el: f32, haze: f32) -> Vec3 {
 }
 
 /// A string setting: an env var natively, a page global on the web.
-fn setting(name: &str) -> Option<String> {
+pub fn setting(name: &str) -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
         js_sys::Reflect::get(&js_sys::global(), &name.into())

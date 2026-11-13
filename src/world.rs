@@ -22,7 +22,8 @@ impl Plugin for WorldPlugin {
         app.init_resource::<Terrain>()
             .add_plugins(TerrainGenPlugin)
             .add_systems(Startup, setup)
-            .add_systems(Update, follow_sky_dome);
+            // the round's environment is chosen before each bake (and for the menu)
+            .add_systems(Update, (apply_environment.run_if(resource_changed::<Environment>), follow_sky_dome).chain());
     }
 }
 
@@ -73,15 +74,26 @@ impl Terrain {
 }
 
 
-fn setup(
+fn setup(mut commands: Commands) {
+    if crate::platform::low_memory() {
+        commands.insert_resource(bevy::light::DirectionalLightShadowMap { size: 1024 });
+    }
+}
+
+/// The sun and sky of the current environment (replaced when it changes).
+#[derive(Component)]
+struct SunAndSky;
+
+fn apply_environment(
     mut commands: Commands,
     env: Res<Environment>,
+    old: Query<Entity, With<SunAndSky>>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if crate::platform::low_memory() {
-        commands.insert_resource(bevy::light::DirectionalLightShadowMap { size: 1024 });
+    for e in &old {
+        commands.entity(e).despawn();
     }
     let look = env.look();
     // sun: with the atmosphere, the GPU dims and reddens it by elevation; the
@@ -94,6 +106,7 @@ fn setup(
         (Color::linear_rgb(s.x / peak, s.y / peak, s.z / peak), lux::RAW_SUNLIGHT * peak)
     };
     commands.spawn((
+        SunAndSky,
         DirectionalLight {
             shadow_maps_enabled: true,
             illuminance,
@@ -113,7 +126,7 @@ fn setup(
     if crate::platform::atmosphere() {
         // the planet's atmosphere (centered below the origin by default)
         // (with more aerosol in haze and under cloud)
-        commands.spawn(Atmosphere::earth(scattering_mediums.add(look.scattering_medium())));
+        commands.spawn((SunAndSky, Atmosphere::earth(scattering_mediums.add(look.scattering_medium()))));
     } else {
         spawn_sky_dome(&look, &mut commands, &mut meshes, &mut materials);
     }
@@ -157,6 +170,7 @@ fn spawn_sky_dome(look: &Look, commands: &mut Commands, meshes: &mut Assets<Mesh
         .collect();
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     commands.spawn((
+        SunAndSky,
         SkyDome,
         Mesh3d(meshes.add(mesh)),
         MeshMaterial3d(materials.add(StandardMaterial {

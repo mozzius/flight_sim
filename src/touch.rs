@@ -310,6 +310,7 @@ fn layout_ui(
     intro: Res<Intro>,
     paused: Res<Paused>,
     prompt: Res<RespawnPrompt>,
+    state: Res<State<crate::loading::GameState>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut root: Query<&mut Node, (With<TouchRoot>, Without<Widget>)>,
     mut widgets: Query<(&Widget, &mut Node, &mut BackgroundColor, &mut Visibility)>,
@@ -317,7 +318,8 @@ fn layout_ui(
     let (Ok(window), Ok(mut root)) = (windows.single(), root.single_mut()) else {
         return;
     };
-    let display = if input.active && !intro.playing() { Display::Flex } else { Display::None };
+    let playing = *state.get() == crate::loading::GameState::Playing;
+    let display = if input.active && playing && !intro.playing() { Display::Flex } else { Display::None };
     if root.display != display {
         root.display = display;
     }

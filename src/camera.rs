@@ -24,6 +24,7 @@ pub struct CameraPlugin;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_camera)
+            .add_systems(Update, apply_environment.run_if(resource_changed::<crate::environment::Environment>))
             .add_systems(PostUpdate, follow_player.before(TransformSystems::Propagate));
     }
 }
@@ -47,9 +48,7 @@ fn spawn_camera(
             far: 120_000.0,
             ..default()
         }),
-        Exposure {
-            ev100: if crate::platform::atmosphere() { look.exposure } else { look.fallback_exposure },
-        },
+        exposure(&look),
         Tonemapping::AcesFitted,
         Bloom::NATURAL,
         Transform::from_xyz(0.0, 1510.0, 6030.0),
@@ -86,6 +85,25 @@ fn spawn_camera(
         let handle = images.add(image);
         camera.insert(bevy::camera::RenderTarget::Image(handle.clone().into()));
         commands.insert_resource(crate::dev::HeadlessTarget(handle));
+    }
+}
+
+fn exposure(look: &crate::environment::Look) -> Exposure {
+    Exposure { ev100: if crate::platform::atmosphere() { look.exposure } else { look.fallback_exposure } }
+}
+
+/// Exposure, fog and sky light follow the round's environment.
+fn apply_environment(
+    env: Res<crate::environment::Environment>,
+    mut camera: Query<(&mut Exposure, &mut DistanceFog, Option<&mut AtmosphereEnvironmentMapLight>), With<MainCamera>>,
+) {
+    let look = env.look();
+    for (mut exp, mut fog, light) in &mut camera {
+        *exp = exposure(&look);
+        *fog = look.distance_fog();
+        if let Some(mut light) = light {
+            light.intensity = look.env_light;
+        }
     }
 }
 

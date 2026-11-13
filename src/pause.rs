@@ -1,5 +1,6 @@
 //! Pause menu: Esc (gamepad: Start) freezes game time, frees the mouse and
 //! lists the controls, plus the score and stats that used to clutter the HUD.
+//! RESUME and MENU (back to the mode menu) buttons.
 
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
@@ -140,6 +141,11 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         }
                     });
                 panel.spawn((text("", 16.0, GREEN), PauseStats));
+                panel.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
+                    use crate::menu::{Screen, UiAction, button};
+                    button(row, &font, "RESUME", Screen::Pause, 0, 0, UiAction::Resume);
+                    button(row, &font, "MENU", Screen::Pause, 1, 0, UiAction::Menu);
+                });
                 panel.spawn((DesktopOnly, text("Esc / Start: resume      Q: quit", 16.0, DIM)));
             });
         });

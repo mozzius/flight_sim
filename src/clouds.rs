@@ -94,22 +94,11 @@ impl Plugin for CloudsPlugin {
             settings.divisor = settings.divisor.max(4);
         }
         settings.enabled = !disabled;
-        // the round's weather and time of day
-        let look = crate::environment::Environment::current().look().cloud;
-        settings.coverage_bias = look.coverage_bias;
-        if let Some((bottom, top)) = look.layer {
-            settings.layer_bottom = bottom;
-            settings.layer_top = top;
-        }
-        settings.extinction *= look.extinction_mult;
-        settings.fade_distance = look.fade_distance;
-        settings.ambient_top = look.ambient_top;
-        settings.ambient_bottom = look.ambient_bottom;
-        settings.sun_tint = if crate::platform::atmosphere() {
-            look.sun_tint
-        } else {
-            look.fallback_sun_tint
-        };
+        // the round's weather and time of day (re-applied when it changes)
+        let base = settings.clone();
+        settings = with_environment(&base, &crate::environment::Environment::default());
+        app.insert_resource(CloudBase(base))
+            .add_systems(Update, apply_environment.run_if(resource_changed::<crate::environment::Environment>));
 
         let t0 = bevy::platform::time::Instant::now();
         // baked unbiased: the shader and `CloudField` add the bias
@@ -180,6 +169,38 @@ impl Plugin for CloudsPlugin {
 
 // ---------------------------------------------------------------------------
 // settings and the CPU-side field
+
+/// The settings before the environment is applied.
+#[derive(Resource)]
+struct CloudBase(CloudSettings);
+
+fn with_environment(base: &CloudSettings, env: &crate::environment::Environment) -> CloudSettings {
+    let look = env.look().cloud;
+    let mut settings = base.clone();
+    settings.coverage_bias = look.coverage_bias;
+    if let Some((bottom, top)) = look.layer {
+        settings.layer_bottom = bottom;
+        settings.layer_top = top;
+    }
+    settings.extinction *= look.extinction_mult;
+    settings.fade_distance = look.fade_distance;
+    settings.ambient_top = look.ambient_top;
+    settings.ambient_bottom = look.ambient_bottom;
+    settings.sun_tint = if crate::platform::atmosphere() { look.sun_tint } else { look.fallback_sun_tint };
+    settings
+}
+
+fn apply_environment(
+    env: Res<crate::environment::Environment>,
+    base: Res<CloudBase>,
+    mut settings: ResMut<CloudSettings>,
+    mut field: ResMut<CloudField>,
+) {
+    *settings = with_environment(&base.0, &env);
+    let time = field.time;
+    *field = CloudField::new(field.weather.clone(), &settings);
+    field.time = time;
+}
 
 /// Everything that shapes and lights the clouds. Lives in both worlds.
 #[derive(Resource, Clone)]
@@ -397,11 +418,12 @@ fn debug_camera(
     settings: Res<CloudSettings>,
     field: Res<CloudField>,
     terrain: Res<crate::world::Terrain>,
+    env: Res<crate::environment::Environment>,
     mut pose: Local<Option<Option<(Vec3, Vec3)>>>,
 ) {
     let pose = pose.get_or_insert_with(|| {
         let preset = std::env::var("CLOUDS_DEBUG_CAM").ok()?;
-        Some(debug_pose(&preset, &settings, &field, &terrain))
+        Some(debug_pose(&preset, &settings, &field, &terrain, &env))
     });
     let Some((pos, dir)) = *pose else {
         return;
@@ -418,9 +440,10 @@ fn debug_pose(
     settings: &CloudSettings,
     field: &CloudField,
     terrain: &crate::world::Terrain,
+    env: &crate::environment::Environment,
 ) -> (Vec3, Vec3) {
     let (bottom, top) = (settings.layer_bottom, settings.layer_top);
-    let sun = crate::environment::Environment::current().sun_dir();
+    let sun = env.sun_dir();
     // for the sun shot, find a spot with thick cloud between the camera and the sun
     let sun_spot = || {
         let mut best = (0.0, Vec3::new(0.0, 1_000.0, 0.0));
