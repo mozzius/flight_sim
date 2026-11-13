@@ -28,7 +28,13 @@ impl Plugin for GamePlugin {
             .add_systems(OnExit(crate::loading::GameState::Playing), (end_round, crate::terrain_gen::clear_map))
             .add_systems(
                 FixedUpdate,
-                (handle_damage, handle_crashes, respawn, wave_system)
+                (
+                    handle_damage,
+                    handle_crashes,
+                    respawn,
+                    // (multiplayer: other players, no waves)
+                    wave_system.run_if(|mode: Res<GameMode>| *mode != GameMode::Multiplayer),
+                )
                     .chain()
                     .after(FlightSystems::Combat)
                     .run_if(in_state(crate::loading::GameState::Playing)),
@@ -167,6 +173,32 @@ pub fn spawn_aircraft(
     entity.id()
 }
 
+/// Another player's jet (multiplayer): flown by their game, so no physics
+/// or pilot here, just what the effects, HUD and weapons look at.
+pub fn spawn_remote_aircraft(commands: &mut Commands, models: &Models, transform: Transform, velocity: Vec3, remote: crate::net::Remote, name: &str) -> Entity {
+    commands
+        .spawn((
+            Name::new(format!("{name} (remote)")),
+            transform,
+            Visibility::default(),
+            Aircraft::fighter(),
+            FlightState::new(velocity),
+            Team::Red,
+            Health::new(crate::net::protocol::MAX_HEALTH),
+            Weapons::fighter(),
+            remote,
+            crate::net::RemoteName(name.to_string()),
+        ))
+        .with_child((
+            AircraftModel,
+            WorldAssetRoot(models.fighter.clone()),
+            Transform::from_xyz(0.0, -0.8, 0.0)
+                .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(MODEL_SCALE)),
+        ))
+        .id()
+}
+
 fn initial_spawn(
     mut commands: Commands,
     models: Res<Models>,
@@ -176,6 +208,12 @@ fn initial_spawn(
     mut aim: ResMut<MouseAim>,
 ) {
     let north = Vec3::NEG_Z;
+    if *mode == GameMode::Multiplayer {
+        let (pos, heading) = crate::net::spawn_point();
+        spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, pos, heading, true);
+        aim.reset = true;
+        return;
+    }
     spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0), north, true);
     aim.reset = true;
     // wingmen in a loose finger-four (a pair in a challenge, and they don't come back)

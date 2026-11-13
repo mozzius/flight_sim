@@ -12,6 +12,11 @@ Run the game using `cargo run`
   waves score points; the best score is kept (`localStorage` on the web, a file in the
   OS data dir natively).
 
+- **Multiplayer**: a free-for-all dogfight with respawns, up to 8 players per room. CREATE picks
+  the room's location, weather and time (like Endless); JOIN takes the 4-letter room code
+  (typed, or on the keypad with a gamepad or touch). The code and a kills scoreboard are in
+  the pause menu (which doesn't stop the world). Signed out, MULTIPLAYER offers SIGN IN.
+
 Esc → MENU goes back to the mode menu; every round bakes a fresh map.
 
 The world is procedurally generated eroded mountains (Rune Skovbo Johansen's
@@ -84,6 +89,54 @@ screenshot run), `FLIGHT_SIM_DIE_AT=<secs>` (shoot the player down, for the scor
 the farmland fields in `src/terrain_gen/fields.rs` (the terrain shader redraws them per pixel from a small farm-layout texture, so they stay crisp on phones), lakes and the sea in `src/terrain_gen/water.rs`
 (shader `assets/shaders/water.wesl`).
 Screenshot runs are headless (no window) and silent.
+
+## Multiplayer
+
+The game talks to a small server (`src/server`) over a WebSocket (binary
+postcard frames, `src/net/protocol.rs`). Every game flies its own jet and
+sends its state 20 times a second; the server relays it and the others draw
+it 100 ms in the past, interpolating. Shooters fly their own bullets and
+missiles: tracers and flares are relayed as events, missiles as positions (so
+the target sees them and can flare), and hits are reported to the server,
+which checks them (range, rate of fire, both alive) and decides damage,
+kills and score. Each client bakes the room's map from its seed and
+environment; the server has no terrain (clients report their own crashes).
+
+Sign-in comes from the page (`window.FLIGHT_SIM_USER`,
+`window.flightSimAuth.serviceToken()` / `signIn()`); the server checks the
+service-auth token (`src/atproto`). Natively there's no sign-in yet:
+multiplayer only shows with `FLIGHT_SIM_DEV_USER=<handle>`, which sends a
+`dev:<handle>` token, and native clients only speak plain `ws://`.
+
+Client switches: `FLIGHT_SIM_SERVER=<url>` (`?server=` on the web; default
+`wss://mp.flight.mozzius.dev`; `/ws` is appended), `FLIGHT_SIM_MP=create[:CODE]|join:CODE`
+(connect straight from the menu; a requested code needs a dev server),
+`FLIGHT_SIM_MODE=menu-multiplayer|menu-create|menu-join` (open that panel in a screenshot run).
+
+Run a server locally and two headless clients that fight each other:
+
+```bash
+FLIGHT_SIM_DEV_AUTH=1 PORT=8787 cargo run --release --no-default-features --features server --bin flight_sim_server
+# in two more shells
+FLIGHT_SIM_DEV_USER=alice FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=create:TEST \
+  FLIGHT_SIM_AUTOPILOT=1 FLIGHT_SIM_SCREENSHOT=/tmp/a.png FLIGHT_SIM_SCREENSHOT_AFTER=40 cargo run
+FLIGHT_SIM_DEV_USER=bob FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=join:TEST \
+  FLIGHT_SIM_AUTOPILOT=1 FLIGHT_SIM_SCREENSHOT=/tmp/b.png FLIGHT_SIM_SCREENSHOT_AFTER=40 cargo run
+```
+
+Server env: `PORT` (default 8080), `FLIGHT_SIM_DEV_AUTH=1` (accept `dev:` tokens and requested
+room codes: never in production), `RUST_LOG`. Endpoints: `/ws` (the game) and `/health` ("ok").
+`cargo test --no-default-features --features server --bin flight_sim_server` runs the room tests.
+
+The server is a headless Bevy app (no rendering, windowing or audio: the `server` feature
+leaves Bevy's default features off). Docker (multi-stage, Debian slim runtime):
+
+```bash
+docker build -t flight-sim-server .
+docker run -p 8080:8080 -e FLIGHT_SIM_DEV_AUTH=1 flight-sim-server
+```
+
+`railway.json` builds that Dockerfile and health-checks `/health`; Railway sets `PORT`.
 
 ## Desktop builds
 

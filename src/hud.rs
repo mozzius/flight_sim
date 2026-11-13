@@ -20,6 +20,8 @@ const HUD_GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
 const HOSTILE: Color = Color::srgb(1.0, 0.3, 0.25);
 const FRIENDLY: Color = Color::srgb(0.35, 0.8, 1.0);
 const WARNING: Color = Color::srgb(1.0, 0.75, 0.2);
+/// Other players' jets (multiplayer).
+const PLAYER: Color = Color::srgb(1.0, 0.45, 0.9);
 /// Missiles coming for *you* get their own colour, distinct from hostile jets.
 const INCOMING: Color = Color::srgb(1.0, 0.3, 0.95);
 
@@ -93,10 +95,17 @@ enum Warning {
 #[derive(Component)]
 struct TargetMarker {
     target: Entity,
+    color: Color,
 }
 
 #[derive(Component)]
 struct MarkerLabel;
+
+/// Another player's handle, above their box.
+#[derive(Component)]
+struct NameTag;
+
+const NAME_TAG_WIDTH: f32 = 200.0;
 
 #[derive(Component)]
 struct LockRing;
@@ -341,10 +350,16 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 fn spawn_markers(
     mut commands: Commands,
     font: Res<HudFont>,
-    new: Query<(Entity, &Team), (Added<Aircraft>, Without<Player>)>,
+    new: Query<(Entity, &Team, Option<&crate::net::RemoteName>), (Added<Aircraft>, Without<Player>)>,
 ) {
-    for (entity, team) in &new {
-        let color = if *team == Team::Red { HOSTILE } else { FRIENDLY };
+    for (entity, team, name) in &new {
+        let color = if name.is_some() {
+            PLAYER
+        } else if *team == Team::Red {
+            HOSTILE
+        } else {
+            FRIENDLY
+        };
         commands
             .spawn((
                 Node {
@@ -353,9 +368,24 @@ fn spawn_markers(
                     ..abs_node(px(0), px(0), px(26), px(26))
                 },
                 BorderColor::all(color),
-                TargetMarker { target: entity },
+                TargetMarker { target: entity, color },
             ))
             .with_children(|p| {
+                if let Some(name) = name {
+                    p.spawn((
+                        Text::new(name.0.clone()),
+                        text(&font.0, 12.0, color),
+                        shadow(),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            bottom: percent(110),
+                            width: px(NAME_TAG_WIDTH),
+                            ..default()
+                        },
+                        TextLayout::justify(Justify::Center),
+                        NameTag,
+                    ));
+                }
                 p.spawn((
                     Text::new(""),
                     text(&font.0, 13.0, color),
@@ -400,7 +430,8 @@ fn update_markers(
         Without<LockRing>,
     >,
     mut labels: Query<&mut Text, With<MarkerLabel>>,
-    mut rings: Query<(&mut Node, &mut BorderColor), With<LockRing>>,
+    mut rings: Query<(&mut Node, &mut BorderColor), (With<LockRing>, Without<NameTag>)>,
+    mut tags: Query<&mut Node, (With<NameTag>, Without<LockRing>, Without<TargetMarker>)>,
 ) {
     let Ok((camera, cam_gt)) = camera.single() else {
         return;
@@ -434,10 +465,14 @@ fn update_markers(
         node.height = px(size);
         node.left = px(screen.x - size / 2.0);
         node.top = px(screen.y - size / 2.0);
-        let base = if *team == Team::Red { HOSTILE } else { FRIENDLY };
-        *border = BorderColor::all(if selected && lock >= 1.0 { Color::WHITE } else { base });
+        let _ = team;
+        *border = BorderColor::all(if selected && lock >= 1.0 { Color::WHITE } else { marker.color });
 
         for child in children.iter() {
+            if let Ok(mut tag) = tags.get_mut(child) {
+                // centred over the box, whatever its size
+                tag.left = px((size - NAME_TAG_WIDTH) / 2.0 - 2.0);
+            }
             if let Ok(mut label) = labels.get_mut(child) {
                 let value = if selected || dist < 3_000.0 {
                     format!("{:.1}", dist / 1000.0)

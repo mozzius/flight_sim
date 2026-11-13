@@ -143,7 +143,7 @@ fn update_prompt(
     mut title: Query<&mut Text, With<PromptTitle>>,
     mut button: Query<(&Hovered, &mut BackgroundColor), With<RespawnButton>>,
 ) {
-    let show = prompt.ready() && !paused.0 && *mode == crate::modes::GameMode::Endless;
+    let show = prompt.ready() && !paused.0 && *mode != crate::modes::GameMode::Challenge;
     if let Ok(mut node) = root.single_mut() {
         let display = if show { Display::Flex } else { Display::None };
         if node.display != display {
@@ -198,6 +198,13 @@ fn respawn_on_request(
         .unwrap_or((Vec3::new(0.0, 1800.0, 6000.0), Vec3::NEG_Z));
     for (entity, _) in &wrecks {
         commands.entity(entity).despawn();
+    }
+    if *mode == crate::modes::GameMode::Multiplayer {
+        let (pos, heading) = crate::net::spawn_point();
+        spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, pos, heading, true);
+        aim.reset = true;
+        *prompt = RespawnPrompt::default();
+        return;
     }
     let heading = Vec3::new(anchor.1.x, 0.0, anchor.1.z).normalize_or(Vec3::NEG_Z);
     let pos = Vec3::new(anchor.0.x, anchor.0.y.max(1800.0), anchor.0.z) + heading.cross(Vec3::Y) * 400.0;

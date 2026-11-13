@@ -31,6 +31,10 @@ struct PauseMenu;
 #[derive(Component)]
 struct PauseStats;
 
+/// Multiplayer: kills per player.
+#[derive(Component)]
+struct Scoreboard;
+
 const PANEL: Color = Color::srgba(0.02, 0.04, 0.03, 0.97);
 const GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
 const DIM: Color = Color::srgb(0.65, 0.8, 0.7);
@@ -141,6 +145,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         }
                     });
                 panel.spawn((text("", 16.0, GREEN), PauseStats));
+                panel.spawn((text("", 16.0, DIM), Scoreboard, Node { display: Display::None, ..default() }));
                 panel.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
                     use crate::menu::{Screen, UiAction, button};
                     button(row, &font, "RESUME", Screen::Pause, 0, 0, UiAction::Resume);
@@ -152,6 +157,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 fn toggle_pause(
+    game_mode: Res<crate::modes::GameMode>,
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     mut paused: ResMut<Paused>,
@@ -160,6 +166,19 @@ fn toggle_pause(
 ) {
     let pressed = keys.just_pressed(KeyCode::Escape)
         || gamepads.iter().any(|g| g.just_pressed(GamepadButton::Start));
+    // multiplayer: the world doesn't stop for the menu
+    if *game_mode == crate::modes::GameMode::Multiplayer {
+        if time.is_paused() {
+            time.unpause();
+        }
+        if pressed {
+            paused.0 = !paused.0;
+        }
+        if paused.0 && keys.just_pressed(KeyCode::KeyQ) {
+            exit.write(AppExit::Success);
+        }
+        return;
+    }
     // keep game time in step with the flag (it can start paused in tests)
     if paused.0 != time.is_paused() && !pressed {
         if paused.0 { time.pause() } else { time.unpause() }
@@ -189,7 +208,9 @@ fn update_menu(
     mode: Res<ControlMode>,
     diagnostics: Res<DiagnosticsStore>,
     mut menu: Query<&mut Node, With<PauseMenu>>,
-    mut stats: Query<&mut Text, With<PauseStats>>,
+    mut stats: Query<&mut Text, (With<PauseStats>, Without<Scoreboard>)>,
+    mut board: Query<(&mut Text, &mut Node), (With<Scoreboard>, Without<PauseMenu>, Without<DesktopOnly>)>,
+    net: Res<crate::net::Net>,
 ) {
     if let Ok(mut node) = menu.single_mut() {
         node.display = if paused.0 { Display::Flex } else { Display::None };
@@ -208,6 +229,20 @@ fn update_menu(
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
         .unwrap_or(0.0);
+    let room = net.room_code();
+    if let Ok((mut text, mut node)) = board.single_mut() {
+        node.display = if room.is_some() { Display::Flex } else { Display::None };
+        text.0 = net
+            .scoreboard()
+            .iter()
+            .map(|(name, kills, _, me)| format!("{}{name:<24} {kills:>3}", if *me { "> " } else { "  " }))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if let (Ok(mut text), Some(room)) = (stats.single_mut(), room) {
+        text.0 = format!("ROOM {room}      {fps:.0} fps");
+        return;
+    }
     if let Ok(mut text) = stats.single_mut() {
         text.0 = format!(
             "WAVE {}   KILLS {}   DEATHS {}      control: {}      map {}      {fps:.0} fps",

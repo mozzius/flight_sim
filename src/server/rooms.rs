@@ -1,0 +1,530 @@
+//! Rooms: who's in which, relaying, and the rules (damage, kills, score).
+//!
+//! Pure logic with no I/O, so it's testable: every call returns the
+//! messages to send ([`Out`]) and the caller delivers them.
+//!
+//! Phase 2 (co-op against server-flown AI) would give each [`Room`] its own
+//! AI aircraft, with ids from `AI_ID_START` up, simulated by the Bevy app.
+
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
+
+use crate::protocol::*;
+
+pub type ConnId = u64;
+
+/// A message for some connections.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Out {
+    pub to: Vec<ConnId>,
+    pub msg: ServerMsg,
+}
+
+/// Empty rooms stay open this long (so a dropped creator can come back).
+const EMPTY_ROOM_TTL: Duration = Duration::from_secs(120);
+const MAX_ROOMS: usize = 2_000;
+/// Hits need fresh positions for both aircraft.
+const STATE_STALE: Duration = Duration::from_secs(3);
+/// Missiles are remembered this long after their last update (a hit can
+/// arrive just after the missile's last report).
+const MISSILE_MEMORY: Duration = Duration::from_secs(3);
+
+pub struct Server {
+    rooms: HashMap<String, Room>,
+    conns: HashMap<ConnId, Conn>,
+    /// Honour requested room codes (dev servers, for automated tests).
+    dev_codes: bool,
+}
+
+struct Conn {
+    did: String,
+    handle: String,
+    room: Option<(String, PlayerId)>,
+}
+
+pub struct Room {
+    pub code: String,
+    pub map: RoomMap,
+    players: BTreeMap<PlayerId, Player>,
+    next_id: PlayerId,
+    empty_since: Option<Instant>,
+}
+
+struct Player {
+    conn: ConnId,
+    info: PlayerInfo,
+    health: f32,
+    alive: bool,
+    kills: u16,
+    deaths: u16,
+    state: Option<(PlayerState, Instant)>,
+    /// Who last hurt us, and when (crash credit).
+    last_hit: Option<(PlayerId, Instant)>,
+    /// Gun-hit allowance (token bucket at the gun's rate).
+    gun_tokens: f32,
+    tokens_at: Instant,
+    missiles: HashMap<u16, TrackedMissile>,
+}
+
+struct TrackedMissile {
+    last: MissileState,
+    seen: Instant,
+    /// Aircraft it already damaged.
+    hit: Vec<PlayerId>,
+}
+
+impl Server {
+    pub fn new(dev_codes: bool) -> Self {
+        Self { rooms: HashMap::new(), conns: HashMap::new(), dev_codes }
+    }
+
+    pub fn room_count(&self) -> usize {
+        self.rooms.len()
+    }
+
+    pub fn player_count(&self) -> usize {
+        self.rooms.values().map(|r| r.players.len()).sum()
+    }
+
+    /// A connection signed in.
+    pub fn connect(&mut self, conn: ConnId, did: String, handle: String) -> Vec<Out> {
+        let msg = ServerMsg::Welcome { handle: handle.clone() };
+        self.conns.insert(conn, Conn { did, handle, room: None });
+        vec![Out { to: vec![conn], msg }]
+    }
+
+    pub fn disconnect(&mut self, conn: ConnId, now: Instant) -> Vec<Out> {
+        let mut out = vec![];
+        self.leave(conn, now, &mut out);
+        self.conns.remove(&conn);
+        out
+    }
+
+    /// Drops empty rooms and forgotten missiles.
+    pub fn tick(&mut self, now: Instant) {
+        self.rooms.retain(|_, r| r.empty_since.is_none_or(|t| now.duration_since(t) < EMPTY_ROOM_TTL));
+        for room in self.rooms.values_mut() {
+            for p in room.players.values_mut() {
+                p.missiles.retain(|_, m| now.duration_since(m.seen) < MISSILE_MEMORY);
+            }
+        }
+    }
+
+    pub fn handle(&mut self, conn: ConnId, msg: ClientMsg, now: Instant) -> Vec<Out> {
+        let mut out = vec![];
+        if !self.conns.contains_key(&conn) {
+            return out;
+        }
+        match msg {
+            // (auth is done by the connection before it gets here)
+            ClientMsg::Hello { .. } | ClientMsg::Ping => {}
+            ClientMsg::Create { map, code } => {
+                self.leave(conn, now, &mut out);
+                if self.rooms.len() >= MAX_ROOMS {
+                    out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::Full) });
+                    return out;
+                }
+                let requested = code.map(|c| normalize_code(&c)).filter(|c| self.dev_codes && valid_code(c));
+                let code = match requested {
+                    Some(c) if !self.rooms.contains_key(&c) => c,
+                    _ => self.fresh_code(),
+                };
+                self.rooms.insert(
+                    code.clone(),
+                    Room { code: code.clone(), map, players: BTreeMap::new(), next_id: 1, empty_since: Some(now) },
+                );
+                self.join(conn, &code, now, &mut out);
+            }
+            ClientMsg::Join { code } => {
+                let code = normalize_code(&code);
+                if !self.rooms.contains_key(&code) {
+                    out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::NoRoom) });
+                    return out;
+                }
+                // (rejoining the same room is allowed: it replaces the old seat)
+                self.leave(conn, now, &mut out);
+                self.join(conn, &code, now, &mut out);
+            }
+            other => {
+                let Some((code, id)) = self.conns.get(&conn).and_then(|c| c.room.clone()) else { return out };
+                if let Some(room) = self.rooms.get_mut(&code) {
+                    room.handle(id, other, now, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    fn fresh_code(&self) -> String {
+        loop {
+            let code: String = (0..CODE_LEN)
+                .map(|_| CODE_ALPHABET[rand::random_range(0..CODE_ALPHABET.len())] as char)
+                .collect();
+            if !self.rooms.contains_key(&code) {
+                return code;
+            }
+        }
+    }
+
+    fn join(&mut self, conn: ConnId, code: &str, now: Instant, out: &mut Vec<Out>) {
+        let Some(c) = self.conns.get(&conn) else { return };
+        let (did, handle) = (c.did.clone(), c.handle.clone());
+        let Some(room) = self.rooms.get_mut(code) else { return };
+        // the same account in two places: the newer one takes the seat
+        if let Some((&old_id, old)) = room.players.iter().find(|(_, p)| p.info.did == did) {
+            let old_conn = old.conn;
+            room.remove(old_id, now, out);
+            if let Some(c) = self.conns.get_mut(&old_conn) {
+                c.room = None;
+            }
+        }
+        if room.players.len() >= MAX_PLAYERS {
+            out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::Full) });
+            return;
+        }
+        let id = room.free_id();
+        let info = PlayerInfo { id, did, handle };
+        room.players.insert(
+            id,
+            Player {
+                conn,
+                info: info.clone(),
+                health: MAX_HEALTH,
+                alive: true,
+                kills: 0,
+                deaths: 0,
+                state: None,
+                last_hit: None,
+                gun_tokens: GUN_RATE,
+                tokens_at: now,
+                missiles: HashMap::new(),
+            },
+        );
+        room.empty_since = None;
+        out.push(Out {
+            to: vec![conn],
+            msg: ServerMsg::Joined {
+                code: room.code.clone(),
+                map: room.map,
+                you: id,
+                players: room.players.values().map(|p| p.info.clone()).collect(),
+            },
+        });
+        out.push(Out { to: room.others(id), msg: ServerMsg::PlayerJoined(info) });
+        out.push(room.scores());
+        if let Some(c) = self.conns.get_mut(&conn) {
+            c.room = Some((code.to_string(), id));
+        }
+    }
+
+    fn leave(&mut self, conn: ConnId, now: Instant, out: &mut Vec<Out>) {
+        let Some((code, id)) = self.conns.get_mut(&conn).and_then(|c| c.room.take()) else { return };
+        if let Some(room) = self.rooms.get_mut(&code) {
+            room.remove(id, now, out);
+        }
+    }
+}
+
+impl Room {
+    fn all(&self) -> Vec<ConnId> {
+        self.players.values().map(|p| p.conn).collect()
+    }
+
+    fn others(&self, id: PlayerId) -> Vec<ConnId> {
+        self.players.iter().filter(|(i, _)| **i != id).map(|(_, p)| p.conn).collect()
+    }
+
+    fn free_id(&mut self) -> PlayerId {
+        // cycle through 1..AI_ID_START so a leaver's id isn't reused straight away
+        loop {
+            let id = self.next_id;
+            self.next_id = if self.next_id + 1 >= AI_ID_START { 1 } else { self.next_id + 1 };
+            if !self.players.contains_key(&id) {
+                return id;
+            }
+        }
+    }
+
+    fn scores(&self) -> Out {
+        Out { to: self.all(), msg: ServerMsg::Scores(self.players.values().map(|p| (p.info.id, p.kills, p.deaths)).collect()) }
+    }
+
+    fn remove(&mut self, id: PlayerId, now: Instant, out: &mut Vec<Out>) {
+        if self.players.remove(&id).is_none() {
+            return;
+        }
+        if self.players.is_empty() {
+            self.empty_since = Some(now);
+        } else {
+            out.push(Out { to: self.all(), msg: ServerMsg::PlayerLeft(id) });
+            out.push(self.scores());
+        }
+    }
+
+    fn handle(&mut self, id: PlayerId, msg: ClientMsg, now: Instant, out: &mut Vec<Out>) {
+        let others = self.others(id);
+        let Some(p) = self.players.get_mut(&id) else { return };
+        match msg {
+            ClientMsg::State(mut state) => {
+                let crashed = p.alive && state.status != Status::Flying;
+                state.health = if p.alive { p.health } else { 0.0 };
+                if !p.alive && state.status == Status::Flying {
+                    // (the Killed hasn't reached them yet)
+                    state.status = Status::Down;
+                }
+                p.state = Some((state, now));
+                out.push(Out { to: others, msg: ServerMsg::State { id, state } });
+                if crashed {
+                    // flew into the ground: credit whoever was chasing them
+                    let credit = p
+                        .last_hit
+                        .filter(|(_, t)| now.duration_since(*t).as_secs_f32() < CRASH_CREDIT_SECS)
+                        .map(|(k, _)| k);
+                    self.kill(id, credit, out);
+                }
+            }
+            ClientMsg::Fire { t, mut shots, mut flares } => {
+                if !p.alive {
+                    return;
+                }
+                shots.truncate(64);
+                flares.truncate(8);
+                out.push(Out { to: others, msg: ServerMsg::Fire { id, t, shots, flares } });
+            }
+            ClientMsg::Missiles { t, mut missiles } => {
+                missiles.truncate(16);
+                for m in &missiles {
+                    let tracked = p.missiles.entry(m.id).or_insert(TrackedMissile { last: *m, seen: now, hit: vec![] });
+                    tracked.last = *m;
+                    tracked.seen = now;
+                }
+                out.push(Out { to: others, msg: ServerMsg::Missiles { id, t, missiles } });
+            }
+            ClientMsg::Hit { target, weapon, damage } => self.hit(id, target, weapon, damage, now, out),
+            ClientMsg::Respawn => {
+                if !p.alive {
+                    p.alive = true;
+                    p.health = MAX_HEALTH;
+                    p.last_hit = None;
+                    out.push(Out { to: self.all(), msg: ServerMsg::Respawned(id) });
+                }
+            }
+            ClientMsg::Hello { .. } | ClientMsg::Create { .. } | ClientMsg::Join { .. } | ClientMsg::Ping => {}
+        }
+    }
+
+    /// A shooter says they hit someone: check it's believable, then apply it.
+    fn hit(&mut self, shooter: PlayerId, target: PlayerId, weapon: Weapon, damage: f32, now: Instant, out: &mut Vec<Out>) {
+        if shooter == target {
+            return;
+        }
+        let fresh = |p: &Player| p.state.filter(|(_, t)| now.duration_since(*t) < STATE_STALE).map(|(s, _)| s.pos);
+        let (Some(s), Some(v)) = (self.players.get(&shooter), self.players.get(&target)) else { return };
+        if !s.alive || !v.alive {
+            return;
+        }
+        let (Some(shooter_pos), Some(target_pos)) = (fresh(s), fresh(v)) else { return };
+        let damage = match weapon {
+            Weapon::Gun => {
+                if dist(shooter_pos, target_pos) > GUN_MAX_RANGE {
+                    return;
+                }
+                let s = self.players.get_mut(&shooter).unwrap();
+                // no more hits than the gun can fire
+                let dt = now.duration_since(s.tokens_at).as_secs_f32();
+                s.tokens_at = now;
+                s.gun_tokens = (s.gun_tokens + dt * GUN_RATE * 1.2).min(GUN_RATE);
+                if s.gun_tokens < 1.0 {
+                    return;
+                }
+                s.gun_tokens -= 1.0;
+                GUN_DAMAGE
+            }
+            Weapon::Missile(mid) => {
+                let s = self.players.get_mut(&shooter).unwrap();
+                let Some(m) = s.missiles.get_mut(&mid) else { return };
+                if m.hit.contains(&target) || dist(m.last.pos, target_pos) > MISSILE_HIT_SLACK {
+                    return;
+                }
+                m.hit.push(target);
+                damage.clamp(0.0, MISSILE_DAMAGE)
+            }
+        };
+        let v = self.players.get_mut(&target).unwrap();
+        v.health = (v.health - damage).max(0.0);
+        v.last_hit = Some((shooter, now));
+        let health = v.health;
+        out.push(Out { to: self.all(), msg: ServerMsg::Damage { target, attacker: shooter, health } });
+        if health <= 0.0 {
+            self.kill(target, Some(shooter), out);
+        }
+    }
+
+    fn kill(&mut self, victim: PlayerId, killer: Option<PlayerId>, out: &mut Vec<Out>) {
+        let Some(v) = self.players.get_mut(&victim) else { return };
+        if !v.alive {
+            return;
+        }
+        v.alive = false;
+        v.health = 0.0;
+        v.deaths += 1;
+        let killer = killer.filter(|k| *k != victim);
+        if let Some(k) = killer.and_then(|k| self.players.get_mut(&k)) {
+            k.kills += 1;
+        }
+        out.push(Out { to: self.all(), msg: ServerMsg::Killed { victim, killer } });
+        out.push(self.scores());
+    }
+}
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAP: RoomMap = RoomMap { seed: 1, biome: 0, time: 2, weather: 0 };
+
+    fn state(pos: [f32; 3], status: Status) -> ClientMsg {
+        ClientMsg::State(PlayerState {
+            t: 0.0,
+            pos,
+            rot: [0.0, 0.0, 0.0, 1.0],
+            vel: [0.0; 3],
+            throttle: 0.7,
+            g: 1.0,
+            flags: 0,
+            health: 100.0,
+            status,
+        })
+    }
+
+    /// Two players in room TEST at `a` and `b`.
+    fn duel(a: [f32; 3], b: [f32; 3]) -> (Server, Instant) {
+        let now = Instant::now();
+        let mut s = Server::new(true);
+        s.connect(1, "did:dev:a".into(), "a".into());
+        s.connect(2, "did:dev:b".into(), "b".into());
+        let out = s.handle(1, ClientMsg::Create { map: MAP, code: Some("TEST".into()) }, now);
+        assert!(matches!(&out[0].msg, ServerMsg::Joined { code, you: 1, .. } if code == "TEST"));
+        let out = s.handle(2, ClientMsg::Join { code: "test".into() }, now);
+        assert!(matches!(&out[0].msg, ServerMsg::Joined { you: 2, players, .. } if players.len() == 2));
+        s.handle(1, state(a, Status::Flying), now);
+        s.handle(2, state(b, Status::Flying), now);
+        (s, now)
+    }
+
+    fn kills(out: &[Out]) -> Vec<(PlayerId, Option<PlayerId>)> {
+        out.iter()
+            .filter_map(|o| match o.msg {
+                ServerMsg::Killed { victim, killer } => Some((victim, killer)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn states_are_relayed_to_the_others_with_server_health() {
+        let (mut s, now) = duel([0.0; 3], [100.0, 0.0, 0.0]);
+        let out = s.handle(1, state([5.0, 0.0, 0.0], Status::Flying), now);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].to, vec![2]);
+        assert!(matches!(out[0].msg, ServerMsg::State { id: 1, state } if state.health == MAX_HEALTH));
+    }
+
+    #[test]
+    fn gun_hits_kill_and_score() {
+        let (mut s, now) = duel([0.0; 3], [500.0, 0.0, 0.0]);
+        let mut all = vec![];
+        for i in 0..20 {
+            let t = now + Duration::from_millis(40 * i);
+            all.extend(s.handle(1, ClientMsg::Hit { target: 2, weapon: Weapon::Gun, damage: 999.0 }, t));
+        }
+        assert_eq!(kills(&all), vec![(2, Some(1))]);
+        // 5 damage per hit, whatever the shooter claims: dead on the 20th
+        assert!(all.iter().any(|o| o.msg == ServerMsg::Scores(vec![(1, 1, 0), (2, 0, 1)])));
+        // the dead don't take more hits, and come back on request
+        let out = s.handle(1, ClientMsg::Hit { target: 2, weapon: Weapon::Gun, damage: 5.0 }, now + Duration::from_secs(2));
+        assert!(out.is_empty());
+        let out = s.handle(2, ClientMsg::Respawn, now + Duration::from_secs(5));
+        assert_eq!(out[0].msg, ServerMsg::Respawned(2));
+    }
+
+    #[test]
+    fn unbelievable_hits_are_ignored() {
+        // out of gun range
+        let (mut s, now) = duel([0.0; 3], [5_000.0, 0.0, 0.0]);
+        assert!(s.handle(1, ClientMsg::Hit { target: 2, weapon: Weapon::Gun, damage: 5.0 }, now).is_empty());
+        // faster than the gun fires
+        let (mut s, now) = duel([0.0; 3], [100.0, 0.0, 0.0]);
+        let landed = (0..200)
+            .filter(|_| !s.handle(1, ClientMsg::Hit { target: 2, weapon: Weapon::Gun, damage: 5.0 }, now).is_empty())
+            .count();
+        assert!(landed <= GUN_RATE as usize, "{landed} hits landed in an instant");
+        // an unknown missile, then a known one that's far away, then a close one (once)
+        let (mut s, now) = duel([0.0; 3], [3_000.0, 0.0, 0.0]);
+        let missile = |pos| ClientMsg::Missiles { t: 0.0, missiles: vec![MissileState { id: 7, pos, vel: [0.0; 3], target: Some(2) }] };
+        let hit = ClientMsg::Hit { target: 2, weapon: Weapon::Missile(7), damage: 95.0 };
+        assert!(s.handle(1, hit.clone(), now).is_empty());
+        s.handle(1, missile([1_000.0, 0.0, 0.0]), now);
+        assert!(s.handle(1, hit.clone(), now).is_empty());
+        s.handle(1, missile([2_990.0, 0.0, 0.0]), now);
+        let out = s.handle(1, hit.clone(), now);
+        assert!(matches!(out[0].msg, ServerMsg::Damage { target: 2, attacker: 1, health } if health == 5.0));
+        assert!(s.handle(1, hit, now).is_empty());
+    }
+
+    #[test]
+    fn crashing_after_a_hit_credits_the_attacker() {
+        let (mut s, now) = duel([0.0; 3], [100.0, 0.0, 0.0]);
+        s.handle(1, ClientMsg::Hit { target: 2, weapon: Weapon::Gun, damage: 5.0 }, now);
+        let out = s.handle(2, state([100.0, 0.0, 0.0], Status::Dead), now + Duration::from_secs(3));
+        assert_eq!(kills(&out), vec![(2, Some(1))]);
+        // a plain crash: nobody's kill
+        let out = s.handle(2, ClientMsg::Respawn, now + Duration::from_secs(4));
+        assert_eq!(out[0].msg, ServerMsg::Respawned(2));
+        let out = s.handle(2, state([100.0, 0.0, 0.0], Status::Dead), now + Duration::from_secs(30));
+        assert_eq!(kills(&out), vec![(2, None)]);
+    }
+
+    #[test]
+    fn rooms_fill_up_and_empty_rooms_expire() {
+        let now = Instant::now();
+        let mut s = Server::new(false);
+        s.connect(100, "did:dev:host".into(), "host".into());
+        let out = s.handle(100, ClientMsg::Create { map: MAP, code: Some("TEST".into()) }, now);
+        let ServerMsg::Joined { code, .. } = &out[0].msg else { panic!() };
+        let code = code.clone();
+        // (not a dev server: the requested code is ignored)
+        assert!(valid_code(&code));
+        for i in 1..MAX_PLAYERS as u64 {
+            s.connect(i, format!("did:dev:{i}"), i.to_string());
+            let out = s.handle(i, ClientMsg::Join { code: code.clone() }, now);
+            assert!(matches!(out[0].msg, ServerMsg::Joined { .. }));
+        }
+        s.connect(99, "did:dev:late".into(), "late".into());
+        let out = s.handle(99, ClientMsg::Join { code: code.clone() }, now);
+        assert_eq!(out[0].msg, ServerMsg::Error(ErrorCode::Full));
+        assert_eq!(s.handle(99, ClientMsg::Join { code: "ZZZZ".into() }, now)[0].msg, ServerMsg::Error(ErrorCode::NoRoom));
+        for i in 1..MAX_PLAYERS as u64 {
+            s.disconnect(i, now);
+        }
+        s.disconnect(100, now);
+        assert_eq!(s.player_count(), 0);
+        s.tick(now + Duration::from_secs(10));
+        assert_eq!(s.room_count(), 1);
+        s.tick(now + EMPTY_ROOM_TTL + Duration::from_secs(1));
+        assert_eq!(s.room_count(), 0);
+    }
+
+    #[test]
+    fn the_same_account_twice_takes_over_the_seat() {
+        let (mut s, now) = duel([0.0; 3], [100.0, 0.0, 0.0]);
+        s.connect(3, "did:dev:b".into(), "b".into());
+        let out = s.handle(3, ClientMsg::Join { code: "TEST".into() }, now);
+        assert!(out.iter().any(|o| o.msg == ServerMsg::PlayerLeft(2)));
+        assert_eq!(s.player_count(), 2);
+    }
+}

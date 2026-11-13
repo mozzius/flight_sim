@@ -65,7 +65,11 @@ pub fn round_seed() -> u32 {
 
 /// Starts a new round: a fresh seed and the environment, then the bake.
 pub fn begin_round(commands: &mut Commands, next: &mut NextState<GameState>, mode: GameMode, picks: Picks) {
-    let seed = round_seed();
+    begin_map(commands, next, mode, round_seed(), picks);
+}
+
+/// Starts a round on a given map (multiplayer: the room's).
+pub fn begin_map(commands: &mut Commands, next: &mut NextState<GameState>, mode: GameMode, seed: u32, picks: Picks) {
     commands.insert_resource(MapSeed(seed));
     commands.insert_resource(Environment::choose(seed, picks));
     commands.insert_resource(mode);

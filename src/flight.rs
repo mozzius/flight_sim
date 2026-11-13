@@ -302,7 +302,8 @@ fn flight_physics(
 
 fn ground_collision(
     terrain: Res<Terrain>,
-    query: Query<(Entity, &Transform, &Aircraft)>,
+    // (other players' games decide their own crashes)
+    query: Query<(Entity, &Transform, &Aircraft), Without<crate::net::Remote>>,
     mut crashed: MessageWriter<AircraftCrashed>,
 ) {
     for (entity, transform, ac) in &query {

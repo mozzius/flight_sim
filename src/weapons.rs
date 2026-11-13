@@ -15,8 +15,9 @@ use crate::{
 
 pub const BULLET_SPEED: f32 = 1_030.0;
 const BULLET_LIFE: f32 = 2.2;
-const BULLET_DAMAGE: f32 = 5.0;
-const GUN_RATE: f32 = 25.0; // tracer entities per second (each stands for a few rounds)
+const BULLET_DAMAGE: f32 = crate::net::protocol::GUN_DAMAGE;
+// tracer entities per second (each stands for a few rounds)
+const GUN_RATE: f32 = crate::net::protocol::GUN_RATE;
 
 const MISSILE_THRUST: f32 = 300.0; // m/s^2, boost phase
 const MISSILE_BURN: f32 = 3.0;
@@ -41,7 +42,7 @@ const MISSILE_APN: f32 = 0.5;
 const MISSILE_TRACKER_LAG: (f32, f32) = (0.5, 1.1);
 const MISSILE_TURN_DRAG: f32 = 0.05;
 const MISSILE_FUSE: f32 = 14.0;
-const MISSILE_DAMAGE: f32 = 95.0;
+const MISSILE_DAMAGE: f32 = crate::net::protocol::MISSILE_DAMAGE;
 /// How far off its nose the seeker can look before it loses the target.
 const SEEKER_GIMBAL: f32 = 0.87; // ~50 degrees
 
@@ -173,10 +174,12 @@ impl Targeting {
 
 #[derive(Component)]
 pub struct Bullet {
-    velocity: Vec3,
+    pub velocity: Vec3,
     life: f32,
-    owner: Entity,
+    pub owner: Entity,
     team: Team,
+    /// Another player's tracer (multiplayer): their game decides what it hits.
+    visual: bool,
 }
 
 #[derive(Component)]
@@ -216,12 +219,13 @@ impl Missile {
 
 #[derive(Component)]
 pub struct Flare {
-    velocity: Vec3,
+    pub velocity: Vec3,
     life: f32,
+    pub owner: Entity,
 }
 
 #[derive(Resource)]
-struct ProjectileAssets {
+pub struct ProjectileAssets {
     tracer_mesh: Handle<Mesh>,
     tracer_material: Handle<StandardMaterial>,
     missile_mesh: Handle<Mesh>,
@@ -379,7 +383,7 @@ fn fire_weapons(
         &mut Weapons,
         Option<&Targeting>,
         Has<Disabled>,
-    )>,
+    ), Without<crate::net::Remote>>,
     mut missiles: Query<&mut Missile>,
 ) {
     let dt = time.delta_secs();
@@ -431,22 +435,7 @@ fn fire_weapons(
                 // stagger spawn positions along the path so bursts don't clump
                 let muzzle = transform.transform_point(Vec3::new(0.9, 0.4, -7.0))
                     + velocity * dt * rng.random_range(0.0..1.0);
-                commands.spawn((
-                    Bullet {
-                        velocity,
-                        life: BULLET_LIFE,
-                        owner: entity,
-                        team: *team,
-                    },
-                    Mesh3d(assets.tracer_mesh.clone()),
-                    MeshMaterial3d(assets.tracer_material.clone()),
-                    Transform::from_translation(muzzle)
-                        .looking_to(velocity, Vec3::Y)
-                        * Transform::from_rotation(Quat::from_rotation_x(
-                            std::f32::consts::FRAC_PI_2,
-                        )),
-                    TransformInterpolation,
-                ));
+                spawn_tracer(&mut commands, &assets, muzzle, velocity, entity, *team, false);
             }
         } else {
             weapons.gun_cooldown = weapons.gun_cooldown.max(0.0);
@@ -463,31 +452,19 @@ fn fire_weapons(
             let side = if weapons.rail { 2.2 } else { -2.2 };
             let target = targeting.filter(|t| t.locked()).and_then(|t| t.target);
             let pos = transform.transform_point(Vec3::new(side, -1.2, -1.0));
-            commands
-                .spawn((
-                    Missile {
-                        velocity: state.velocity - transform.up().as_vec3() * 8.0,
-                        target,
-                        owner: entity,
-                        team: *team,
-                        age: 0.0,
-                        lateral: Vec3::ZERO,
-                        last_target_velocity: None,
-                        target_accel: Vec3::ZERO,
-                    },
-                    Mesh3d(assets.missile_mesh.clone()),
-                    MeshMaterial3d(assets.missile_material.clone()),
-                    Transform::from_translation(pos).with_rotation(
-                        transform.rotation * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                    ),
-                    TransformInterpolation,
-                ))
-                .with_child((
-                    MissileFlame,
-                    Mesh3d(assets.flame_mesh.clone()),
-                    MeshMaterial3d(assets.flame_material.clone()),
-                    Transform::from_xyz(0.0, -1.9, 0.0).with_scale(Vec3::new(1.0, 2.5, 1.0)),
-                ));
+            let missile = Missile {
+                velocity: state.velocity - transform.up().as_vec3() * 8.0,
+                target,
+                owner: entity,
+                team: *team,
+                age: 0.0,
+                lateral: Vec3::ZERO,
+                last_target_velocity: None,
+                target_accel: Vec3::ZERO,
+            };
+            let rotation = transform.rotation * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            let e = spawn_missile(&mut commands, &assets, missile, Transform::from_translation(pos).with_rotation(rotation));
+            commands.entity(e).insert(TransformInterpolation);
         }
 
         // ---- flares ----
@@ -504,30 +481,74 @@ fn fire_weapons(
                 weapons.flares -= 1;
                 let kick = transform.rotation
                     * Vec3::new(if i % 2 == 0 { 25.0 } else { -25.0 }, -15.0, 10.0 + i as f32 * 16.0);
-                let flare = commands
-                    .spawn((
-                        Flare {
-                            velocity: state.velocity * 0.7 + kick,
-                            life: 3.5,
-                        },
-                        Mesh3d(assets.flare_mesh.clone()),
-                        MeshMaterial3d(assets.flare_material.clone()),
-                        Transform::from_translation(transform.translation),
-                        TransformInterpolation,
-                    ))
-                    .id();
+                let flare = spawn_flare(&mut commands, &assets, transform.translation, state.velocity * 0.7 + kick, entity);
                 decoy.get_or_insert(flare);
             }
-            // each salvo has a decent chance to pull each incoming missile off
             if let Some(flare) = decoy {
-                for mut m in &mut missiles {
-                    if m.target == Some(entity) && rng.random_bool(0.55) {
-                        m.target = Some(flare);
-                    }
-                }
+                decoy_missiles(entity, flare, missiles.iter_mut().map(|m| m.into_inner()));
             }
         }
     }
+}
+
+/// Each salvo has a decent chance to pull each missile guiding on `target` off onto `flare`.
+pub fn decoy_missiles<'a>(target: Entity, flare: Entity, missiles: impl Iterator<Item = &'a mut Missile>) {
+    let mut rng = rand::rng();
+    for m in missiles {
+        if m.target == Some(target) && rng.random_bool(0.55) {
+            m.target = Some(flare);
+        }
+    }
+}
+
+pub fn spawn_tracer(
+    commands: &mut Commands,
+    assets: &ProjectileAssets,
+    pos: Vec3,
+    velocity: Vec3,
+    owner: Entity,
+    team: Team,
+    visual: bool,
+) -> Entity {
+    commands
+        .spawn((
+            Bullet { velocity, life: BULLET_LIFE, owner, team, visual },
+            Mesh3d(assets.tracer_mesh.clone()),
+            MeshMaterial3d(assets.tracer_material.clone()),
+            Transform::from_translation(pos).looking_to(velocity, Vec3::Y)
+                * Transform::from_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            TransformInterpolation,
+        ))
+        .id()
+}
+
+pub fn spawn_flare(commands: &mut Commands, assets: &ProjectileAssets, pos: Vec3, velocity: Vec3, owner: Entity) -> Entity {
+    commands
+        .spawn((
+            Flare { velocity, life: 3.5, owner },
+            Mesh3d(assets.flare_mesh.clone()),
+            MeshMaterial3d(assets.flare_material.clone()),
+            Transform::from_translation(pos),
+            TransformInterpolation,
+        ))
+        .id()
+}
+
+pub fn spawn_missile(commands: &mut Commands, assets: &ProjectileAssets, missile: Missile, transform: Transform) -> Entity {
+    commands
+        .spawn((
+            missile,
+            Mesh3d(assets.missile_mesh.clone()),
+            MeshMaterial3d(assets.missile_material.clone()),
+            transform,
+        ))
+        .with_child((
+            MissileFlame,
+            Mesh3d(assets.flame_mesh.clone()),
+            MeshMaterial3d(assets.flame_material.clone()),
+            Transform::from_xyz(0.0, -1.9, 0.0).with_scale(Vec3::new(1.0, 2.5, 1.0)),
+        ))
+        .id()
 }
 
 #[derive(Component)]
@@ -538,9 +559,10 @@ fn move_bullets(
     time: Res<Time>,
     terrain: Res<Terrain>,
     mut bullets: Query<(Entity, &mut Bullet, &mut Transform), Without<Aircraft>>,
-    mut aircraft: Query<(Entity, &Transform, &Aircraft, &Team, &mut Health)>,
+    mut aircraft: Query<(Entity, &Transform, &Aircraft, &Team, &mut Health, Has<crate::net::Remote>)>,
     mut explosions: MessageWriter<Explosion>,
     mut hits: MessageWriter<HitConfirmed>,
+    mut net_hits: MessageWriter<crate::net::NetHit>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut bullet, mut transform) in &mut bullets {
@@ -550,14 +572,26 @@ fn move_bullets(
         let to = from + bullet.velocity * dt;
 
         let mut hit = false;
-        for (target, t, ac, team, mut health) in &mut aircraft {
-            if target == bullet.owner || *team == bullet.team {
+        for (target, t, ac, team, mut health, remote) in &mut aircraft {
+            if target == bullet.owner || (*team == bullet.team && !bullet.visual) {
                 continue;
             }
             if segment_sphere_distance(from, to, t.translation) < ac.radius {
-                health.current -= BULLET_DAMAGE;
-                health.last_attacker = Some(bullet.owner);
-                hits.write(HitConfirmed { attacker: bullet.owner });
+                if bullet.visual {
+                    // another player's tracer: the sparks, but they report the hit
+                } else if remote {
+                    // another player's jet: the server decides
+                    net_hits.write(crate::net::NetHit {
+                        target,
+                        weapon: crate::net::protocol::Weapon::Gun,
+                        damage: BULLET_DAMAGE,
+                    });
+                    hits.write(HitConfirmed { attacker: bullet.owner });
+                } else {
+                    health.current -= BULLET_DAMAGE;
+                    health.last_attacker = Some(bullet.owner);
+                    hits.write(HitConfirmed { attacker: bullet.owner });
+                }
                 explosions.write(Explosion {
                     position: t.translation + (from - t.translation).normalize_or_zero() * 3.0,
                     size: 1.5,
@@ -593,14 +627,18 @@ fn guide_missiles(
     mut commands: Commands,
     time: Res<Time>,
     terrain: Res<Terrain>,
-    mut missiles: Query<(Entity, &mut Missile, &mut Transform), Without<Aircraft>>,
-    mut aircraft: Query<(Entity, &Transform, &FlightState, &Team, &mut Health), With<Aircraft>>,
+    mut missiles: Query<
+        (Entity, &mut Missile, &mut Transform, Option<&crate::net::OwnMissile>),
+        (Without<Aircraft>, Without<crate::net::RemoteMissile>),
+    >,
+    mut aircraft: Query<(Entity, &Transform, &FlightState, &Team, &mut Health, Has<crate::net::Remote>), With<Aircraft>>,
     flares: Query<(&Transform, &Flare), (Without<Missile>, Without<Aircraft>)>,
     mut explosions: MessageWriter<Explosion>,
     mut hits: MessageWriter<HitConfirmed>,
+    mut net_hits: MessageWriter<crate::net::NetHit>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut missile, mut transform) in &mut missiles {
+    for (entity, mut missile, mut transform, net_id) in &mut missiles {
         missile.age += dt;
         let pos = transform.translation;
 
@@ -608,7 +646,7 @@ fn guide_missiles(
             aircraft
                 .get(t)
                 .ok()
-                .map(|(_, tt, fs, _, _)| (tt.translation, fs.velocity))
+                .map(|(_, tt, fs, ..)| (tt.translation, fs.velocity))
                 .or_else(|| flares.get(t).ok().map(|(ft, f)| (ft.translation, f.velocity)))
         });
         let (accel, lost) = missile_guidance(&mut missile, pos, target_state, dt);
@@ -621,7 +659,7 @@ fn guide_missiles(
 
         // ---- fuse: closest approach to any enemy aircraft this step ----
         let mut detonate = false;
-        for (target, t, _, team, _) in &aircraft {
+        for (target, t, _, team, ..) in &aircraft {
             if *team == missile.team || target == missile.owner {
                 continue;
             }
@@ -634,14 +672,26 @@ fn guide_missiles(
         let expired = missile.age > MISSILE_LIFE;
 
         if detonate || hit_ground || expired {
-            for (_, t, _, team, mut health) in &mut aircraft {
+            for (target, t, _, team, mut health, remote) in &mut aircraft {
                 if *team == missile.team {
                     continue;
                 }
                 let d = t.translation.distance(new_pos);
                 if d < MISSILE_FUSE * 1.5 {
-                    health.current -= MISSILE_DAMAGE * (1.0 - d / (MISSILE_FUSE * 2.0)).max(0.3);
-                    health.last_attacker = Some(missile.owner);
+                    let damage = MISSILE_DAMAGE * (1.0 - d / (MISSILE_FUSE * 2.0)).max(0.3);
+                    if remote {
+                        // another player's jet: the server decides
+                        if let Some(id) = net_id {
+                            net_hits.write(crate::net::NetHit {
+                                target,
+                                weapon: crate::net::protocol::Weapon::Missile(id.0),
+                                damage,
+                            });
+                        }
+                    } else {
+                        health.current -= damage;
+                        health.last_attacker = Some(missile.owner);
+                    }
                     hits.write(HitConfirmed { attacker: missile.owner });
                 }
             }

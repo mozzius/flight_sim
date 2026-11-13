@@ -35,12 +35,18 @@ impl Plugin for ModesPlugin {
 pub enum GameMode {
     Endless,
     Challenge,
+    /// A free-for-all with other players (see `net`).
+    Multiplayer,
 }
 
 impl GameMode {
     /// The mode to start straight into, skipping the menu (`FLIGHT_SIM_MODE`;
     /// screenshot runs default to endless).
     pub fn from_settings() -> Option<Self> {
+        // (multiplayer dev runs start from the menu, see `net`)
+        if crate::net::dev_auto().is_some() {
+            return None;
+        }
         match crate::environment::setting("FLIGHT_SIM_MODE").map(|s| s.to_ascii_lowercase()).as_deref() {
             Some("endless") => Some(Self::Endless),
             Some("challenge") => Some(Self::Challenge),

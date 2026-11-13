@@ -2,12 +2,42 @@
 name = "flight_sim"
 version = "0.2.0"
 edition = "2024"
+default-run = "flight_sim"
+
+# Two binaries from one crate:
+# - flight_sim: the game (the default `client` feature)
+# - flight_sim_server: the headless multiplayer server
+#   (`cargo run --release --no-default-features --features server --bin flight_sim_server`)
+[[bin]]
+name = "flight_sim"
+path = "src/main.rs"
+required-features = ["client"]
+
+[[bin]]
+name = "flight_sim_server"
+path = "src/server/main.rs"
+required-features = ["server"]
+
+[features]
+default = ["client"]
+client = ["bevy/default", "bevy/wav", "dep:bevy_transform_interpolation", "dep:rand", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
+# no rendering, windowing or audio: just the ECS, time and logging
+server = ["dep:tokio", "dep:axum", "dep:futures-util", "dep:rand"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-bevy = { version = "0.20.1", features = ["wav"] }
-bevy_transform_interpolation = "0.6"
-rand = "0.10"
+bevy = { version = "0.20.1", default-features = false, features = ["std", "async_executor", "multi_threaded", "bevy_log"] }
+bevy_transform_interpolation = { version = "0.6", optional = true }
+rand = { version = "0.10", optional = true }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+
+# native: the server (axum), and the native client's WebSocket on a background tokio thread
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time"], optional = true }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"], optional = true }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
@@ -23,6 +53,8 @@ bevy = { version = "0.20.1", features = ["wav", "webgpu", "webgl2"] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["WebSocket", "MessageEvent", "BinaryType", "CloseEvent", "Event"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [profile.web]

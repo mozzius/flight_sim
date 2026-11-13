@@ -21,10 +21,18 @@ pub struct MenuPlugin;
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         let open = crate::environment::setting("FLIGHT_SIM_MODE").is_some_and(|m| m.eq_ignore_ascii_case("menu-endless"));
+        let panel = match crate::environment::setting("FLIGHT_SIM_MODE").map(|m| m.to_ascii_lowercase()).as_deref() {
+            _ if open => Panel::Endless,
+            Some("menu-multiplayer") => Panel::Multi,
+            Some("menu-create") => Panel::Create,
+            Some("menu-join") => Panel::Join,
+            _ => Panel::Closed,
+        };
         app.init_resource::<Pressed>()
             .init_resource::<Focus>()
+            .init_resource::<JoinCode>()
             .insert_resource(MenuPicks(Picks::from_settings()))
-            .insert_resource(EndlessOpen(open))
+            .insert_resource(panel)
             .add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), despawn_menu)
             .add_systems(Update, (navigate, handle_pressed, style_buttons, layout_menu).chain());
@@ -55,6 +63,13 @@ pub enum UiAction {
     Resume,
     Menu,
     Retry,
+    Multiplayer,
+    Create,
+    Join,
+    SignIn,
+    /// A letter of the room code (an index into `CODE_ALPHABET`).
+    Key(u8),
+    Delete,
 }
 
 /// A menu button. `order` is the focus order on its screen; buttons sharing a
@@ -82,9 +97,37 @@ struct Focus {
 #[derive(Resource)]
 pub struct MenuPicks(pub Picks);
 
-/// The endless pickers are open.
-#[derive(Resource)]
-struct EndlessOpen(bool);
+/// Which part of the mode menu is open.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+enum Panel {
+    Closed,
+    /// The endless pickers.
+    Endless,
+    /// CREATE / JOIN (or SIGN IN).
+    Multi,
+    /// The pickers, for a new room.
+    Create,
+    /// The code keypad.
+    Join,
+}
+
+impl Panel {
+    fn multiplayer(self) -> bool {
+        matches!(self, Self::Multi | Self::Create | Self::Join)
+    }
+}
+
+/// The room code typed so far.
+#[derive(Resource, Default)]
+struct JoinCode(String);
+
+// Focus orders and rows on the mode menu (the account corner button, if
+// any, is order 10 / row 9).
+const ORDER_PICKERS: u8 = 5;
+const ORDER_START: u8 = 8;
+const ORDER_KEYS: u8 = 20;
+const ROW_KEYS: u8 = 11;
+const KEYS_PER_ROW: usize = 8;
 
 const BG: Color = Color::srgb(0.043, 0.059, 0.078);
 const GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
@@ -130,6 +173,51 @@ struct EndlessPanel;
 #[derive(Component)]
 struct PickValue(Pick);
 
+/// ENDLESS / CHALLENGE (hidden while the multiplayer panels are open).
+#[derive(Component)]
+struct ModesRow;
+
+#[derive(Component)]
+struct MultiButton;
+
+#[derive(Component)]
+struct MultiRow;
+
+/// Shown when signed in / signed out.
+#[derive(Component)]
+struct SignedIn(bool);
+
+#[derive(Component)]
+struct JoinPanel;
+
+#[derive(Component)]
+struct CodeText;
+
+#[derive(Component)]
+struct StatusText;
+
+/// A small square keypad key.
+fn key(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, order: u8, row: u8, action: UiAction) {
+    parent
+        .spawn((
+            UiButton { screen: Screen::Modes, order, row, action },
+            Hovered::default(),
+            Node {
+                width: px(38),
+                height: px(40),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(5)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BorderColor::all(BORDER),
+            BackgroundColor(BUTTON),
+        ))
+        .with_child((Text::new(label), font_of(font, 17.0, GREEN), Pickable::IGNORE))
+        .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)));
+}
+
 fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
     let font: Handle<Font> = asset_server.load("fonts/RobotoMono/RobotoMono-Medium.ttf");
     commands
@@ -151,10 +239,24 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
         ))
         .with_children(|root| {
             root.spawn((Text::new("FLIGHT SIM"), font_of(&font, 18.0, Color::srgb(0.62, 0.9, 0.63))));
-            root.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
+            root.spawn((ModesRow, Node { column_gap: px(14), ..default() })).with_children(|row| {
                 button(row, &font, "ENDLESS", Screen::Modes, 0, 0, UiAction::Endless);
                 button(row, &font, "CHALLENGE", Screen::Modes, 1, 0, UiAction::Challenge);
             });
+            if crate::net::auth::available() {
+                root.spawn((MultiButton, Node::default())).with_children(|row| {
+                    button(row, &font, "MULTIPLAYER", Screen::Modes, 2, 1, UiAction::Multiplayer);
+                });
+                root.spawn((MultiRow, Node { column_gap: px(14), ..default() })).with_children(|row| {
+                    row.spawn((SignedIn(true), Node { column_gap: px(14), ..default() })).with_children(|row| {
+                        button(row, &font, "CREATE", Screen::Modes, 3, 2, UiAction::Create);
+                        button(row, &font, "JOIN", Screen::Modes, 4, 2, UiAction::Join);
+                    });
+                    row.spawn((SignedIn(false), Node::default())).with_children(|row| {
+                        button(row, &font, "SIGN IN", Screen::Modes, 3, 2, UiAction::SignIn);
+                    });
+                });
+            }
             root.spawn((
                 EndlessPanel,
                 Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(8), ..default() },
@@ -166,7 +268,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     let action = UiAction::Pick(pick);
                     panel
                         .spawn((
-                            UiButton { screen: Screen::Modes, order: 2 + i as u8, row: 1 + i as u8, action },
+                            UiButton { screen: Screen::Modes, order: ORDER_PICKERS + i as u8, row: 3 + i as u8, action },
                             Hovered::default(),
                             Node {
                                 width: px(374),
@@ -188,8 +290,31 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)));
                 }
                 panel.spawn(Node { height: px(4), ..default() });
-                button(panel, &font, "START", Screen::Modes, 5, 4, UiAction::Start);
+                button(panel, &font, "START", Screen::Modes, ORDER_START, 6, UiAction::Start);
             });
+            root.spawn((
+                JoinPanel,
+                Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(4), ..default() },
+            ))
+            .with_children(|panel| {
+                panel.spawn((CodeText, Text::new(""), font_of(&font, 28.0, GREEN), Node { margin: UiRect::bottom(px(6)), ..default() }));
+                let alphabet = crate::net::protocol::CODE_ALPHABET;
+                let keys: Vec<(String, UiAction)> = alphabet
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| ((*c as char).to_string(), UiAction::Key(i as u8)))
+                    .chain([("<".to_string(), UiAction::Delete)])
+                    .collect();
+                for (r, chunk) in keys.chunks(KEYS_PER_ROW).enumerate() {
+                    panel.spawn(Node { column_gap: px(4), ..default() }).with_children(|row| {
+                        for (i, (label, action)) in chunk.iter().enumerate() {
+                            let order = ORDER_KEYS + (r * KEYS_PER_ROW + i) as u8;
+                            key(row, &font, label, order, ROW_KEYS + r as u8, *action);
+                        }
+                    });
+                }
+            });
+            root.spawn((StatusText, Text::new(""), font_of(&font, 15.0, DIM)));
         });
 }
 
@@ -220,7 +345,7 @@ fn navigate(
     mut stick_latch: Local<bool>,
     mut focus: ResMut<Focus>,
     mut pressed: ResMut<Pressed>,
-    mut open: ResMut<EndlessOpen>,
+    mut panel: ResMut<Panel>,
     buttons: Query<(&UiButton, &ComputedNode)>,
     hovered: Query<(&UiButton, &Hovered), Changed<Hovered>>,
     mut moved: MessageReader<CursorMoved>,
@@ -249,6 +374,19 @@ fn navigate(
 
     let pad = |b: GamepadButton| gamepads.iter().any(|g| g.just_pressed(b));
     let key = |k: &[KeyCode]| k.iter().any(|k| keys.just_pressed(*k));
+    // typing a room code: letters type (so WASD don't steer the focus)
+    let typing = screen == Screen::Modes && *panel == Panel::Join;
+    if typing {
+        for k in keys.get_just_pressed() {
+            if let Some(i) = letter(*k).and_then(|c| crate::net::protocol::CODE_ALPHABET.iter().position(|a| *a == c)) {
+                pressed.0.push((UiAction::Key(i as u8), 1));
+            }
+        }
+        if keys.just_pressed(KeyCode::Backspace) {
+            pressed.0.push((UiAction::Delete, 1));
+        }
+    }
+    let wasd = |k: KeyCode| if typing { KeyCode::ArrowUp } else { k };
     // left stick: one step per push
     let stick = gamepads.iter().map(|g| g.left_stick()).find(|s| s.length() > 0.2).unwrap_or_default();
     let mut stick_dir = IVec2::ZERO;
@@ -264,11 +402,11 @@ fn navigate(
     } else if stick.length() < 0.3 {
         *stick_latch = false;
     }
-    let up = key(&[KeyCode::ArrowUp, KeyCode::KeyW]) || pad(GamepadButton::DPadUp) || stick_dir.y < 0;
-    let down = key(&[KeyCode::ArrowDown, KeyCode::KeyS]) || pad(GamepadButton::DPadDown) || stick_dir.y > 0;
-    let left = key(&[KeyCode::ArrowLeft, KeyCode::KeyA]) || pad(GamepadButton::DPadLeft) || stick_dir.x < 0;
-    let right = key(&[KeyCode::ArrowRight, KeyCode::KeyD]) || pad(GamepadButton::DPadRight) || stick_dir.x > 0;
-    let press = key(&[KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Space]) || pad(GamepadButton::South);
+    let up = key(&[KeyCode::ArrowUp, wasd(KeyCode::KeyW)]) || pad(GamepadButton::DPadUp) || stick_dir.y < 0;
+    let down = key(&[KeyCode::ArrowDown, wasd(KeyCode::KeyS)]) || pad(GamepadButton::DPadDown) || stick_dir.y > 0;
+    let left = key(&[KeyCode::ArrowLeft, wasd(KeyCode::KeyA)]) || pad(GamepadButton::DPadLeft) || stick_dir.x < 0;
+    let right = key(&[KeyCode::ArrowRight, wasd(KeyCode::KeyD)]) || pad(GamepadButton::DPadRight) || stick_dir.x > 0;
+    let press = key(&[KeyCode::Enter, KeyCode::NumpadEnter]) || (!typing && key(&[KeyCode::Space])) || pad(GamepadButton::South);
     let back = (screen == Screen::Modes) && (key(&[KeyCode::Escape]) || pad(GamepadButton::East));
 
     let b = live[current];
@@ -298,8 +436,20 @@ fn navigate(
         pressed.0.push((live[target].action, 1));
     }
     if back {
-        open.0 = false;
+        *panel = match *panel {
+            Panel::Create | Panel::Join => Panel::Multi,
+            _ => Panel::Closed,
+        };
     }
+}
+
+fn letter(k: KeyCode) -> Option<u8> {
+    use KeyCode::*;
+    let all = [
+        KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN, KeyO, KeyP, KeyQ, KeyR, KeyS,
+        KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ,
+    ];
+    all.iter().position(|x| *x == k).map(|i| b'A' + i as u8)
 }
 
 fn cycle<T: Copy + PartialEq>(all: &[T], current: Option<T>, step: i32) -> Option<T> {
@@ -315,22 +465,55 @@ fn handle_pressed(
     mut commands: Commands,
     mut pressed: ResMut<Pressed>,
     mut focus: ResMut<Focus>,
-    mut open: ResMut<EndlessOpen>,
+    mut panel: ResMut<Panel>,
     mut picks: ResMut<MenuPicks>,
     mut paused: ResMut<Paused>,
+    mut code: ResMut<JoinCode>,
+    mut net: ResMut<crate::net::Net>,
     mut next: ResMut<NextState<GameState>>,
 ) {
     for (action, step) in std::mem::take(&mut pressed.0) {
         match action {
             UiAction::Endless => {
-                open.0 = !open.0;
-                if open.0 {
-                    focus.order = 5;
+                *panel = if *panel == Panel::Endless { Panel::Closed } else { Panel::Endless };
+                if *panel == Panel::Endless {
+                    focus.order = ORDER_START;
                 }
+            }
+            UiAction::Multiplayer => {
+                *panel = if panel.multiplayer() { Panel::Closed } else { Panel::Multi };
+            }
+            UiAction::Create => {
+                *panel = if *panel == Panel::Create { Panel::Multi } else { Panel::Create };
+                if *panel == Panel::Create {
+                    focus.order = ORDER_START;
+                }
+            }
+            UiAction::Join => {
+                *panel = if *panel == Panel::Join { Panel::Multi } else { Panel::Join };
+                code.0.clear();
+                if *panel == Panel::Join {
+                    focus.order = ORDER_KEYS;
+                }
+            }
+            UiAction::SignIn => crate::net::auth::sign_in(),
+            UiAction::Key(i) => {
+                let alphabet = crate::net::protocol::CODE_ALPHABET;
+                if code.0.len() >= crate::net::protocol::CODE_LEN {
+                    code.0.clear();
+                }
+                code.0.push(alphabet[i as usize % alphabet.len()] as char);
+                if code.0.len() == crate::net::protocol::CODE_LEN {
+                    net.join(&code.0);
+                }
+            }
+            UiAction::Delete => {
+                code.0.pop();
             }
             UiAction::Challenge | UiAction::Retry => {
                 begin_round(&mut commands, &mut next, GameMode::Challenge, Picks::from_settings());
             }
+            UiAction::Start if *panel == Panel::Create => net.create(picks.0),
             UiAction::Start => begin_round(&mut commands, &mut next, GameMode::Endless, picks.0),
             UiAction::Pick(Pick::Location) => picks.0.biome = cycle(&Biome::ALL, picks.0.biome, step),
             UiAction::Pick(Pick::Weather) => picks.0.weather = cycle(&Weather::ALL, picks.0.weather, step),
@@ -343,12 +526,18 @@ fn handle_pressed(
 
 fn style_buttons(
     focus: Res<Focus>,
-    open: Res<EndlessOpen>,
+    panel: Res<Panel>,
     mut buttons: Query<(&UiButton, &mut BackgroundColor, &mut BorderColor)>,
 ) {
     for (b, mut bg, mut border) in &mut buttons {
         let focused = focus.screen == Some(b.screen) && focus.order == b.order;
-        let on = b.action == UiAction::Endless && open.0;
+        let on = match b.action {
+            UiAction::Endless => *panel == Panel::Endless,
+            UiAction::Multiplayer => panel.multiplayer(),
+            UiAction::Create => *panel == Panel::Create,
+            UiAction::Join => *panel == Panel::Join,
+            _ => false,
+        };
         let color = if focused {
             BUTTON_FOCUS
         } else if on {
@@ -366,25 +555,60 @@ fn style_buttons(
     }
 }
 
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn layout_menu(
-    open: Res<EndlessOpen>,
+    panel: Res<Panel>,
     picks: Res<MenuPicks>,
+    code: Res<JoinCode>,
+    net: Res<crate::net::Net>,
     mut root: Query<&mut Node, (With<MenuRoot>, Without<EndlessPanel>)>,
-    mut panel: Query<&mut Node, (With<EndlessPanel>, Without<MenuRoot>)>,
-    mut values: Query<(&PickValue, &mut Text)>,
+    mut sections: Query<
+        (&mut Node, Has<EndlessPanel>, Has<ModesRow>, Has<MultiRow>, Has<JoinPanel>, Option<&SignedIn>),
+        (Without<MenuRoot>, Or<(With<EndlessPanel>, With<ModesRow>, With<MultiRow>, With<JoinPanel>, With<SignedIn>)>),
+    >,
+    mut values: Query<(&PickValue, &mut Text), (Without<CodeText>, Without<StatusText>)>,
+    mut code_text: Query<&mut Text, (With<CodeText>, Without<StatusText>)>,
+    mut status: Query<&mut Text, (With<StatusText>, Without<CodeText>)>,
 ) {
+    let signed_in = crate::net::auth::user().is_some();
+    for (mut node, endless, modes, multi, join, signed) in &mut sections {
+        let show = if endless {
+            matches!(*panel, Panel::Endless | Panel::Create)
+        } else if modes {
+            !panel.multiplayer()
+        } else if multi {
+            panel.multiplayer()
+        } else if join {
+            *panel == Panel::Join
+        } else {
+            signed.is_some_and(|s| s.0 == signed_in)
+        };
+        let d = if show { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+        }
+    }
+    if let Ok(mut text) = code_text.single_mut() {
+        let slots: String = (0..crate::net::protocol::CODE_LEN)
+            .map(|i| code.0.chars().nth(i).unwrap_or('_').to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.0 != slots {
+            text.0 = slots;
+        }
+    }
+    if let Ok(mut text) = status.single_mut() {
+        let value = if panel.multiplayer() { net.label().unwrap_or("") } else { "" };
+        if text.0 != value {
+            text.0 = value.into();
+        }
+    }
     if let Ok(mut node) = root.single_mut() {
         // keep clear of the notch and the home indicator
         let s = crate::platform::safe_area();
         let padding = UiRect { left: px(s.x), top: px(s.y), right: px(s.z), bottom: px(s.w) };
         if node.padding != padding {
             node.padding = padding;
-        }
-    }
-    if let Ok(mut node) = panel.single_mut() {
-        let d = if open.0 { Display::Flex } else { Display::None };
-        if node.display != d {
-            node.display = d;
         }
     }
     for (value, mut text) in &mut values {
