@@ -78,9 +78,30 @@ jobs:
           name: windows
           path: flight-sim-windows.zip
 
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - name: build
+        run: cargo build --release
+      - name: package
+        run: |
+          mkdir flight-sim
+          cp target/release/flight_sim flight-sim/
+          cp -R assets flight-sim/assets
+          tar -czf flight-sim-linux-x86_64.tar.gz flight-sim
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux
+          path: flight-sim-linux-x86_64.tar.gz
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [macos, windows]
+    needs: [macos, windows, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -91,4 +112,5 @@ jobs:
           files: |
             flight-sim-macos.zip
             flight-sim-windows.zip
+            flight-sim-linux-x86_64.tar.gz
           generate_release_notes: true

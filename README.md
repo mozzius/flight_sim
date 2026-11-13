@@ -87,7 +87,7 @@ Screenshot runs are headless (no window) and silent.
 
 ## Desktop builds
 
-Pushing a `v*` tag builds a universal macOS .app and a Windows .exe in GitHub Actions (`.github/workflows/release.yml`) and attaches them to a GitHub release. The macOS app is ad-hoc signed but not notarised, so the first launch needs right-click → Open (or `xattr -dr com.apple.quarantine "Flight Sim.app"`).
+Pushing a `v*` tag builds a universal macOS .app, a Windows .exe and a Linux x86_64 tarball in GitHub Actions (`.github/workflows/release.yml`) and attaches them to a GitHub release. The macOS app is ad-hoc signed but not notarised, so the first launch needs right-click → Open (or `xattr -dr com.apple.quarantine "Flight Sim.app"`).
 
 ## Web build
 
