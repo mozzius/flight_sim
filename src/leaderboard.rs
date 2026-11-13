@@ -188,6 +188,7 @@ fn back(mut board: ResMut<BoardUi>, mut keys: ResMut<ButtonInput<KeyCode>>, mut 
 }
 
 /// `FLIGHT_SIM_DEV_BOARD=global|friends`.
+#[allow(clippy::too_many_arguments)]
 fn dev_board(
     state: Res<State<GameState>>,
     mode: Res<GameMode>,
