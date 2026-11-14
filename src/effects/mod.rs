@@ -74,7 +74,11 @@ impl Plugin for EffectsPlugin {
             )
                 .chain()
                 .in_set(EffectsSystems)
-                .after(TransformSystems::Propagate),
+                .after(TransformSystems::Propagate)
+                // the particle mesh and plume materials are rewritten here: their
+                // change events must go out this frame, or the render world draws
+                // last frame's particles (a missile's glow trailed ~10 m behind it)
+                .before(bevy::asset::AssetEventSystems),
         );
     }
 }
@@ -580,9 +584,10 @@ fn projectile_fx(
     let pixel = |p: Vec3| p.distance(cam) * 0.00088;
     last.retain(|e, _| missiles.contains(*e) || flares.contains(*e));
     for (entity, gt, missile) in &missiles {
-        // missile meshes point along local +Y; the motor is at -Y
-        let motor = gt.transform_point(Vec3::new(0.0, -2.0, 0.0));
-        let dir = missile.velocity.normalize_or(Vec3::Y);
+        // missile meshes point along local -Y (looking_to(velocity) then +90°
+        // about X takes -Y to -Z); the motor is at +Y
+        const MOTOR: Vec3 = Vec3::new(0.0, 2.0, 0.0);
+        let motor = gt.transform_point(MOTOR);
         let flick = plume::turbulence(t * 1.7, entity.index().index() as f32);
         // never let it shrink below a few pixels, so missiles stay visible far out
         let min_size = pixel(motor) * 4.0;
@@ -591,11 +596,12 @@ fn projectile_fx(
             let s = (0.8_f32).max(min_size * 0.7);
             particles.add(
                 Particle {
-                    life: 0.025,
+                    life: particles::ONE_FRAME,
                     size: (s, s),
                     glow: 1.5,
                     heat: 0.3,
-                    ..Particle::glow(motor)
+                    frame: Some(entity),
+                    ..Particle::glow(MOTOR)
                 },
                 1.0,
             );
@@ -605,12 +611,15 @@ fn projectile_fx(
         let boost = missile.motor_burning();
         // hot exhaust flame just behind the nozzle
         let s = (if boost { 2.2 } else { 1.4 } * flick).max(min_size);
+        // (riding on the missile, for exactly one frame: a world-space glow
+        // that outlived its frame hung in the air ~10 m behind, a second light)
         particles.add(
             Particle {
-                life: 0.025,
+                life: particles::ONE_FRAME,
                 size: (s, s),
                 glow: if boost { 6.5 } else { 4.0 },
-                ..Particle::glow(motor - dir * 0.8)
+                frame: Some(entity),
+                ..Particle::glow(MOTOR + Vec3::Y * 0.8)
             },
             1.0,
         );
@@ -650,11 +659,12 @@ fn projectile_fx(
         let flick = plume::turbulence(t * 2.0, entity.index().index() as f32);
         particles.add(
             Particle {
-                life: 0.025,
+                life: particles::ONE_FRAME,
                 size: (7.0 * flick, 7.0 * flick),
                 glow: 3.5,
                 heat: 1.3,
-                ..Particle::glow(pos)
+                frame: Some(entity),
+                ..Particle::glow(Vec3::ZERO)
             },
             1.0,
         );

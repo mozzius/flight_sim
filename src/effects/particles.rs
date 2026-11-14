@@ -29,6 +29,10 @@ use crate::camera::MainCamera;
 
 pub const MAX_PARTICLES: usize = 16_000;
 
+/// A `life` that draws a particle for exactly one frame (it dies at the next
+/// `simulate`), for glows re-emitted every frame on moving things.
+pub const ONE_FRAME: f32 = 1e-4;
+
 /// Steady breeze that carries smoke (m/s).
 pub const WIND: Vec3 = Vec3::new(5.0, 0.0, 2.0);
 
