@@ -95,3 +95,26 @@ pub fn safe_area() -> bevy::math::Vec4 {
     #[cfg(not(target_arch = "wasm32"))]
     bevy::math::Vec4::ZERO
 }
+
+/// A touch-first device (a phone or tablet: its main pointer is a finger),
+/// so the touch controls show, and the tutorial talks touch, from the
+/// start. The page decides (`window.FLIGHT_SIM_TOUCH_FIRST`: a coarse
+/// primary pointer, or touch and no fine pointer at all; `?touch` /
+/// `?notouch` override it), so a laptop with a touchscreen keeps the mouse.
+/// Natively there's no such device; `FLIGHT_SIM_TOUCH_FIRST=1` pretends
+/// (unlike `FLIGHT_SIM_INPUT=touch`, which pins it, a key still switches away).
+pub fn touch_first() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            js_sys::Reflect::get(&js_sys::global(), &"FLIGHT_SIM_TOUCH_FIRST".into())
+                .map(|v| v.is_truthy())
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::env::var("FLIGHT_SIM_TOUCH_FIRST").is_ok_and(|v| v != "0")
+        }
+    })
+}

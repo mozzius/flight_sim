@@ -243,6 +243,11 @@
       let graphics = "";
       try { graphics = localStorage.getItem("flight_sim_graphics") || ""; } catch {}
       const auto = navigator.maxTouchPoints > 0;
+      // touch-first (src/platform.rs touch_first): the main pointer is a finger, or
+      // there's touch and no mouse or trackpad at all. A touchscreen laptop
+      // (fine primary pointer) keeps the mouse. ?touch / ?notouch override it.
+      const mq = (m) => { try { return matchMedia(m).matches; } catch { return false; } };
+      window.FLIGHT_SIM_TOUCH_FIRST = q.has("touch") || (!q.has("notouch") && (mq("(pointer: coarse)") || (auto && !mq("(any-pointer: fine)"))));
       window.FLIGHT_SIM_LOW_MEMORY = q.has("low") || (!q.has("high") && (graphics === "low" || (graphics !== "high" && auto)));
       const real = window.devicePixelRatio || 1;
       const cap = window.FLIGHT_SIM_LOW_MEMORY ? 1.5 : 2;
