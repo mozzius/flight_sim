@@ -45,6 +45,12 @@ impl Family {
     pub const fn new(labels: &'static [&'static str]) -> Self {
         Self { labels, values: Mutex::new(BTreeMap::new()) }
     }
+    /// Starts a series at 0 (so the first event shows up in `rate()`).
+    fn seed(&self, values: &[&str]) {
+        let key: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+        self.values.lock().unwrap().entry(key).or_default();
+    }
+
     pub fn inc(&self, values: &[&str]) {
         debug_assert_eq!(values.len(), self.labels.len());
         let key: Vec<String> = values.iter().map(|v| v.to_string()).collect();
@@ -186,9 +192,26 @@ static STARTED: LazyLock<(Instant, f64)> = LazyLock::new(|| {
     (Instant::now(), unix)
 });
 
-/// Marks the process start (call early: uptime counts from the first call).
+/// Marks the process start (call early: uptime counts from the first call)
+/// and starts the known series at 0.
 pub fn start() {
     LazyLock::force(&STARTED);
+    seed(&M);
+}
+
+fn seed(m: &Metrics) {
+    let each = |f: &Family, values: &[&str]| values.iter().for_each(|v| f.seed(&[v]));
+    each(&m.auth, &["ok", "rejected", "rejected_dev", "bad_hello", "client_outdated", "server_outdated"]);
+    each(&m.rooms_created, &["public", "hosted"]);
+    each(&m.joins, &["code", "invite", "friend", "request", "quickplay", "queue"]);
+    each(&m.quickplay, &["joined", "queued"]);
+    each(&m.queue_exits, &["matched", "cancelled", "offline", "joined_elsewhere"]);
+    each(&m.invites, &["sent", "failed"]);
+    each(&m.join_requests, &["sent", "refused", "accepted", "declined", "expired"]);
+    each(&m.deaths, &["shot", "crash"]);
+    m.challenge_runs.seed(&["accepted", ""]);
+    each(&m.appview_calls, &["getRelationships", "getProfiles"]);
+    each(&m.appview_errors, &["getRelationships", "getProfiles"]);
 }
 
 /// The build: the commit Railway deployed (`RAILWAY_GIT_COMMIT_SHA`, or
@@ -373,6 +396,8 @@ mod tests {
             tick: Histogram::new(TICK_BUCKETS),
             ws_open: AtomicU64::new(3),
         };
+        seed(&m);
+        assert!(render(&Gauges::default(), &m).contains("flightsim_joins_total{method=\"invite\"} 0\n"), "seeded at 0");
         m.auth.inc(&["ok"]);
         m.auth.inc(&["ok"]);
         m.auth.inc(&["rejected"]);
