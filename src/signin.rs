@@ -27,7 +27,7 @@ use bevy::{
 
 use crate::{
     loading::GameState,
-    menu::{BG, BORDER, BUTTON, DIM, GREEN, Pressed, Screen, UiAction, UiButton, font_of},
+    menu::{BORDER, BUTTON, DIM, GREEN, Pressed, Screen, UiAction, UiButton, font_of},
 };
 
 pub struct SignInPlugin;
@@ -134,7 +134,7 @@ fn spawn(commands: &mut Commands, asset_server: &AssetServer) -> Entity {
                 row_gap: px(16),
                 ..default()
             },
-            BackgroundColor(BG),
+            crate::menu::backdrop(),
             GlobalZIndex(30),
         ))
         .with_children(|root| {

@@ -6,11 +6,11 @@
 //! answers with our best and global rank, which the score screen shows next
 //! to BEST (`modes`). The server side is `src/server/leaderboard.rs`.
 //!
-//! The LEADERBOARD screen (from the score screen, or the menu's top-left
-//! corner) has GLOBAL / FRIENDS tabs: `#  @handle  score  W<wave>` rows, ours
+//! The LEADERBOARD screen (from the score screen, or the menu's
+//! LEADERBOARD, shown signed in) has GLOBAL / FRIENDS tabs: `#  @handle  score  W<wave>` rows, ours
 //! highlighted (and added under the top 20 if we're further down), a dash
 //! when there's nothing. Signed out, the score screen's button says SIGN IN
-//! (and the corner one hides: the account corner says it already).
+//! (and the menu's hides: the account corner says it already).
 //!
 //! Dev: `FLIGHT_SIM_DEV_RUN=<kills>,<wave>` swaps in a fake (but plausible)
 //! run when the challenge ends; `FLIGHT_SIM_DEV_BOARD=global|friends` opens
@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use crate::{
     game::Score,
     loading::{GameState, MapSeed},
-    menu::{BG, BORDER, BUTTON, DIM, GREEN, Pressed, Screen, UiAction, UiButton, button, font_of},
+    menu::{DIM, GREEN, Pressed, Screen, UiAction, UiButton, button, font_of},
     modes::{GameMode, challenge_over},
     net::{
         Net,
@@ -39,11 +39,10 @@ impl Plugin for LeaderboardPlugin {
             .init_resource::<RunClock>()
             .add_systems(Startup, spawn_board)
             .add_systems(OnEnter(GameState::Playing), start_run)
-            .add_systems(OnEnter(GameState::Menu), spawn_corner)
-            .add_systems(OnExit(GameState::Menu), (despawn_corner, close))
+            .add_systems(OnExit(GameState::Menu), close)
             .add_systems(OnExit(GameState::Playing), close)
             .add_systems(PreUpdate, back.after(bevy::input::InputSystems))
-            .add_systems(Update, (submit_run, dev_board, label_buttons, layout_corner, layout_board).chain());
+            .add_systems(Update, (submit_run, dev_board, label_buttons, layout_board).chain());
     }
 }
 
@@ -76,8 +75,6 @@ struct BoardRoot;
 #[derive(Component)]
 struct BoardRows;
 
-#[derive(Component)]
-struct Corner;
 
 const ME: Color = Color::srgb(0.9, 1.0, 0.92);
 /// Handles longer than this are cut.
@@ -240,11 +237,12 @@ fn spawn_board(mut commands: Commands, asset_server: Res<AssetServer>) {
                 display: Display::None,
                 ..default()
             },
-            BackgroundColor(BG),
+            crate::menu::backdrop(),
             GlobalZIndex(10),
         ))
         .with_children(|root| {
-            root.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
+            root.spawn((Text::new("LEADERBOARD"), font_of(&font, 13.0, DIM), bevy::text::LetterSpacing::Px(3.0)));
+            root.spawn(Node { column_gap: px(10), ..default() }).with_children(|row| {
                 button(row, &font, "GLOBAL", Screen::Leaderboard, 0, 0, UiAction::BoardTab(BoardKind::Global));
                 button(row, &font, "FRIENDS", Screen::Leaderboard, 1, 0, UiAction::BoardTab(BoardKind::Friends));
             });
@@ -259,63 +257,8 @@ fn spawn_board(mut commands: Commands, asset_server: Res<AssetServer>) {
                     ..default()
                 },
             ));
-            button(root, &font, "BACK", Screen::Leaderboard, 2, 1, UiAction::CloseBoard);
+            crate::menu::quiet_button(root, &font, "BACK", Screen::Leaderboard, 2, 1, UiAction::CloseBoard);
         });
-}
-
-/// The menu's LEADERBOARD corner (top left), while signed in.
-fn spawn_corner(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let font: Handle<Font> = asset_server.load("fonts/RobotoMono/RobotoMono-Medium.ttf");
-    let action = UiAction::Leaderboard;
-    commands
-        .spawn((
-            Corner,
-            crate::intro::KeepDuringIntro,
-            Node { position_type: PositionType::Absolute, top: px(12), left: px(12), display: Display::None, ..default() },
-            GlobalZIndex(7),
-        ))
-        .with_children(|corner| {
-            corner
-                .spawn((
-                    // (focus: the account corner's row, to its left)
-                    UiButton { screen: Screen::Modes, order: 9, row: 9, action },
-                    bevy::picking::hover::Hovered::default(),
-                    Node {
-                        min_height: px(36),
-                        padding: UiRect::axes(px(12), px(6)),
-                        border: UiRect::all(px(1)),
-                        border_radius: BorderRadius::all(px(6)),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BorderColor::all(BORDER),
-                    BackgroundColor(BUTTON),
-                ))
-                .with_child((Text::new("LEADERBOARD"), font_of(&font, 13.0, GREEN), Pickable::IGNORE))
-                .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)));
-        });
-}
-
-fn despawn_corner(mut commands: Commands, corners: Query<Entity, With<Corner>>) {
-    for e in &corners {
-        commands.entity(e).despawn();
-    }
-}
-
-fn layout_corner(net: Res<Net>, mut corner: Query<&mut Node, With<Corner>>) {
-    let Ok(mut node) = corner.single_mut() else { return };
-    let show = crate::identity::current_user().is_some() && !net.in_lobby();
-    let d = if show { Display::Flex } else { Display::None };
-    if node.display != d {
-        node.display = d;
-    }
-    let s = crate::platform::safe_area();
-    let (top, left) = (px(s.y + 12.0), px(s.x + 12.0));
-    if node.top != top || node.left != left {
-        node.top = top;
-        node.left = left;
-    }
 }
 
 /// The score screen's LEADERBOARD says SIGN IN when signed out (and hides
@@ -323,7 +266,7 @@ fn layout_corner(net: Res<Net>, mut corner: Query<&mut Node, With<Corner>>) {
 fn label_buttons(
     board: Res<BoardUi>,
     mut buttons: Query<(&UiButton, &Children, &mut Node)>,
-    mut texts: Query<(&mut Text, &mut TextColor)>,
+    mut texts: Query<(&mut Text, &mut TextColor), With<crate::menu::ButtonLabel>>,
 ) {
     let signed_in = crate::identity::current_user().is_some();
     for (b, children, mut node) in &mut buttons {

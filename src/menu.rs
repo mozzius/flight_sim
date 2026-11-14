@@ -1,6 +1,13 @@
 //! The mode menu (before every round), plus the buttons shared by the menus:
 //! the mode menu, the pause menu and the challenge score screen.
 //!
+//! The mode menu is a title (left in landscape, on top in portrait) and one
+//! column of buttons: ENDLESS / CHALLENGE / MULTIPLAYER, then the quieter
+//! TUTORIAL / LEADERBOARD / SETTINGS. Each opens a page in the column (with
+//! BACK); the account corner is `@handle` or SIGN IN. Behind it the camera
+//! turns slowly under the sky ([`menu_camera`]) under a dark gradient
+//! ([`backdrop`]). The focus is the one highlight: a bright border and `>`.
+//!
 //! Buttons work with the mouse and touch (click / tap), and with the
 //! keyboard or a gamepad: arrows / D-pad / left stick move the focus,
 //! Enter / Space / (A) press, left and right cycle a picker, Esc / (B) closes
@@ -51,7 +58,8 @@ impl Plugin for MenuPlugin {
                     .chain()
                     .in_set(MenuSystems),
             )
-            .add_systems(Update, crate::friends::invite_shortcut.before(handle_pressed));
+            .add_systems(Update, crate::friends::invite_shortcut.before(handle_pressed))
+            .add_systems(PostUpdate, menu_camera.run_if(in_state(GameState::Menu)).before(TransformSystems::Propagate));
     }
 }
 
@@ -128,6 +136,8 @@ pub enum UiAction {
     /// last screen), handled in `tutorial`.
     Tutorial,
     SkipStep,
+    /// A sub-page's BACK (Esc / (B) too).
+    Back,
     TutorialEndless,
 }
 
@@ -182,11 +192,17 @@ impl Panel {
 #[derive(Resource, Default)]
 struct JoinCode(String);
 
-// Focus orders and rows on the mode menu (the leaderboard and account corner
-// buttons are orders 9 and 10 on row 9; up / down go by row).
+// Focus orders and rows on the mode menu (up / down go by row). Home is
+// orders / rows 0-5, the multiplayer page 6-8; each page's BACK comes last,
+// then the account corner, then the friends list.
 const ORDER_PICKERS: u8 = 12;
+const ROW_PICKERS: u8 = 12;
 const ORDER_START: u8 = 16;
-const ROW_START: u8 = 7;
+const ROW_START: u8 = 16;
+const ORDER_BACK: u8 = 89;
+const ROW_BACK: u8 = 28;
+const ORDER_CORNER: u8 = 90;
+const ROW_CORNER: u8 = 29;
 const ORDER_SETTINGS: u8 = 50;
 const ROW_SETTINGS: u8 = 16;
 const ORDER_KEYS: u8 = 20;
@@ -204,43 +220,97 @@ const ROW_FRIENDS: u8 = 30;
 pub(crate) const BG: Color = Color::srgb(0.043, 0.059, 0.078);
 pub(crate) const GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
 pub(crate) const DIM: Color = Color::srgb(0.65, 0.8, 0.7);
-pub(crate) const BUTTON: Color = Color::srgba(0.05, 0.18, 0.09, 0.9);
-const BUTTON_FOCUS: Color = Color::srgba(0.1, 0.32, 0.16, 0.95);
-const BUTTON_ON: Color = Color::srgba(0.16, 0.45, 0.24, 0.95);
-pub(crate) const BORDER: Color = Color::srgba(0.4, 1.0, 0.55, 0.45);
+pub(crate) const BUTTON: Color = Color::srgba(0.04, 0.13, 0.07, 0.82);
+const BUTTON_FOCUS: Color = Color::srgba(0.09, 0.3, 0.15, 0.92);
+/// The quiet (secondary) buttons: outline only.
+const QUIET: Color = Color::srgba(0.02, 0.05, 0.04, 0.35);
+const QUIET_FOCUS: Color = Color::srgba(0.07, 0.22, 0.12, 0.8);
+pub(crate) const BORDER: Color = Color::srgba(0.4, 1.0, 0.55, 0.4);
+const QUIET_BORDER: Color = Color::srgba(0.4, 1.0, 0.55, 0.2);
+/// The menu column's width (logical px).
+const COLUMN_WIDTH: f32 = 300.0;
 
 pub(crate) fn font_of(font: &Handle<Font>, size: f32, color: Color) -> (TextFont, TextColor) {
     (TextFont { font: font.clone().into(), font_size: FontSize::Px(size), ..default() }, TextColor(color))
 }
 
+/// A secondary button (outline only, smaller).
+#[derive(Component)]
+struct Quiet;
+
+/// The `>` at a focused button's left.
+#[derive(Component)]
+struct FocusMarker;
+
+/// A button's label (quiet ones brighten when focused).
+#[derive(Component)]
+pub(crate) struct ButtonLabel;
+
+/// TUTORIAL's dot, until it's been finished once.
+#[derive(Component)]
+struct TutorialDot;
+
+fn spawn_button(
+    parent: &mut ChildSpawnerCommands,
+    font: &Handle<Font>,
+    label: &str,
+    b: UiButton,
+    quiet: bool,
+) -> Entity {
+    let action = b.action;
+    let mut e = parent.spawn((
+        b,
+        Hovered::default(),
+        Node {
+            min_width: px(180),
+            min_height: px(if quiet { 40 } else { 48 }),
+            padding: UiRect::axes(px(32), px(if quiet { 6 } else { 10 })),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(4)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BorderColor::all(if quiet { QUIET_BORDER } else { BORDER }),
+        BackgroundColor(if quiet { QUIET } else { BUTTON }),
+    ));
+    if quiet {
+        e.insert(Quiet);
+    }
+    e.with_children(|b| {
+        b.spawn((
+            FocusMarker,
+            Text::new(">"),
+            font_of(font, if quiet { 15.0 } else { 18.0 }, GREEN),
+            Node { position_type: PositionType::Absolute, left: px(14), ..default() },
+            Visibility::Hidden,
+            Pickable::IGNORE,
+        ));
+        b.spawn((
+            ButtonLabel,
+            Text::new(label),
+            font_of(font, if quiet { 15.0 } else { 19.0 }, if quiet { DIM } else { GREEN }),
+            bevy::text::LetterSpacing::Px(if quiet { 1.5 } else { 2.0 }),
+            Pickable::IGNORE,
+        ));
+    })
+    .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)))
+    .id()
+}
+
 /// Spawns a text button (at least 48 px tall, for fingers).
-pub fn button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, screen: Screen, order: u8, row: u8, action: UiAction) {
-    parent
-        .spawn((
-            UiButton { screen, order, row, action },
-            Hovered::default(),
-            Node {
-                min_width: px(180),
-                min_height: px(48),
-                padding: UiRect::axes(px(24), px(10)),
-                border: UiRect::all(px(2)),
-                border_radius: BorderRadius::all(px(6)),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BorderColor::all(BORDER),
-            BackgroundColor(BUTTON),
-        ))
-        .with_child((Text::new(label), font_of(font, 20.0, GREEN), Pickable::IGNORE))
-        .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)));
+pub fn button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, screen: Screen, order: u8, row: u8, action: UiAction) -> Entity {
+    spawn_button(parent, font, label, UiButton { screen, order, row, action }, false)
+}
+
+/// A secondary button: outline only, a little smaller.
+pub(crate) fn quiet_button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, screen: Screen, order: u8, row: u8, action: UiAction) -> Entity {
+    spawn_button(parent, font, label, UiButton { screen, order, row, action }, true)
 }
 
 #[derive(Component)]
 struct MenuRoot;
 
-#[derive(Component)]
-struct EndlessPanel;
 
 /// The account corner (top right): the signed-in handle and SIGN OUT, or SIGN IN.
 #[derive(Component)]
@@ -255,19 +325,9 @@ struct AccountLabel;
 #[derive(Component)]
 struct PickValue(Pick);
 
-/// DIFFICULTY (endless only: hidden when the pickers set up a room).
-#[derive(Component)]
-struct EndlessOnly;
 
-#[derive(Component)]
-struct SettingsButton;
 
-#[derive(Component)]
-struct SettingsPanel;
 
-/// Wraps APPLY (the web, with a GRAPHICS pick waiting).
-#[derive(Component)]
-struct ApplyButton;
 
 /// A picker row: label on the left, `< VALUE >` on the right.
 fn picker(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, pick: Pick, order: u8, row: u8) -> Entity {
@@ -277,11 +337,10 @@ fn picker(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, p
             UiButton { screen: Screen::Modes, order, row, action },
             Hovered::default(),
             Node {
-                width: px(374),
-                min_height: px(44),
-                padding: UiRect::axes(px(16), px(8)),
+                min_height: px(42),
+                padding: UiRect::axes(px(16), px(6)),
                 border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(6)),
+                border_radius: BorderRadius::all(px(4)),
                 justify_content: JustifyContent::SpaceBetween,
                 align_items: AlignItems::Center,
                 ..default()
@@ -290,29 +349,17 @@ fn picker(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, p
             BackgroundColor(BUTTON),
         ))
         .with_children(|b| {
-            b.spawn((Text::new(label), font_of(font, 14.0, DIM), Pickable::IGNORE));
-            b.spawn((PickValue(pick), Text::new(""), font_of(font, 17.0, GREEN), Pickable::IGNORE));
+            b.spawn((Text::new(label), font_of(font, 13.0, DIM), bevy::text::LetterSpacing::Px(1.5), Pickable::IGNORE));
+            b.spawn((PickValue(pick), Text::new(""), font_of(font, 16.0, GREEN), Pickable::IGNORE));
         })
         .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)))
         .id()
 }
 
-/// ENDLESS / CHALLENGE (hidden while the multiplayer panels are open).
-#[derive(Component)]
-struct ModesRow;
 
-#[derive(Component)]
-struct MultiButton;
 
-#[derive(Component)]
-struct MultiRow;
 
-/// Shown when signed in / signed out.
-#[derive(Component)]
-struct SignedIn(bool);
 
-#[derive(Component)]
-struct JoinPanel;
 
 #[derive(Component)]
 struct CodeText;
@@ -320,8 +367,6 @@ struct CodeText;
 #[derive(Component)]
 struct StatusText;
 
-#[derive(Component)]
-struct LobbyPanel;
 
 #[derive(Component)]
 struct LobbyCode;
@@ -336,9 +381,6 @@ struct LobbyBar;
 #[derive(Component)]
 struct LobbyStart;
 
-/// The quick-play queue's screen.
-#[derive(Component)]
-struct QueuePanel;
 
 /// SEARCHING and its dots.
 #[derive(Component)]
@@ -361,10 +403,10 @@ fn key(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, orde
             UiButton { screen: Screen::Modes, order, row, action },
             Hovered::default(),
             Node {
-                width: px(38),
+                width: px(34),
                 height: px(40),
                 border: UiRect::all(px(1)),
-                border_radius: BorderRadius::all(px(5)),
+                border_radius: BorderRadius::all(px(4)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
@@ -376,8 +418,60 @@ fn key(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, orde
         .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)));
 }
 
+/// The dark wash over the live sky behind the menus: light at the top (the
+/// sky shows), dark at the bottom (over the ground), darker at the edges.
+pub(crate) fn backdrop() -> BackgroundGradient {
+    BackgroundGradient(vec![
+        LinearGradient::new(
+            LinearGradient::TO_BOTTOM,
+            vec![
+                ColorStop::percent(BG.with_alpha(0.35), 0.0),
+                ColorStop::percent(BG.with_alpha(0.55), 45.0),
+                ColorStop::percent(BG.with_alpha(0.93), 75.0),
+                ColorStop::percent(BG.with_alpha(0.97), 100.0),
+            ],
+        )
+        .into(),
+        RadialGradient::new(
+            UiPosition::CENTER,
+            RadialGradientShape::FarthestCorner,
+            vec![ColorStop::percent(BG.with_alpha(0.0), 35.0), ColorStop::percent(BG.with_alpha(0.6), 100.0)],
+        )
+        .into(),
+    ])
+}
+
+/// The title, its rule (and the friends list, in multiplayer): the left of
+/// the menu in landscape, the top in portrait.
+#[derive(Component)]
+struct TitleBlock;
+
+#[derive(Component)]
+struct TitleText;
+
+/// The buttons' column.
+#[derive(Component)]
+struct MainColumn;
+
+
+
+/// The small label over a sub-page (ENDLESS, MULTIPLAYER, ...).
+#[derive(Component)]
+struct PageHeading;
+
+
+
+
+
 fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
     let font: Handle<Font> = asset_server.load("fonts/RobotoMono/RobotoMono-Medium.ttf");
+    let net = crate::net::auth::available();
+    let column = |gap: f32| Node {
+        flex_direction: FlexDirection::Column,
+        align_items: AlignItems::Stretch,
+        row_gap: px(gap),
+        ..default()
+    };
     commands
         .spawn((
             MenuRoot,
@@ -386,149 +480,183 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                 position_type: PositionType::Absolute,
                 width: percent(100),
                 height: percent(100),
-                flex_direction: FlexDirection::Column,
+                flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                row_gap: px(18),
+                column_gap: px(72),
+                row_gap: px(24),
                 ..default()
             },
-            BackgroundColor(BG),
+            backdrop(),
             GlobalZIndex(6),
         ))
         .with_children(|root| {
-            root.spawn((Text::new("FLIGHT SIM"), font_of(&font, 18.0, Color::srgb(0.62, 0.9, 0.63))));
-            root.spawn((ModesRow, Node { column_gap: px(14), ..default() })).with_children(|row| {
-                button(row, &font, "ENDLESS", Screen::Modes, 0, 0, UiAction::Endless);
-                button(row, &font, "CHALLENGE", Screen::Modes, 1, 0, UiAction::Challenge);
-            });
-            if crate::net::auth::available() {
-                root.spawn((MultiButton, Node::default())).with_children(|row| {
-                    button(row, &font, "MULTIPLAYER", Screen::Modes, 2, 1, UiAction::Multiplayer);
-                });
-                root.spawn((MultiRow, Node { column_gap: px(14), ..default() })).with_children(|row| {
-                    let wrap = Node {
-                        column_gap: px(14),
-                        row_gap: px(10),
-                        flex_wrap: FlexWrap::Wrap,
-                        justify_content: JustifyContent::Center,
-                        ..default()
-                    };
-                    row.spawn((SignedIn(true), wrap)).with_children(|row| {
-                        button(row, &font, "QUICK PLAY", Screen::Modes, 3, 2, UiAction::QuickPlay);
-                        button(row, &font, "HOST GAME", Screen::Modes, 4, 2, UiAction::Create);
-                        button(row, &font, "JOIN GAME", Screen::Modes, 5, 2, UiAction::Join);
-                    });
-                    row.spawn((SignedIn(false), Node::default())).with_children(|row| {
-                        button(row, &font, "SIGN IN", Screen::Modes, 3, 2, UiAction::SignIn);
-                    });
-                });
-                root.spawn((OnlineText { queue: false }, Text::new(""), font_of(&font, 13.0, DIM), Node { display: Display::None, ..default() }));
-            }
             root.spawn((
-                EndlessPanel,
-                Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(8), ..default() },
+                TitleBlock,
+                Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(14), ..default() },
             ))
-            .with_children(|panel| {
-                for (i, (pick, label)) in [
-                    (Pick::Location, "LOCATION"),
-                    (Pick::Weather, "WEATHER"),
-                    (Pick::Time, "TIME"),
-                    (Pick::Difficulty, "DIFFICULTY"),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let e = picker(panel, &font, label, pick, ORDER_PICKERS + i as u8, 3 + i as u8);
-                    if pick == Pick::Difficulty {
-                        panel.commands().entity(e).insert(EndlessOnly);
+            .with_children(|block| {
+                block.spawn((
+                    TitleText,
+                    Text::new("FLIGHT SIM"),
+                    font_of(&font, 46.0, GREEN),
+                    bevy::text::LetterSpacing::Px(8.0),
+                    // (the letter spacing trails the last letter too)
+                    Node { margin: UiRect::left(px(8)), ..default() },
+                ));
+                // a thin rule, brighter in the middle
+                block.spawn(Node { align_items: AlignItems::Center, column_gap: px(6), ..default() }).with_children(|rule| {
+                    rule.spawn((Node { width: px(72), height: px(1), ..default() }, BackgroundColor(GREEN.with_alpha(0.3))));
+                    rule.spawn((Node { width: px(18), height: px(2), ..default() }, BackgroundColor(GREEN.with_alpha(0.85))));
+                    rule.spawn((Node { width: px(72), height: px(1), ..default() }, BackgroundColor(GREEN.with_alpha(0.3))));
+                });
+                if net {
+                    block.spawn(Node { height: px(8), ..default() });
+                    crate::friends::spawn_list(block, &font, Screen::Modes, ORDER_FRIENDS, ROW_FRIENDS);
+                }
+            });
+            root.spawn((MainColumn, Node { width: px(COLUMN_WIDTH), ..column(10.0) })).with_children(|main| {
+                main.spawn((
+                    PageHeading,
+                    Text::new(""),
+                    font_of(&font, 13.0, DIM),
+                    bevy::text::LetterSpacing::Px(3.0),
+                    Node { margin: UiRect::bottom(px(2)), align_self: AlignSelf::Center, ..default() },
+                ));
+                main.spawn((Sec::HomePrimary, column(10.0))).with_children(|col| {
+                    button(col, &font, "ENDLESS", Screen::Modes, 0, 0, UiAction::Endless);
+                    button(col, &font, "CHALLENGE", Screen::Modes, 1, 1, UiAction::Challenge);
+                    if net {
+                        button(col, &font, "MULTIPLAYER", Screen::Modes, 2, 2, UiAction::Multiplayer);
                     }
+                });
+                main.spawn((Sec::HomeSecondary, Node { margin: UiRect::top(px(8)), ..column(8.0) })).with_children(|col| {
+                    let tutorial = quiet_button(col, &font, "TUTORIAL", Screen::Modes, 3, 3, UiAction::Tutorial);
+                    col.commands().entity(tutorial).with_child((
+                        TutorialDot,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            right: px(16),
+                            width: px(7),
+                            height: px(7),
+                            border_radius: BorderRadius::MAX,
+                            ..default()
+                        },
+                        BackgroundColor(GREEN),
+                        Pickable::IGNORE,
+                    ));
+                    if net {
+                        col.spawn((Sec::Leaderboard, column(0.0))).with_children(|w| {
+                            quiet_button(w, &font, "LEADERBOARD", Screen::Modes, 4, 4, UiAction::Leaderboard);
+                        });
+                    }
+                    quiet_button(col, &font, "SETTINGS", Screen::Modes, 5, 5, UiAction::Settings);
+                });
+                if net {
+                    main.spawn((Sec::Multi, column(10.0))).with_children(|col| {
+                        col.spawn((Sec::SignedIn(true), column(10.0))).with_children(|col| {
+                            button(col, &font, "QUICK PLAY", Screen::Modes, 6, 6, UiAction::QuickPlay);
+                            button(col, &font, "HOST GAME", Screen::Modes, 7, 7, UiAction::Create);
+                            button(col, &font, "JOIN GAME", Screen::Modes, 8, 8, UiAction::Join);
+                        });
+                        col.spawn((Sec::SignedIn(false), column(0.0))).with_children(|col| {
+                            button(col, &font, "SIGN IN", Screen::Modes, 6, 6, UiAction::SignIn);
+                        });
+                    });
+                    main.spawn((
+                        OnlineText { queue: false },
+                        Text::new(""),
+                        font_of(&font, 13.0, DIM),
+                        Node { display: Display::None, align_self: AlignSelf::Center, ..default() },
+                    ));
                 }
-                panel.spawn(Node { height: px(4), ..default() });
-                button(panel, &font, "START", Screen::Modes, ORDER_START, ROW_START, UiAction::Start);
-            });
-            root.spawn((
-                JoinPanel,
-                Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(4), ..default() },
-            ))
-            .with_children(|panel| {
-                panel.spawn((CodeText, Text::new(""), font_of(&font, 28.0, GREEN), Node { margin: UiRect::bottom(px(6)), ..default() }));
-                let alphabet = crate::net::protocol::CODE_ALPHABET;
-                let keys: Vec<(String, UiAction)> = alphabet
-                    .iter()
+                main.spawn((Sec::Endless, column(8.0))).with_children(|panel| {
+                    for (i, (pick, label)) in [
+                        (Pick::Location, "LOCATION"),
+                        (Pick::Weather, "WEATHER"),
+                        (Pick::Time, "TIME"),
+                        (Pick::Difficulty, "DIFFICULTY"),
+                    ]
+                    .into_iter()
                     .enumerate()
-                    .map(|(i, c)| ((*c as char).to_string(), UiAction::Key(i as u8)))
-                    .chain([("<".to_string(), UiAction::Delete)])
-                    .collect();
-                for (r, chunk) in keys.chunks(KEYS_PER_ROW).enumerate() {
-                    panel.spawn(Node { column_gap: px(4), ..default() }).with_children(|row| {
-                        for (i, (label, action)) in chunk.iter().enumerate() {
-                            let order = ORDER_KEYS + (r * KEYS_PER_ROW + i) as u8;
-                            key(row, &font, label, order, ROW_KEYS + r as u8, *action);
+                    {
+                        let e = picker(panel, &font, label, pick, ORDER_PICKERS + i as u8, ROW_PICKERS + i as u8);
+                        if pick == Pick::Difficulty {
+                            panel.commands().entity(e).insert(Sec::EndlessOnly);
                         }
-                    });
-                }
-            });
-            root.spawn((
-                LobbyPanel,
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: px(14),
-                    display: Display::None,
-                    ..default()
-                },
-            ))
-            .with_children(|panel| {
-                panel.spawn((LobbyCode, Text::new(""), font_of(&font, 64.0, GREEN)));
-                panel.spawn((LobbyPlayers, Text::new(""), font_of(&font, 16.0, GREEN)));
-                panel
-                    .spawn((Node { width: px(220), height: px(2), ..default() }, BackgroundColor(GREEN.with_alpha(0.15))))
-                    .with_child((LobbyBar, Node { width: percent(0), height: percent(100), ..default() }, BackgroundColor(GREEN.with_alpha(0.6))));
-                panel.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
-                    row.spawn((LobbyStart, Node::default())).with_children(|w| {
-                        button(w, &font, "START", Screen::Modes, ORDER_LOBBY, ROW_LOBBY, UiAction::StartRoom);
-                    });
-                    button(row, &font, "LEAVE", Screen::Modes, ORDER_LOBBY + 1, ROW_LOBBY, UiAction::Leave);
+                    }
                 });
-            });
-            root.spawn((
-                QueuePanel,
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: px(14),
-                    display: Display::None,
-                    ..default()
-                },
-            ))
-            .with_children(|panel| {
-                panel.spawn((QueueSearching, Text::new("SEARCHING"), font_of(&font, 28.0, GREEN)));
-                panel.spawn((OnlineText { queue: true }, Text::new(""), font_of(&font, 14.0, DIM)));
-                panel.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
-                    button(row, &font, "CANCEL", Screen::Modes, ORDER_QUEUE, ROW_QUEUE, UiAction::CancelQueue);
-                    row.spawn((QueueSolo, Node { display: Display::None, ..default() })).with_children(|w| {
-                        button(w, &font, "PLAY SOLO", Screen::Modes, ORDER_QUEUE + 1, ROW_QUEUE, UiAction::PlaySolo);
+                main.spawn((Sec::Start, Node { margin: UiRect::top(px(4)), ..column(0.0) })).with_children(|w| {
+                    button(w, &font, "START", Screen::Modes, ORDER_START, ROW_START, UiAction::Start);
+                });
+                main.spawn((Sec::Join, Node { align_items: AlignItems::Center, ..column(4.0) })).with_children(|panel| {
+                    panel.spawn((CodeText, Text::new(""), font_of(&font, 28.0, GREEN), Node { margin: UiRect::bottom(px(6)), ..default() }));
+                    let alphabet = crate::net::protocol::CODE_ALPHABET;
+                    let keys: Vec<(String, UiAction)> = alphabet
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| ((*c as char).to_string(), UiAction::Key(i as u8)))
+                        .chain([("<".to_string(), UiAction::Delete)])
+                        .collect();
+                    for (r, chunk) in keys.chunks(KEYS_PER_ROW).enumerate() {
+                        panel.spawn(Node { column_gap: px(4), ..default() }).with_children(|row| {
+                            for (i, (label, action)) in chunk.iter().enumerate() {
+                                let order = ORDER_KEYS + (r * KEYS_PER_ROW + i) as u8;
+                                key(row, &font, label, order, ROW_KEYS + r as u8, *action);
+                            }
+                        });
+                    }
+                });
+                main.spawn((Sec::Settings, column(8.0))).with_children(|panel| {
+                    picker(panel, &font, "GRAPHICS", Pick::Graphics, ORDER_SETTINGS + 1, ROW_SETTINGS + 1);
+                    panel.spawn((Sec::Apply, column(0.0))).with_children(|w| {
+                        button(w, &font, "APPLY", Screen::Modes, ORDER_SETTINGS + 2, ROW_SETTINGS + 2, UiAction::Apply);
+                    });
+                    panel.spawn((Sec::SignOut, column(0.0))).with_children(|w| {
+                        quiet_button(w, &font, "SIGN OUT", Screen::Modes, ORDER_SETTINGS + 3, ROW_SETTINGS + 3, UiAction::Account);
                     });
                 });
-            });
-            root.spawn((SettingsButton, Node { column_gap: px(14), ..default() })).with_children(|row| {
-                button(row, &font, "TUTORIAL", Screen::Modes, ORDER_SETTINGS - 1, ROW_SETTINGS, UiAction::Tutorial);
-                button(row, &font, "SETTINGS", Screen::Modes, ORDER_SETTINGS, ROW_SETTINGS, UiAction::Settings);
-            });
-            root.spawn((
-                SettingsPanel,
-                Node { flex_direction: FlexDirection::Column, align_items: AlignItems::Center, row_gap: px(8), ..default() },
-            ))
-            .with_children(|panel| {
-                picker(panel, &font, "GRAPHICS", Pick::Graphics, ORDER_SETTINGS + 1, ROW_SETTINGS + 1);
-                panel.spawn((ApplyButton, Node { margin: UiRect::top(px(4)), ..default() })).with_children(|w| {
-                    button(w, &font, "APPLY", Screen::Modes, ORDER_SETTINGS + 2, ROW_SETTINGS + 2, UiAction::Apply);
+                main.spawn((
+                    Sec::Lobby,
+                    Node { align_items: AlignItems::Center, display: Display::None, ..column(14.0) },
+                ))
+                .with_children(|panel| {
+                    panel.spawn((LobbyCode, Text::new(""), font_of(&font, 56.0, GREEN), bevy::text::LetterSpacing::Px(6.0)));
+                    panel.spawn((LobbyPlayers, Text::new(""), font_of(&font, 15.0, GREEN)));
+                    panel
+                        .spawn((Node { width: px(220), height: px(2), ..default() }, BackgroundColor(GREEN.with_alpha(0.15))))
+                        .with_child((LobbyBar, Node { width: percent(0), height: percent(100), ..default() }, BackgroundColor(GREEN.with_alpha(0.6))));
+                    panel.spawn(Node { width: percent(100), ..column(8.0) }).with_children(|col| {
+                        col.spawn((LobbyStart, column(0.0))).with_children(|w| {
+                            button(w, &font, "START", Screen::Modes, ORDER_LOBBY, ROW_LOBBY, UiAction::StartRoom);
+                        });
+                        quiet_button(col, &font, "LEAVE", Screen::Modes, ORDER_LOBBY + 1, ROW_LOBBY + 1, UiAction::Leave);
+                    });
                 });
+                main.spawn((
+                    Sec::Queue,
+                    Node { align_items: AlignItems::Center, display: Display::None, ..column(14.0) },
+                ))
+                .with_children(|panel| {
+                    panel.spawn((QueueSearching, Text::new("SEARCHING"), font_of(&font, 26.0, GREEN)));
+                    panel.spawn((OnlineText { queue: true }, Text::new(""), font_of(&font, 14.0, DIM)));
+                    panel.spawn(Node { width: percent(100), ..column(8.0) }).with_children(|col| {
+                        col.spawn((QueueSolo, Node { display: Display::None, ..column(0.0) })).with_children(|w| {
+                            button(w, &font, "PLAY SOLO", Screen::Modes, ORDER_QUEUE, ROW_QUEUE, UiAction::PlaySolo);
+                        });
+                        quiet_button(col, &font, "CANCEL", Screen::Modes, ORDER_QUEUE + 1, ROW_QUEUE + 1, UiAction::CancelQueue);
+                    });
+                });
+                main.spawn((Sec::Back, Node { margin: UiRect::top(px(4)), ..column(0.0) })).with_children(|w| {
+                    quiet_button(w, &font, "BACK", Screen::Modes, ORDER_BACK, ROW_BACK, UiAction::Back);
+                });
+                main.spawn((
+                    StatusText,
+                    Text::new(""),
+                    font_of(&font, 14.0, DIM),
+                    Node { align_self: AlignSelf::Center, ..default() },
+                ));
             });
-            root.spawn((StatusText, Text::new(""), font_of(&font, 15.0, DIM)));
-            if crate::net::auth::available() {
-                crate::friends::spawn_list(root, &font, Screen::Modes, ORDER_FRIENDS, ROW_FRIENDS);
-            }
             root.spawn((
                 AccountCorner,
                 Node {
@@ -543,25 +671,16 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
             ))
             .with_children(|corner| {
                 corner.spawn((AccountHandle, Text::new(""), font_of(&font, 13.0, DIM)));
-                let action = UiAction::Account;
-                corner
-                    .spawn((
-                        UiButton { screen: Screen::Modes, order: 10, row: 9, action },
-                        Hovered::default(),
-                        Node {
-                            min_height: px(36),
-                            padding: UiRect::axes(px(12), px(6)),
-                            border: UiRect::all(px(1)),
-                            border_radius: BorderRadius::all(px(6)),
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                        BorderColor::all(BORDER),
-                        BackgroundColor(BUTTON),
-                    ))
-                    .with_child((AccountLabel, Text::new(""), font_of(&font, 13.0, GREEN), Pickable::IGNORE))
-                    .observe(move |_: On<PointerClick>, mut pressed: ResMut<Pressed>| pressed.0.push((action, 1)));
+                let e = quiet_button(corner, &font, "SIGN IN", Screen::Modes, ORDER_CORNER, ROW_CORNER, UiAction::Account);
+                corner.commands().entity(e).insert((AccountLabel, Node {
+                    min_height: px(34),
+                    padding: UiRect::axes(px(14), px(6)),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(4)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                }));
             });
         });
 }
@@ -594,7 +713,7 @@ fn navigate(
     mut stick_latch: Local<bool>,
     mut focus: ResMut<Focus>,
     mut pressed: ResMut<Pressed>,
-    mut panel: ResMut<Panel>,
+    panel: Res<Panel>,
     buttons: Query<(&UiButton, &ComputedNode)>,
     hovered: Query<(&UiButton, &Hovered), Changed<Hovered>>,
     mut moved: MessageReader<CursorMoved>,
@@ -701,11 +820,22 @@ fn navigate(
     } else if back && net.queued() {
         pressed.0.push((UiAction::CancelQueue, 1));
     } else if back {
-        *panel = match *panel {
-            Panel::Create | Panel::Join => Panel::Multi,
-            _ => Panel::Closed,
-        };
+        pressed.0.push((UiAction::Back, 1));
     }
+}
+
+/// Up a page, with the focus on the button that opened the one we leave.
+fn go_back(panel: &mut Panel, focus: &mut Focus) {
+    let (to, order) = match *panel {
+        Panel::Closed => return,
+        Panel::Endless => (Panel::Closed, 0),
+        Panel::Multi => (Panel::Closed, 2),
+        Panel::Settings => (Panel::Closed, 5),
+        Panel::Create => (Panel::Multi, 7),
+        Panel::Join => (Panel::Multi, 8),
+    };
+    *panel = to;
+    focus.order = order;
 }
 
 fn letter(k: KeyCode) -> Option<u8> {
@@ -751,17 +881,14 @@ fn handle_pressed(
     for (action, step_by) in std::mem::take(&mut pressed.0) {
         match action {
             UiAction::Endless => {
-                *panel = if *panel == Panel::Endless { Panel::Closed } else { Panel::Endless };
-                if *panel == Panel::Endless {
-                    focus.order = ORDER_START;
-                }
+                *panel = Panel::Endless;
+                focus.order = ORDER_START;
             }
             UiAction::Settings => {
-                *panel = if *panel == Panel::Settings { Panel::Closed } else { Panel::Settings };
-                if *panel == Panel::Settings {
-                    focus.order = ORDER_SETTINGS + 1;
-                }
+                *panel = Panel::Settings;
+                focus.order = ORDER_SETTINGS + 1;
             }
+            UiAction::Back => go_back(&mut panel, &mut focus),
             UiAction::Apply => crate::settings::apply_graphics(&settings, &mut applied),
             UiAction::Pick(Pick::Difficulty) => {
                 settings.difficulty = step(&crate::difficulty::Difficulty::ALL, settings.difficulty, step_by);
@@ -775,21 +902,18 @@ fn handle_pressed(
                 }
             }
             UiAction::Multiplayer => {
-                *panel = if panel.multiplayer() { Panel::Closed } else { Panel::Multi };
+                *panel = Panel::Multi;
+                focus.order = 6;
             }
             UiAction::QuickPlay => net.quick_play(),
             UiAction::Create => {
-                *panel = if *panel == Panel::Create { Panel::Multi } else { Panel::Create };
-                if *panel == Panel::Create {
-                    focus.order = ORDER_START;
-                }
+                *panel = Panel::Create;
+                focus.order = ORDER_START;
             }
             UiAction::Join => {
-                *panel = if *panel == Panel::Join { Panel::Multi } else { Panel::Join };
+                *panel = Panel::Join;
                 code.0.clear();
-                if *panel == Panel::Join {
-                    focus.order = ORDER_KEYS;
-                }
+                focus.order = ORDER_KEYS;
             }
             UiAction::SignIn => crate::signin::sign_in(&mut sign_in),
             UiAction::SignInSubmit => crate::signin::submit(crate::signin::typed(&handle_field).trim()),
@@ -851,6 +975,7 @@ fn handle_pressed(
             UiAction::Account => {
                 if crate::identity::current_user().is_some() {
                     crate::identity::sign_out();
+                    focus.order = ORDER_SETTINGS + 1;
                 } else {
                     crate::signin::sign_in(&mut sign_in);
                 }
@@ -859,39 +984,73 @@ fn handle_pressed(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn style_buttons(
     focus: Res<Focus>,
-    panel: Res<Panel>,
     settings: Res<crate::settings::Settings>,
-    mut buttons: Query<(&UiButton, &mut BackgroundColor, &mut BorderColor)>,
+    mut buttons: Query<(&UiButton, Has<Quiet>, &Children, &mut BackgroundColor, &mut BorderColor)>,
+    mut markers: Query<&mut Visibility, With<FocusMarker>>,
+    mut labels: Query<&mut TextColor, With<ButtonLabel>>,
+    mut dots: Query<&mut Node, With<TutorialDot>>,
 ) {
-    for (b, mut bg, mut border) in &mut buttons {
+    for (b, quiet, children, mut bg, mut border) in &mut buttons {
+        // one highlight: the focus (the open panel's button is hidden)
         let focused = focus.screen == Some(b.screen) && focus.order == b.order;
-        let on = match b.action {
-            UiAction::Endless => *panel == Panel::Endless,
-            UiAction::Multiplayer => panel.multiplayer(),
-            UiAction::Create => *panel == Panel::Create,
-            UiAction::Join => *panel == Panel::Join,
-            UiAction::Settings => *panel == Panel::Settings,
-            // lit until it's been finished once
-            UiAction::Tutorial => !settings.tutorial_done,
-            _ => false,
-        };
-        let color = if focused {
-            BUTTON_FOCUS
-        } else if on {
-            BUTTON_ON
-        } else {
-            BUTTON
+        let color = match (quiet, focused) {
+            (false, false) => BUTTON,
+            (false, true) => BUTTON_FOCUS,
+            (true, false) => QUIET,
+            (true, true) => QUIET_FOCUS,
         };
         if bg.0 != color {
             bg.0 = color;
         }
-        let edge = if focused || on { GREEN } else { BORDER };
+        let edge = if focused { GREEN } else if quiet { QUIET_BORDER } else { BORDER };
         if border.top != edge {
             *border = BorderColor::all(edge);
         }
+        for child in children.iter() {
+            if let Ok(mut v) = markers.get_mut(child) {
+                let want = if focused { Visibility::Inherited } else { Visibility::Hidden };
+                if *v != want {
+                    *v = want;
+                }
+            }
+            if quiet && let Ok(mut c) = labels.get_mut(child) {
+                let want = if focused { GREEN } else { DIM };
+                if c.0 != want {
+                    c.0 = want;
+                }
+            }
+        }
     }
+    for mut node in &mut dots {
+        let d = if settings.tutorial_done { Display::None } else { Display::Flex };
+        if node.display != d {
+            node.display = d;
+        }
+    }
+}
+
+/// A part of the mode menu that shows on some pages only.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+enum Sec {
+    HomePrimary,
+    HomeSecondary,
+    Leaderboard,
+    Multi,
+    SignedIn(bool),
+    Endless,
+    /// DIFFICULTY (endless only: hidden when the pickers set up a room).
+    EndlessOnly,
+    Start,
+    Join,
+    Settings,
+    Apply,
+    SignOut,
+    Lobby,
+    Queue,
+    Back,
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -900,35 +1059,13 @@ fn layout_menu(
     picks: Res<MenuPicks>,
     code: Res<JoinCode>,
     net: Res<crate::net::Net>,
-    mut root: Query<&mut Node, (With<MenuRoot>, Without<EndlessPanel>)>,
-    mut sections: Query<
-        (
-            &mut Node,
-            Has<EndlessPanel>,
-            Has<ModesRow>,
-            Has<MultiRow>,
-            Has<JoinPanel>,
-            Option<&crate::friends::FriendsSection>,
-            Option<&SignedIn>,
-            Has<MultiButton>,
-            Has<LobbyPanel>,
-            (Has<EndlessOnly>, Has<SettingsButton>, Has<SettingsPanel>, Has<ApplyButton>, Has<QueuePanel>),
-        ),
-        (
-            Without<MenuRoot>,
-            Or<(
-                With<EndlessPanel>,
-                With<ModesRow>,
-                With<MultiRow>,
-                With<JoinPanel>,
-                With<SignedIn>,
-                With<crate::friends::FriendsSection>,
-                With<MultiButton>,
-                With<LobbyPanel>,
-                Or<(With<EndlessOnly>, With<SettingsButton>, With<SettingsPanel>, With<ApplyButton>, With<QueuePanel>)>,
-            )>,
-        ),
-    >,
+    board: Res<crate::leaderboard::BoardUi>,
+    sign_in: Res<crate::signin::SignInPrompt>,
+    mut root: Query<(&mut Node, &ComputedNode, &mut Visibility), With<MenuRoot>>,
+    mut sections: Query<(&Sec, &mut Node), Without<MenuRoot>>,
+    mut friends: Query<(&crate::friends::FriendsSection, &mut Node), (Without<MenuRoot>, Without<Sec>)>,
+    mut title: Query<&mut TextFont, With<TitleText>>,
+    mut heading: Query<&mut Text, (With<PageHeading>, Without<CodeText>, Without<StatusText>, Without<PickValue>)>,
     mut values: Query<(&PickValue, &mut Text), (Without<CodeText>, Without<StatusText>)>,
     mut code_text: Query<&mut Text, (With<CodeText>, Without<StatusText>)>,
     mut status: Query<&mut Text, (With<StatusText>, Without<CodeText>)>,
@@ -938,47 +1075,77 @@ fn layout_menu(
     let signed_in = crate::identity::current_user().is_some();
     let in_lobby = net.in_lobby();
     let queued = net.queued();
-    // (the lobby and the queue each replace the rest of the menu)
-    let lobby = in_lobby || queued;
-    for (mut node, endless, modes, multi, join, friends, signed, multi_button, lobby_panel, extra) in &mut sections {
-        let (endless_only, settings_button, settings_panel, apply, queue_panel) = extra;
-        let show = if queue_panel {
-            queued
-        } else if endless_only {
-            *panel == Panel::Endless
-        } else if apply {
-            settings.graphics != applied.0
-        } else if let Some(f) = friends {
-            // (the pause menu's list is the friends module's)
-            if f.0 != Screen::Modes {
-                continue;
-            }
-            (panel.multiplayer() || lobby) && signed_in
-        } else if lobby_panel {
-            in_lobby
-        } else if lobby {
-            // the lobby replaces the rest of the menu
-            false
-        } else if multi_button {
-            true
-        } else if settings_button {
-            !panel.multiplayer()
-        } else if settings_panel {
-            *panel == Panel::Settings
-        } else if endless {
-            matches!(*panel, Panel::Endless | Panel::Create)
-        } else if modes {
-            !panel.multiplayer()
-        } else if multi {
-            panel.multiplayer()
-        } else if join {
-            *panel == Panel::Join
-        } else {
-            signed.is_some_and(|s| s.0 == signed_in)
+    // (the lobby and the queue each replace the pages)
+    let away = in_lobby || queued;
+    let page = |p: Panel| !away && *panel == p;
+    for (sec, mut node) in &mut sections {
+        let show = match *sec {
+            Sec::HomePrimary | Sec::HomeSecondary => page(Panel::Closed),
+            Sec::Leaderboard => signed_in,
+            Sec::Multi => page(Panel::Multi),
+            Sec::SignedIn(s) => s == signed_in,
+            Sec::Endless | Sec::Start => page(Panel::Endless) || page(Panel::Create),
+            Sec::EndlessOnly => *panel == Panel::Endless,
+            Sec::Join => page(Panel::Join),
+            Sec::Settings => page(Panel::Settings),
+            Sec::Apply => settings.graphics != applied.0,
+            Sec::SignOut => signed_in && crate::identity::can_sign_in(),
+            Sec::Lobby => in_lobby,
+            Sec::Queue => queued,
+            Sec::Back => !away && *panel != Panel::Closed,
         };
         let d = if show { Display::Flex } else { Display::None };
         if node.display != d {
             node.display = d;
+        }
+    }
+    for (f, mut node) in &mut friends {
+        // (the pause menu's list is the friends module's)
+        if f.0 != Screen::Modes {
+            continue;
+        }
+        let d = if (panel.multiplayer() || away) && signed_in { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+        }
+    }
+    if let Ok(mut text) = heading.single_mut() {
+        let h = match *panel {
+            _ if away => "",
+            Panel::Closed => "",
+            Panel::Endless => "ENDLESS",
+            Panel::Multi => "MULTIPLAYER",
+            Panel::Create => "HOST GAME",
+            Panel::Join => "JOIN GAME",
+            Panel::Settings => "SETTINGS",
+        };
+        if text.0 != h {
+            text.0 = h.into();
+        }
+    }
+    if let Ok((mut node, computed, mut vis)) = root.single_mut() {
+        // the leaderboard and the sign-in prompt cover the menu
+        let v = if board.open || sign_in.open { Visibility::Hidden } else { Visibility::Inherited };
+        if *vis != v {
+            *vis = v;
+        }
+        // landscape: the title on the left, the buttons on the right;
+        // portrait: stacked. Short screens (landscape phones) get a smaller title.
+        let size = computed.size() * computed.inverse_scale_factor();
+        let landscape = size.x > size.y * 1.1;
+        let dir = if landscape { FlexDirection::Row } else { FlexDirection::Column };
+        if node.flex_direction != dir {
+            node.flex_direction = dir;
+        }
+        let gap = px(if size.x < 1000.0 { 40.0 } else { 88.0 });
+        if node.column_gap != gap {
+            node.column_gap = gap;
+        }
+        if let Ok(mut font) = title.single_mut() {
+            let want = FontSize::Px(if size.y < 520.0 || size.x < 600.0 { 34.0 } else { 48.0 });
+            if font.font_size != want {
+                font.font_size = want;
+            }
         }
     }
     if let Ok(mut text) = code_text.single_mut() {
@@ -996,10 +1163,10 @@ fn layout_menu(
             text.0 = value.into();
         }
     }
-    if let Ok(mut node) = root.single_mut() {
+    if let Ok((mut node, ..)) = root.single_mut() {
         // keep clear of the notch and the home indicator
         let s = crate::platform::safe_area();
-        let padding = UiRect { left: px(s.x), top: px(s.y), right: px(s.z), bottom: px(s.w) };
+        let padding = UiRect { left: px(s.x + 16.0), top: px(s.y + 12.0), right: px(s.z + 16.0), bottom: px(s.w + 12.0) };
         if node.padding != padding {
             node.padding = padding;
         }
@@ -1027,11 +1194,11 @@ fn lobby_focus(net: Res<crate::net::Net>, mut was: Local<(bool, bool)>, mut pane
         *panel = Panel::Multi;
         focus.order = if net.is_host() { ORDER_LOBBY } else { ORDER_LOBBY + 1 };
     }
-    // (the queue: CANCEL)
+    // (the queue: CANCEL; PLAY SOLO shows above it later)
     let queued = net.queued();
     if queued && !was.1 {
         *panel = Panel::Multi;
-        focus.order = ORDER_QUEUE;
+        focus.order = ORDER_QUEUE + 1;
     }
     *was = (lobby, queued);
 }
@@ -1122,23 +1289,24 @@ fn layout_lobby(
     }
 }
 
-/// Keeps the account corner in step with the page's sign-in state.
+/// The account corner: `@handle` signed in (SIGN OUT is in SETTINGS), a
+/// small SIGN IN signed out.
+#[allow(clippy::type_complexity)]
 fn layout_account(
+    net: Res<crate::net::Net>,
     mut corner: Query<&mut Node, With<AccountCorner>>,
-    mut handle: Query<(&mut Text, &mut Node), (With<AccountHandle>, Without<AccountCorner>, Without<UiButton>)>,
-    mut label: Query<&mut Text, (With<AccountLabel>, Without<AccountHandle>)>,
-    mut buttons: Query<(&UiButton, &mut Node), (Without<AccountCorner>, Without<AccountHandle>)>,
+    mut handle: Query<(&mut Text, &mut Node), (With<AccountHandle>, Without<AccountCorner>, Without<AccountLabel>)>,
+    mut sign_in: Query<&mut Node, (With<AccountLabel>, Without<AccountCorner>, Without<AccountHandle>)>,
 ) {
     let Ok(mut corner) = corner.single_mut() else { return };
     let user = crate::identity::current_user();
-    // a dev user's handle shows, without a button
-    let can = crate::identity::can_sign_in();
-    let d = if user.is_some() || can { Display::Flex } else { Display::None };
+    let can = crate::identity::can_sign_in() && user.is_none();
+    let d = if (user.is_some() || can) && !net.in_lobby() && !net.queued() { Display::Flex } else { Display::None };
     if corner.display != d {
         corner.display = d;
     }
     let s = crate::platform::safe_area();
-    let (top, right) = (px(s.y + 12.0), px(s.z + 12.0));
+    let (top, right) = (px(s.y + 12.0), px(s.z + 16.0));
     if corner.top != top || corner.right != right {
         corner.top = top;
         corner.right = right;
@@ -1153,20 +1321,29 @@ fn layout_account(
             node.display = d;
         }
     }
-    if let Ok(mut text) = label.single_mut() {
-        let l = if user.is_some() { "SIGN OUT" } else { "SIGN IN" };
-        if text.0 != l {
-            text.0 = l.into();
+    if let Ok(mut node) = sign_in.single_mut() {
+        let d = if can { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
         }
     }
-    for (b, mut node) in &mut buttons {
-        if b.action == UiAction::Account {
-            let d = if can { Display::Flex } else { Display::None };
-            if node.display != d {
-                node.display = d;
-            }
-        }
+}
+
+/// Behind the menu the camera turns slowly under the sky (a fixed spot above
+/// the last map, or the bare planet before the first round).
+fn menu_camera(
+    time: Res<Time<Real>>,
+    terrain: Option<Res<crate::world::Terrain>>,
+    mut camera: Query<&mut Transform, With<crate::camera::MainCamera>>,
+) {
+    if std::env::var("TERRAIN_DEBUG_CAM").is_ok() {
+        return;
     }
+    let Ok(mut cam) = camera.single_mut() else { return };
+    let ground = terrain.map_or(0.0, |t| t.height_at(0.0, 0.0));
+    let yaw = time.elapsed_secs() * 0.015;
+    let eye = Vec3::new(0.0, (ground + 700.0).max(1400.0), 0.0);
+    *cam = Transform::from_translation(eye).with_rotation(Quat::from_euler(EulerRot::YXZ, yaw, 0.12, 0.0));
 }
 
 #[cfg(test)]
