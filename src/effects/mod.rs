@@ -579,6 +579,7 @@ fn projectile_fx(
     camera: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
     mut last: Local<HashMap<Entity, Option<Vec3>>>,
     mut points: Local<Vec<Vec3>>,
+    mut trails: Local<TrailLog>,
 ) {
     let mut rng = rand::rng();
     let t = time.elapsed_secs();
@@ -586,6 +587,7 @@ fn projectile_fx(
     // world size of ~one pixel at a distance (65° fov, ~1440 px tall)
     let pixel = |p: Vec3| p.distance(cam) * 0.00088;
     last.retain(|e, _| missiles.contains(*e) || flares.contains(*e));
+    trails.report(|e| missiles.contains(e));
     for (entity, gt, missile) in &missiles {
         // missile meshes point along local -Y (looking_to(velocity) then +90°
         // about X takes -Y to -Z); the motor is at +Y
@@ -632,8 +634,10 @@ fn projectile_fx(
         // the sustainer leaves a thinner trail
         spaced(entry, motor, if boost { 1.1 } else { 1.6 }, &mut points);
         let thin = if boost { 1.0 } else { 0.75 };
+        let stats = trails.missiles.entry(entity).or_insert((0, 0, particles.list.len()));
         for &p in points.iter() {
-            particles.add(
+            stats.1 += 1;
+            stats.0 += particles.add(
                 Particle {
                     vel: missile.velocity * 0.04 + rand_dir(&mut rng) * 2.5,
                     life: rng.random_range(10.0..14.0),
@@ -654,7 +658,7 @@ fn projectile_fx(
                     ..Particle::puff(p + rand_dir(&mut rng) * 0.3)
                 },
                 0.75,
-            );
+            ) as u32;
         }
     }
     for (entity, gt) in &flares {
@@ -699,6 +703,39 @@ fn projectile_fx(
                 0.4,
             );
         }
+    }
+}
+
+/// `FLIGHT_SIM_LOG_MISSILES=1`: logs how much of each missile's smoke trail
+/// made it into the particle budget once the missile is gone.
+#[derive(Default)]
+struct TrailLog {
+    /// puffs added, puffs tried, live particles when it first emitted
+    missiles: HashMap<Entity, (u32, u32, usize)>,
+    count: u32,
+    bare: u32,
+}
+
+impl TrailLog {
+    fn report(&mut self, alive: impl Fn(Entity) -> bool) {
+        let log = std::env::var("FLIGHT_SIM_LOG_MISSILES").is_ok();
+        let (count, bare) = (&mut self.count, &mut self.bare);
+        self.missiles.retain(|&e, &mut (added, tried, at_launch)| {
+            if alive(e) {
+                return true;
+            }
+            if log {
+                *count += 1;
+                // most of its trail missing reads as no plume at all
+                let missing = added * 10 < tried;
+                *bare += missing as u32;
+                info!(
+                    "missile {count}: smoke {added}/{tried} puffs{} ({at_launch} particles at launch; {bare} of {count} bare so far)",
+                    if missing { " NO PLUME" } else { "" },
+                );
+            }
+            false
+        });
     }
 }
 
