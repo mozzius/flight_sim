@@ -206,14 +206,15 @@ Server env: `PORT` (default 8080), `FLIGHT_SIM_DEV_AUTH=1` (accept `dev:` tokens
 room codes: never in production), `FLIGHT_SIM_DEV_MUTUALS=1` (dev users are all each other's
 mutuals; they're never anyone's otherwise), `FLIGHT_SIM_APPVIEW` (default
 `https://public.api.bsky.app`), `FLIGHT_SIM_DEV_PROTOCOL=<n>` (a dev server pretends to speak
-protocol n, to test version mismatches), `RUST_LOG`.
+protocol n, to test version mismatches), `FLIGHT_SIM_DB` (the leaderboard, see below),
+`FLIGHT_SIM_METRICS_TOKEN` (turns on `/metrics`, see Metrics below), `RUST_LOG`.
 
 Version mismatches (v6): the server answers a `Hello` with the wrong version with
 `ServerVersion(its version)` and then `Error(Version)`. A client older than the server says
 "This client is out of date. Update to play multiplayer." in the multiplayer menu, for good
 (no fading, no reconnecting; single player is unaffected). A client newer than the server (or
 one hearing no `ServerVersion`: servers before v6 don't send it) means the server hasn't
-deployed yet: it shows SERVER UPDATING and keeps reconnecting with its usual back-off. Endpoints: `/ws` (the game) and `/health` ("ok").
+deployed yet: it shows SERVER UPDATING and keeps reconnecting with its usual back-off. Endpoints: `/ws` (the game), `/health` ("ok") and `/metrics`.
 `cargo test --no-default-features --features server --bin flight_sim_server` runs the room,
 presence and invite tests (against a mock AppView; `real_appview -- --ignored` asks the real one).
 
@@ -236,6 +237,39 @@ docker run -p 8080:8080 -e FLIGHT_SIM_DEV_AUTH=1 flight-sim-server
 ```
 
 `railway.json` builds that Dockerfile and health-checks `/health`; Railway sets `PORT`.
+
+### Metrics
+
+`GET /metrics` is a Prometheus text exposition (hand-rolled in `src/server/metrics.rs`, no
+crate), served only with `Authorization: Bearer $FLIGHT_SIM_METRICS_TOKEN`: unset, it's a 404;
+a wrong token gets a 401. Counters and histograms are process-wide atomics bumped where things
+happen; the game loop copies its gauges out once a second. Everything is prefixed `flightsim_`:
+
+- gauges: `players_online` (distinct DIDs), `connections_signed_in`, `websocket_connections`
+  (open sockets, signed in or not), `players_in_rooms{kind}`, `rooms{kind,state}` (public/hosted,
+  lobby/started), `rooms_by_size{players}`, `room_size_max`, `queue_length`,
+  `join_requests_pending`, `leaderboard_players`, `uptime_seconds`, `start_time_seconds`,
+  `build_info{git,version,protocol}` (git is Railway's `RAILWAY_GIT_COMMIT_SHA`)
+- counters: `auth_attempts_total{result}` (ok, rejected, rejected_dev, bad_hello,
+  client_outdated, server_outdated), `ws_messages_{in,out}_total`, `ws_bytes_{in,out}_total`,
+  `ws_messages_dropped_total` (rate limit), `rooms_created_total{kind}`, `joins_total{method}`
+  (code, invite (a code we invited them to in the last 5 min), friend (hop-in), request
+  (accepted), quickplay (straight in), queue), `quickplay_total{result}` (joined, queued),
+  `queue_matches_total` (rooms made from the queue), `queue_exits_total{outcome}` (matched,
+  cancelled, offline, joined_elsewhere), `invites_total{result}`, `join_requests_total{outcome}`
+  (sent, refused, accepted, declined, expired), `kills_total`, `deaths_total{cause}` (shot, crash),
+  `challenge_starts_total`, `challenge_runs_total{result,reason}`, `appview_calls_total{method}`,
+  `appview_errors_total{method}`
+- histograms: `queue_wait_seconds`, `appview_latency_seconds`, `tick_seconds` (one game-loop tick)
+
+Production: the token is a Railway variable on the `server` service; Prometheus on
+pds.mozzius.dev scrapes it every 15 s (job `flight_sim`), and Grafana's "Flight Sim" dashboard
+(grafana.mozzius.dev, `flight-sim.json` in the box's file-provisioned dashboards) draws it.
+
+```bash
+FLIGHT_SIM_METRICS_TOKEN=abc FLIGHT_SIM_DEV_AUTH=1 PORT=8787 target/release/flight_sim_server
+curl -H "Authorization: Bearer abc" localhost:8787/metrics
+```
 
 ### Challenge leaderboard
 
