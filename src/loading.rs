@@ -100,8 +100,8 @@ const LOBBY_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
 /// A lobby's map, baking (or baked) ahead of its round.
 #[derive(Resource, Default)]
 pub struct Prebake {
-    /// (seed, biome) it's for.
-    key: Option<(u32, crate::environment::Biome)>,
+    /// (seed, biome, sun) it's for (the bake shades the terrain from the sun).
+    key: Option<(u32, crate::environment::Biome, [u32; 3])>,
     baker: Option<MapBaker>,
     done: Option<terrain_gen::MapBake>,
 }
@@ -111,6 +111,10 @@ impl Prebake {
     pub fn progress(&self) -> f32 {
         if self.done.is_some() { 1.0 } else { self.baker.as_ref().map_or(0.0, |b| b.progress()) }
     }
+}
+
+fn bake_key(seed: u32, env: &Environment) -> (u32, crate::environment::Biome, [u32; 3]) {
+    (seed, env.biome, env.sun_dir().to_array().map(f32::to_bits))
 }
 
 /// Bakes the lobby's map (or the quick-play queue's) while we wait, and
@@ -125,10 +129,11 @@ fn prebake(mut pre: ResMut<Prebake>, net: Res<crate::net::Net>, mut gone: Local<
         return;
     };
     *gone = 0;
-    let biome = Environment::choose(map.seed, crate::net::room_picks(map)).biome;
-    let key = Some((map.seed, biome));
+    let env = Environment::choose(map.seed, crate::net::room_picks(map));
+    let key = Some(bake_key(map.seed, &env));
     if pre.key != key {
-        *pre = Prebake { key, baker: Some(MapBaker::new(map.seed, biome, terrain_gen::texture_div())), done: None };
+        let baker = MapBaker::new(map.seed, env.biome, env.sun_dir(), terrain_gen::texture_div());
+        *pre = Prebake { key, baker: Some(baker), done: None };
     }
     if let Some(b) = pre.baker.as_mut()
         && let Some(bake) = b.step(LOBBY_BUDGET)
@@ -212,13 +217,13 @@ fn load_map(
     }
     // the lobby's bake, if it's this map: done, or carry on from where it got to
     let mut done = None;
-    if baker.is_none() && std::mem::take(&mut pre.key) == Some((seed.0, env.biome)) {
+    if baker.is_none() && std::mem::take(&mut pre.key) == Some(bake_key(seed.0, &env)) {
         done = pre.done.take();
         *baker = pre.baker.take();
     }
     *pre = Prebake::default();
     if done.is_none() {
-        let b = baker.get_or_insert_with(|| MapBaker::new(seed.0, env.biome, terrain_gen::texture_div()));
+        let b = baker.get_or_insert_with(|| MapBaker::new(seed.0, env.biome, env.sun_dir(), terrain_gen::texture_div()));
         done = b.step(FRAME_BUDGET);
     }
     let b = baker.as_ref();

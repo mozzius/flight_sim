@@ -849,7 +849,8 @@ fn mip_chain(level0: Vec<Vec4>, res: usize, renormalize: bool) -> Vec<Vec<Vec4>>
                     + prev[(j + 1) * size + i]
                     + prev[(j + 1) * size + i + 1];
                 if renormalize {
-                    v.truncate().normalize_or(Vec3::Z).extend(1.0)
+                    // (alpha: the sunlight, averaged)
+                    v.truncate().normalize_or(Vec3::Z).extend(v.w * 0.25)
                 } else {
                     v * 0.25
                 }
@@ -941,16 +942,69 @@ fn texture_texel(
     (color.extend(field_weight), Vec4::new(normal.x, normal.z, normal.y, 1.0))
 }
 
-fn quantize_texels(texels: Vec<(Vec4, Vec4)>, res: usize) -> TextureBake {
+/// `light` is the sun lattice (`light_lattice`), `f` texels per lattice cell, bilinearly upsampled.
+fn quantize_texels(texels: Vec<(Vec4, Vec4)>, res: usize, light: &[f32], f: usize) -> TextureBake {
     let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     let mut color = Vec::with_capacity(res * res * 4);
     let mut normal = Vec::with_capacity(res * res * 2);
-    for (c, n) in texels {
+    let mut sun = Vec::with_capacity(res * res);
+    let lres = res / f;
+    let max = (lres - 1) as f32;
+    let at = |a: usize, b: usize| light[b * lres + a];
+    for (k, (c, n)) in texels.into_iter().enumerate() {
         let srgb = Srgba::from(LinearRgba::rgb(c.x, c.y, c.z));
         color.extend([to_u8(srgb.red), to_u8(srgb.green), to_u8(srgb.blue), to_u8(c.w)]);
         normal.extend([to_u8(n.x * 0.5 + 0.5), to_u8(n.y * 0.5 + 0.5)]);
+        // texel centre in lattice coordinates
+        let u = ((k % res) as f32 + 0.5) / f as f32 - 0.5;
+        let v = ((k / res) as f32 + 0.5) / f as f32 - 0.5;
+        let (u, v) = (u.clamp(0.0, max), v.clamp(0.0, max));
+        let (a, b) = ((u as usize).min(lres.saturating_sub(2)), (v as usize).min(lres.saturating_sub(2)));
+        let (tu, tv) = (u - a as f32, v - b as f32);
+        let (a1, b1) = ((a + 1).min(lres - 1), (b + 1).min(lres - 1));
+        let l = lerp(lerp(at(a, b), at(a1, b), tu), lerp(at(a, b1), at(a1, b1), tu), tv);
+        sun.push(to_u8(l));
     }
-    TextureBake { res, color, normal }
+    TextureBake { res, color, normal, sun }
+}
+
+/// Texels per sun-lattice cell: about the height grid's spacing, as finer would only
+/// trace the grid's triangles (a power of two, so it divides the texture).
+fn light_div(texel: f32, grid_spacing: f32) -> usize {
+    1 << ((grid_spacing / texel).max(1.0).log2().floor() as u32)
+}
+
+/// How much of the sun reaches ground point `p`: marches the height grids toward the sun
+/// (a soft edge a degree or so wide). Baked so the mountains' shadows reach beyond the
+/// shadow cascades (the shader fades it in where they run out).
+fn sun_light(grids: &[HeightGrid], top: f32, p: Vec2, sun: Vec3) -> f32 {
+    const PENUMBRA: f32 = 0.012; // radians either side
+    const MAX_DIST: f32 = 25_000.0;
+    let height = |q: Vec2| grids.iter().find_map(|g| g.sample_inside(q.x, q.y));
+    let flat = Vec2::new(sun.x, sun.z);
+    let len = flat.length();
+    if sun.y <= 0.0 || len < 1e-3 {
+        return 1.0;
+    }
+    let dir = flat / len;
+    let rise = sun.y / len;
+    let Some(h0) = height(p) else { return 1.0 };
+    let h0 = h0 + 1.0;
+    let mut margin = f32::MAX;
+    let mut d = 16.0;
+    while d < MAX_DIST {
+        let ray = h0 + d * rise;
+        if ray > top {
+            break;
+        }
+        let Some(h) = height(p + dir * d) else { break };
+        margin = margin.min((ray - h) / d);
+        if margin < -PENUMBRA {
+            return 0.0;
+        }
+        d += (d * 0.06).max(12.0);
+    }
+    smoothstep(-PENUMBRA, PENUMBRA, margin)
 }
 
 /// A baked terrain texture: sRGB colour plus the field weight in alpha (4 bytes
@@ -961,6 +1015,8 @@ pub struct TextureBake {
     res: usize,
     color: Vec<u8>,
     normal: Vec<u8>,
+    /// Sunlight reaching the ground (1 byte; the normal map's alpha, see `sun_light`).
+    sun: Vec<u8>,
 }
 
 impl TextureBake {
@@ -981,7 +1037,7 @@ impl TextureBake {
         let normal_at = |k: usize| {
             let x = self.normal[k * 2] as f32 / 255.0 * 2.0 - 1.0;
             let z = self.normal[k * 2 + 1] as f32 / 255.0 * 2.0 - 1.0;
-            Vec4::new(x, z, (1.0 - x * x - z * z).max(0.0).sqrt(), 1.0)
+            Vec4::new(x, z, (1.0 - x * x - z * z).max(0.0).sqrt(), self.sun[k] as f32 / 255.0)
         };
         // level 1 straight from the bytes
         let half = res / 2;
@@ -990,7 +1046,7 @@ impl TextureBake {
                 .map(|k| {
                     let (i, j) = (k % half * 2, k / half * 2);
                     let v = at(j * res + i) + at(j * res + i + 1) + at((j + 1) * res + i) + at((j + 1) * res + i + 1);
-                    if renormalize { v.truncate().normalize_or(Vec3::Z).extend(1.0) } else { v * 0.25 }
+                    if renormalize { v.truncate().normalize_or(Vec3::Z).extend(v.w * 0.25) } else { v * 0.25 }
                 })
                 .collect()
         };
@@ -1009,12 +1065,12 @@ impl TextureBake {
         if !half_res {
             for k in 0..res * res {
                 let v = normal_at(k);
-                normal_data.extend_from_slice(&[self.normal[k * 2], self.normal[k * 2 + 1], to_u8(v.z * 0.5 + 0.5), 255]);
+                normal_data.extend_from_slice(&[self.normal[k * 2], self.normal[k * 2 + 1], to_u8(v.z * 0.5 + 0.5), self.sun[k]]);
             }
         }
         for level in mip_chain(level1(&normal_at, true), half, true) {
             for v in level {
-                normal_data.extend_from_slice(&[to_u8(v.x * 0.5 + 0.5), to_u8(v.y * 0.5 + 0.5), to_u8(v.z * 0.5 + 0.5), 255]);
+                normal_data.extend_from_slice(&[to_u8(v.x * 0.5 + 0.5), to_u8(v.y * 0.5 + 0.5), to_u8(v.z * 0.5 + 0.5), to_u8(v.w)]);
             }
         }
         let (top, mips) = if half_res { (half, res.ilog2()) } else { (res, res.ilog2() + 1) };
@@ -1132,6 +1188,10 @@ pub struct MapBake {
 pub struct MapBaker {
     seed: u32,
     biome: biome::Biome,
+    /// Direction to the sun, for the baked terrain shadows.
+    sun: Vec3,
+    /// The highest ground (where a sun march can stop), once the grids are done.
+    top: Option<f32>,
     texture_div: usize,
     /// For the low-memory scene (no near texture), decided when it starts.
     low: bool,
@@ -1153,6 +1213,8 @@ enum Stage {
     /// Texture `which`: the sample lattice, then the texels.
     Samples { which: usize, samples: Vec<(f32, f32)> },
     Texels { which: usize, samples: Vec<(f32, f32)>, texels: Vec<(Vec4, Vec4)> },
+    /// Then the sunlight, on a coarser lattice (`light_div`).
+    Light { which: usize, texels: Vec<(Vec4, Vec4)>, light: Vec<f32> },
     Done,
 }
 
@@ -1164,11 +1226,13 @@ const GRIDS: [(f32, usize); 3] = [
 const TEXTURE_RES: [usize; 3] = [NEAR_TEXTURE_RES, FINE_TEXTURE_RES, COARSE_TEXTURE_RES];
 /// Cost of a texel relative to a full terrain sample (it's mostly lookups).
 const TEXEL_COST: f64 = 0.15;
+/// A sun march (`sun_light`), likewise.
+const LIGHT_COST: f64 = 0.4;
 /// Roads, in terrain-sample units (Dijkstra over the near grid).
 const ROADS_COST: f64 = 250_000.0;
 
 impl MapBaker {
-    pub fn new(seed: u32, biome: biome::Biome, texture_div: usize) -> Self {
+    pub fn new(seed: u32, biome: biome::Biome, sun: Vec3, texture_div: usize) -> Self {
         SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
         biome::set(biome);
         info!("terrain: map seed {seed}, {} (FLIGHT_SIM_SEED={seed} to fly it again)", biome.name());
@@ -1181,11 +1245,16 @@ impl MapBaker {
             if Self::wants_texture(which, low) {
                 let res = TEXTURE_RES[which] / texture_div;
                 total += ((res + 2) * (res + 2)) as f64 + (res * res) as f64 * TEXEL_COST;
+                let (spacing, cells) = GRIDS[which];
+                let lres = res / light_div(spacing * cells as f32 / res as f32, spacing);
+                total += (lres * lres) as f64 * LIGHT_COST;
             }
         }
         MapBaker {
             seed,
             biome,
+            sun,
+            top: None,
             texture_div,
             low,
             start: Instant::now(),
@@ -1291,7 +1360,29 @@ impl MapBaker {
                 if texels.len() < res * res {
                     Stage::Texels { which, samples, texels }
                 } else {
-                    self.textures.push(Some(quantize_texels(texels, res)));
+                    Stage::Light { which, texels, light: Vec::new() }
+                }
+            }
+            Stage::Light { which, texels, mut light } => {
+                let (origin, step, res) = self.texture_frame(which);
+                let f = light_div(step, self.grids[which].spacing);
+                let lres = res / f;
+                let j0 = light.len() / lres;
+                let rows = ((slice as f64 / LIGHT_COST) as usize / lres).clamp(1, lres - j0);
+                let grids = &self.grids;
+                let top = *self
+                    .top
+                    .get_or_insert_with(|| grids.iter().flat_map(|g| g.heights.iter().copied()).fold(f32::MIN, f32::max));
+                let sun = self.sun;
+                light.extend(par_map(lres, rows, |a, b| {
+                    let p = origin + Vec2::new(a as f32 + 0.5, (j0 + b) as f32 + 0.5) * (f as f32 * step);
+                    sun_light(grids, top, p, sun)
+                }));
+                self.done += (rows * lres) as f64 * LIGHT_COST;
+                if light.len() < lres * lres {
+                    Stage::Light { which, texels, light }
+                } else {
+                    self.textures.push(Some(quantize_texels(texels, res, &light, f)));
                     self.next_texture(which + 1)
                 }
             }

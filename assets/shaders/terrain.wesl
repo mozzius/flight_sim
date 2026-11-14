@@ -15,6 +15,7 @@ import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
     mesh_view_bindings::view,
+    pbr_bindings,
 };
 
 @if(PREPASS_PIPELINE)
@@ -305,6 +306,14 @@ fn fragment(
 @if(PREPASS_PIPELINE) {
     out = deferred_output(in, pbr_input);
 } @else {
+    // the mountains' baked shadows (the normal map's alpha), faded in where the
+    // shadow cascades run out (3 km, src/world.rs), so the valleys don't light up
+    // past a hard line
+    let baked_sun = textureSampleBias(
+        pbr_bindings::normal_map_texture, pbr_bindings::normal_map_sampler, in.uv, view.mip_bias
+    ).a;
+    let cam_dist = distance(pos, view.world_position);
+    pbr_input.directional_shadow_factor = mix(1.0, baked_sun, smoothstep1(1600.0, 2800.0, cam_dist));
     out.color = apply_pbr_lighting(pbr_input);
     // mist settles in the valleys; lit a soft blue-white, brighter toward the sun
     let cam = view.world_position;
