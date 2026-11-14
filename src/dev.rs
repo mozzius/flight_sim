@@ -7,6 +7,8 @@
 //! `FLIGHT_SIM_SCREENSHOT_BURST=<count>,<secs>` saves `count` frames `secs`
 //! apart instead (`out_00.png`, `out_01.png`, ...), for catching flicker.
 //! `FLIGHT_SIM_DIE_AT=<secs>` shoots the player down that many (real) seconds in.
+//! `FLIGHT_SIM_MENU_AT=<secs>` quits a round back to the menu that many (real)
+//! seconds in (the menu with a map loaded).
 //! `FLIGHT_SIM_SCREENSHOT_EXTRA=<event>:<path>[,...]` takes more shots on the
 //! way (without exiting), each once, about a second after its event:
 //! `t<secs>`, `lobby<n>` (in a lobby with n players), `room<n>` (flying in
@@ -111,6 +113,17 @@ impl Plugin for DevPlugin {
                     }
                 }
             });
+        }
+        if let Some(at) = std::env::var("FLIGHT_SIM_MENU_AT").ok().and_then(|s| s.parse::<f32>().ok()) {
+            app.add_systems(
+                Update,
+                move |time: Res<Time<Real>>, state: Res<State<crate::loading::GameState>>, mut next: ResMut<NextState<crate::loading::GameState>>, mut done: Local<bool>| {
+                    if !*done && time.elapsed_secs() >= at && *state.get() == crate::loading::GameState::Playing {
+                        *done = true;
+                        next.set(crate::loading::GameState::Menu);
+                    }
+                },
+            );
         }
         if std::env::var("FLIGHT_SIM_NO_HUD").is_ok() {
             app.add_systems(Update, hide_player_model);

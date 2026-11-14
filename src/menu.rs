@@ -246,6 +246,11 @@ struct FocusMarker;
 #[derive(Component)]
 pub(crate) struct ButtonLabel;
 
+/// A quiet button whose label stays full brightness (the home page's
+/// TUTORIAL / LEADERBOARD / SETTINGS: outlined and smaller, but not greyed out).
+#[derive(Component)]
+struct BrightLabel;
+
 /// TUTORIAL's dot, until it's been finished once.
 #[derive(Component)]
 struct TutorialDot;
@@ -532,7 +537,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                 });
                 main.spawn((Sec::HomeSecondary, Node { margin: UiRect::top(px(8)), ..column(8.0) })).with_children(|col| {
                     let tutorial = quiet_button(col, &font, "TUTORIAL", Screen::Modes, 3, 3, UiAction::Tutorial);
-                    col.commands().entity(tutorial).with_child((
+                    col.commands().entity(tutorial).insert(BrightLabel).with_child((
                         TutorialDot,
                         Node {
                             position_type: PositionType::Absolute,
@@ -547,10 +552,12 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     ));
                     if net {
                         col.spawn((Sec::Leaderboard, column(0.0))).with_children(|w| {
-                            quiet_button(w, &font, "LEADERBOARD", Screen::Modes, 4, 4, UiAction::Leaderboard);
+                            let e = quiet_button(w, &font, "LEADERBOARD", Screen::Modes, 4, 4, UiAction::Leaderboard);
+                            w.commands().entity(e).insert(BrightLabel);
                         });
                     }
-                    quiet_button(col, &font, "SETTINGS", Screen::Modes, 5, 5, UiAction::Settings);
+                    let settings = quiet_button(col, &font, "SETTINGS", Screen::Modes, 5, 5, UiAction::Settings);
+                    col.commands().entity(settings).insert(BrightLabel);
                 });
                 if net {
                     main.spawn((Sec::Multi, column(10.0))).with_children(|col| {
@@ -988,14 +995,17 @@ fn handle_pressed(
 fn style_buttons(
     focus: Res<Focus>,
     settings: Res<crate::settings::Settings>,
-    mut buttons: Query<(&UiButton, Has<Quiet>, &Children, &mut BackgroundColor, &mut BorderColor)>,
+    device: Res<crate::controls::InputDevice>,
+    mut buttons: Query<(&UiButton, Has<Quiet>, Has<BrightLabel>, &Children, &mut BackgroundColor, &mut BorderColor)>,
     mut markers: Query<&mut Visibility, With<FocusMarker>>,
     mut labels: Query<&mut TextColor, With<ButtonLabel>>,
     mut dots: Query<&mut Node, With<TutorialDot>>,
 ) {
-    for (b, quiet, children, mut bg, mut border) in &mut buttons {
+    // no focus highlight (or `>`) under touch: there's nothing to steer
+    let touch = *device == crate::controls::InputDevice::Touch;
+    for (b, quiet, bright, children, mut bg, mut border) in &mut buttons {
         // one highlight: the focus (the open panel's button is hidden)
-        let focused = focus.screen == Some(b.screen) && focus.order == b.order;
+        let focused = !touch && focus.screen == Some(b.screen) && focus.order == b.order;
         let color = match (quiet, focused) {
             (false, false) => BUTTON,
             (false, true) => BUTTON_FOCUS,
@@ -1017,7 +1027,7 @@ fn style_buttons(
                 }
             }
             if quiet && let Ok(mut c) = labels.get_mut(child) {
-                let want = if focused { GREEN } else { DIM };
+                let want = if focused || bright { GREEN } else { DIM };
                 if c.0 != want {
                     c.0 = want;
                 }
@@ -1329,6 +1339,11 @@ fn layout_account(
     }
 }
 
+/// The menu camera's tilt up (rad): with the 65° vertical FOV the horizon sits
+/// just under the frame's bottom edge, so there's only sky and cloud whether or
+/// not a map is loaded.
+const MENU_PITCH: f32 = 0.6;
+
 /// Behind the menu the camera turns slowly under the sky (a fixed spot above
 /// the last map, or the bare planet before the first round).
 fn menu_camera(
@@ -1343,7 +1358,7 @@ fn menu_camera(
     let ground = terrain.map_or(0.0, |t| t.height_at(0.0, 0.0));
     let yaw = time.elapsed_secs() * 0.015;
     let eye = Vec3::new(0.0, (ground + 700.0).max(1400.0), 0.0);
-    *cam = Transform::from_translation(eye).with_rotation(Quat::from_euler(EulerRot::YXZ, yaw, 0.12, 0.0));
+    *cam = Transform::from_translation(eye).with_rotation(Quat::from_euler(EulerRot::YXZ, yaw, MENU_PITCH, 0.0));
 }
 
 #[cfg(test)]
