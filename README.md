@@ -206,8 +206,9 @@ Server env: `PORT` (default 8080), `FLIGHT_SIM_DEV_AUTH=1` (accept `dev:` tokens
 room codes: never in production), `FLIGHT_SIM_DEV_MUTUALS=1` (dev users are all each other's
 mutuals; they're never anyone's otherwise), `FLIGHT_SIM_APPVIEW` (default
 `https://public.api.bsky.app`), `FLIGHT_SIM_DEV_PROTOCOL=<n>` (a dev server pretends to speak
-protocol n, to test version mismatches), `FLIGHT_SIM_DB` (the leaderboard, see below),
-`FLIGHT_SIM_METRICS_TOKEN` (turns on `/metrics`, see Metrics below), `RUST_LOG`.
+protocol n, to test version mismatches), `DATABASE_URL` / `FLIGHT_SIM_DB` (the leaderboard,
+see below), `REDIS_URL`, `FLIGHT_SIM_REDIS_PREFIX`, `FLIGHT_SIM_REPLICA` (replicas, see Scaling
+below), `FLIGHT_SIM_METRICS_TOKEN` (turns on `/metrics`, see Metrics below), `RUST_LOG`.
 
 Version mismatches (v6): the server answers a `Hello` with the wrong version with
 `ServerVersion(its version)` and then `Error(Version)`. A client older than the server says
@@ -238,18 +239,94 @@ docker run -p 8080:8080 -e FLIGHT_SIM_DEV_AUTH=1 flight-sim-server
 
 `railway.json` builds that Dockerfile and health-checks `/health`; Railway sets `PORT`.
 
+### Scaling
+
+The server runs as any number of identical replicas sharing state in Redis (`REDIS_URL`), with
+the leaderboard in Postgres (`DATABASE_URL`). Without `REDIS_URL` everything is in-process
+(`cluster::Memory`: one server, local dev and tests); without `DATABASE_URL` the leaderboard is a
+SQLite file. Railway balances WebSockets across replicas at random and can't address one, so:
+
+- A player's socket lands on any replica: their *home*. It keeps their presence, friends list,
+  invites, join requests and queue entry, as before.
+- Each replica publishes a *view* of itself (its signed-in players with handle, profile, status
+  and room; its rooms with kind, started, map, players and host; its gauges) to
+  `v<N>:view:<replica>` with a 10 s TTL, refreshed every second and broadcast on `v<N>:all`
+  whenever it changes; every replica re-reads all views every 2 s. So presence and the online
+  count are cluster-wide, join-by-code, friend hop-ins and quick play's room choice see every
+  replica's rooms, and a replica that dies drops out when its key expires.
+- A room lives on the replica that made it (its *owner*), which keeps all its state: hit checks,
+  scores, the host, the lobby. A player whose home is another replica is a *guest* there: the home
+  forwards their room messages to the owner, and the owner sends what the room says to them back,
+  already postcard-encoded, which the home writes straight to the socket. Replica-to-replica
+  traffic is Redis pub/sub on each replica's own channel (`v<N>:r:<replica>`), batched into one
+  binary envelope per destination per game-loop tick; no JSON anywhere. A player in a room on their
+  own home never touches Redis.
+- Invites, join requests (to the room's owner, which knows its host) and answers go to the
+  replicas the target is on, as their views say.
+- The quick-play queue is a Redis sorted set; matching is one Lua script that takes up to 8
+  waiting players only if there are two or more and the first in line is the caller's, so exactly
+  one replica places a group and the room is made where its first player is. A waiting player goes
+  into a populated public room on any replica by removing their own entry first (only one remover
+  wins). Entries of a dead replica are dropped by the script.
+- The AppView relationship cache is shared (`pair:<a>|<b>`, 5 min), with a lock per pair so a pair
+  is looked up once in the cluster, and the AppView budget (5 calls a second) is cluster-wide.
+  Invite, join-request and score-submission limits, and challenge starts (so a reconnect to another
+  replica keeps a run), are in Redis too.
+
+Shutdown: on SIGTERM (Railway sends it on scale-down and redeploy; `drainingSeconds` is 10) a replica
+stops taking sockets (`/health` and `/ws` answer 503), ends its rooms (their players, its own and other
+replicas', get `Error(NoRoom)` and go back to the menu with NO ROOM, an existing error, so no protocol
+change), takes its players out of rooms elsewhere and out of the queue, says goodbye (others drop its
+players and rooms at once) and exits 1.5 s later. Its clients reconnect to another replica. A replica
+that dies uncleanly: its view expires within 10 s, and then the others end their players' rooms on it
+(NO ROOM) and drop its players; its guests elsewhere are dropped too, as is any guest whose home
+hasn't been heard from for 30 s. Redis keys and channels carry the cluster version (`v<N>`, from the
+protocol version), so a deploy that changes it runs as a separate cluster until the old replicas go.
+
+Scale with `numReplicas` in `railway.json` (and push), or `railway scale --service server eu-west=<n>`
+(the next deploy resets it to `railway.json`'s). One replica works exactly as before, the bridge just
+never used. The leaderboard needs no volume (Postgres), so nothing pins the service to one replica.
+
+Redis layout (prefix `FLIGHT_SIM_REDIS_PREFIX`, default `fs:`): `v<N>:view:*`, `v<N>:views`,
+`v<N>:queue` / `v<N>:queue:info`, channels `v<N>:all` and `v<N>:r:*`; `rl:*` (rate limits),
+`run:<did>` (challenge starts), `pair:*` / `pairlock:*`, `appview:<second>`, `metrics` (counter
+totals). Tests against a real Redis or Postgres use a throwaway prefix or schema:
+
+```bash
+FLIGHT_SIM_TEST_REDIS_URL=redis://… FLIGHT_SIM_TEST_DATABASE_URL=postgres://… \
+  cargo test --no-default-features --features server --bin flight_sim_server
+```
+
+Two local replicas (alice on one, bob on the other; quick play matches them across):
+
+```bash
+export REDIS_URL=redis://… FLIGHT_SIM_REDIS_PREFIX=test_$RANDOM: FLIGHT_SIM_DEV_AUTH=1 FLIGHT_SIM_DEV_MUTUALS=1
+PORT=8787 target/release/flight_sim_server &
+PORT=8788 target/release/flight_sim_server &
+FLIGHT_SIM_DEV_USER=alice FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=quick FLIGHT_SIM_AUTOPILOT=1 cargo run
+FLIGHT_SIM_DEV_USER=bob FLIGHT_SIM_SERVER=ws://127.0.0.1:8788 FLIGHT_SIM_MP=quick FLIGHT_SIM_AUTOPILOT=1 cargo run
+```
+
+The cross-replica rules are tested in-process on a bus of `Memory` replicas (`hub::tests`).
+
 ### Metrics
 
 `GET /metrics` is a Prometheus text exposition (hand-rolled in `src/server/metrics.rs`, no
 crate), served only with `Authorization: Bearer $FLIGHT_SIM_METRICS_TOKEN`: unset, it's a 404;
 a wrong token gets a 401. Counters and histograms are process-wide atomics bumped where things
-happen; the game loop copies its gauges out once a second. Everything is prefixed `flightsim_`:
+happen; the game loop copies its gauges out once a second. Across replicas a scrape (which lands on
+any one) shows the cluster: each replica adds its counters' increases to totals in Redis every 5 s
+and a scrape renders those totals (so every replica answers the same ever-growing numbers and a
+restart never makes a counter go backwards); gauges are the sum of every live replica's (from their
+views), except `players_online` and `leaderboard_players`, which are cluster-wide already. If Redis
+can't be read the scrape is a 503 rather than wrong numbers. Everything is prefixed `flightsim_`:
 
 - gauges: `players_online` (distinct DIDs), `connections_signed_in`, `websocket_connections`
   (open sockets, signed in or not), `players_in_rooms{kind}`, `rooms{kind,state}` (public/hosted,
   lobby/started), `rooms_by_size{players}`, `room_size_max`, `queue_length`,
-  `join_requests_pending`, `leaderboard_players`, `uptime_seconds`, `start_time_seconds`,
-  `build_info{git,version,protocol}` (git is Railway's `RAILWAY_GIT_COMMIT_SHA`)
+  `join_requests_pending`, `leaderboard_players`, `replicas` (live replicas), and per replica
+  `uptime_seconds{replica}`, `start_time_seconds{replica}`, `build_info{replica,git,version,protocol}`
+  (git is Railway's `RAILWAY_GIT_COMMIT_SHA`)
 - counters: `auth_attempts_total{result}` (ok, rejected, rejected_dev, bad_hello,
   client_outdated, server_outdated), `ws_messages_{in,out}_total`, `ws_bytes_{in,out}_total`,
   `ws_messages_dropped_total` (rate limit), `rooms_created_total{kind}`, `joins_total{method}`
@@ -259,7 +336,7 @@ happen; the game loop copies its gauges out once a second. Everything is prefixe
   cancelled, offline, joined_elsewhere), `invites_total{result}`, `join_requests_total{outcome}`
   (sent, refused, accepted, declined, expired), `kills_total`, `deaths_total{cause}` (shot, crash),
   `challenge_starts_total`, `challenge_runs_total{result,reason}`, `appview_calls_total{method}`,
-  `appview_errors_total{method}`
+  `appview_errors_total{method}`, `cluster_messages_total{direction}` (envelopes between replicas)
 - histograms: `queue_wait_seconds`, `appview_latency_seconds`, `tick_seconds` (one game-loop tick)
 
 Production: the token is a Railway variable on the `server` service; Prometheus on
@@ -288,14 +365,19 @@ client's clock no more than 15 s ahead of the server's; caps (score 2,000,000, w
 Rate limits: 10 starts a minute, one submission per 5 s, 30 board requests a minute. A rejected
 run is dropped quietly (logged; the reply is the same `Standing` as any run that isn't a best).
 
-Storage: SQLite (rusqlite, bundled) at `FLIGHT_SIM_DB` (default `./flight_sim.db`; the Docker
-image sets `/data/flight_sim.db`): `players` (DID → handle, refreshed on every connect, so
-renames show), `best` (each player's best run) and `runs` (every accepted run). The friends
-board is you plus your mutuals among the top 300 players, checked with presence's
-relationship cache (`getRelationships`, 5-minute cache, the same 5 calls a second); a request
-waits up to 8 s for lookups. On Railway, attach a volume at `/data` and set
-`RAILWAY_RUN_UID=0` (Railway mounts volumes root-owned, and the image runs as a non-root user).
-If the file can't be opened the server logs it and keeps the board in memory.
+Storage: Postgres at `DATABASE_URL` (sqlx, rustls), shared by every replica; without it, SQLite
+(rusqlite, bundled) at `FLIGHT_SIM_DB` (default `./flight_sim.db`; the Docker image sets
+`/data/flight_sim.db`). The same tables in both: `players` (DID → handle, refreshed on every
+connect, so renames show), `best` (each player's best run; in Postgres a new best is one atomic
+upsert, so two replicas can't race) and `runs` (every accepted run). Queries run on a worker,
+never in the game loop. On startup with an empty Postgres and a SQLite file at `FLIGHT_SIM_DB`,
+the server imports it once (under an advisory lock; it logs both sides' row counts): that's how
+the scores from the volume-backed SQLite days moved over. `FLIGHT_SIM_PG_SCHEMA` puts the tables
+in a schema of their own (tests). The friends board is you plus your mutuals among the top 300
+players, checked with presence's relationship cache (`getRelationships`, 5-minute cache, the
+same 5 calls a second); a request waits up to 8 s for lookups. If the SQLite file can't be
+opened the server logs it and keeps the board in memory; if Postgres can't be reached at start,
+the server exits (and Railway restarts it).
 
 Locally (two dev runs with fake but plausible scores, then the boards):
 
