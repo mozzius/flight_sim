@@ -124,6 +124,16 @@ impl Server {
         self.rooms.values().map(|r| r.players.len()).sum()
     }
 
+    /// The rooms' part of the metrics snapshot.
+    pub fn fill_gauges(&self, g: &mut crate::metrics::Gauges) {
+        for r in self.rooms.values() {
+            let kind = (r.kind == RoomKind::Hosted) as usize;
+            g.rooms[kind][r.started as usize] += 1;
+            g.in_rooms[kind] += r.players.len() as u64;
+            g.sizes[r.players.len().min(MAX_PLAYERS)] += 1;
+        }
+    }
+
     /// A connection signed in.
     pub fn connect(&mut self, conn: ConnId, did: String, handle: String) -> Vec<Out> {
         let msg = ServerMsg::Welcome { handle: handle.clone() };
@@ -215,6 +225,7 @@ impl Server {
                 next_seq: 0,
             },
         );
+        crate::metrics::M.rooms_created.inc(&[if kind == RoomKind::Public { "public" } else { "hosted" }]);
         self.join(conn, &code, now, out);
         Some(code)
     }
@@ -518,7 +529,10 @@ impl Room {
         let victim_did = v.info.did.clone();
         let killer = killer.filter(|k| *k != victim);
         let mut record = (0, 0);
+        let credited = killer.is_some_and(|k| self.players.contains_key(&k));
+        crate::metrics::M.deaths.inc(&[if credited { "shot" } else { "crash" }]);
         if let Some(k) = killer.and_then(|k| self.players.get_mut(&k)) {
+            crate::metrics::M.kills.inc();
             k.kills += 1;
             let killer_did = k.info.did.clone();
             let theirs = self.records.entry((killer_did.clone(), victim_did.clone())).or_default();

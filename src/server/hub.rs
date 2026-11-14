@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::leaderboard::{Board, Store};
+use crate::metrics::{self, M};
 use crate::presence::{Did, Job, JobResult, Presence};
 use crate::protocol::*;
 use crate::rooms::{self, ConnId, Out, RoomKind};
@@ -48,6 +49,20 @@ pub struct Hub {
     queue: Vec<Waiting>,
     /// The online count everyone was last told, and when.
     online_sent: Option<(u32, Instant)>,
+    /// Invites out (invitee conn, room code, when): a join with that code
+    /// counts as an invite join in the metrics.
+    invited: Vec<(ConnId, String, Instant)>,
+}
+
+/// Invites count as the way in for this long.
+const INVITE_MEMORY: Duration = Duration::from_secs(300);
+
+/// The room `conn` was just put in, if `out` says so.
+fn joined_room(out: &[Out], conn: ConnId) -> Option<&str> {
+    out.iter().find_map(|o| match &o.msg {
+        ServerMsg::Joined { code, .. } if o.to == [conn] => Some(code.as_str()),
+        _ => None,
+    })
 }
 
 /// The online count goes out at most this often.
@@ -59,6 +74,7 @@ struct Waiting {
     conn: ConnId,
     /// The map they sent (a room made for them is on the first one's).
     map: RoomMap,
+    since: Instant,
 }
 
 /// A join request waiting for the host.
@@ -89,7 +105,31 @@ impl Hub {
             board: Board::new(store),
             queue: vec![],
             online_sent: None,
+            invited: vec![],
         }
+    }
+
+    /// Takes `conn` out of the queue, if it's in, counting why.
+    fn unqueue(&mut self, conn: ConnId, outcome: &'static str) {
+        let before = self.queue.len();
+        self.queue.retain(|w| w.conn != conn);
+        if self.queue.len() != before {
+            M.queue_exits.inc(&[outcome]);
+        }
+    }
+
+    /// The metrics snapshot.
+    pub fn gauges(&self) -> metrics::Gauges {
+        let mut g = metrics::Gauges {
+            players_online: self.presence.online_count() as u64,
+            signed_in: self.dids.len() as u64,
+            queue: self.queue.len() as u64,
+            pending_requests: self.asks.len() as u64,
+            leaderboard: self.board.size(),
+            ..Default::default()
+        };
+        self.rooms.fill_gauges(&mut g);
+        g
     }
 
     /// How many are waiting for a quick-play match.
@@ -114,7 +154,8 @@ impl Hub {
             step.out.extend(self.presence.offline(conn, &did));
         }
         self.asks.retain(|a| a.conn != conn);
-        self.queue.retain(|w| w.conn != conn);
+        self.unqueue(conn, "offline");
+        self.invited.retain(|i| i.0 != conn);
         self.board.disconnect(conn);
         step.out.extend(self.sync_statuses());
         step
@@ -127,11 +168,19 @@ impl Hub {
             ClientMsg::Create { .. } | ClientMsg::Join { .. } | ClientMsg::Leave | ClientMsg::QuickPlay { .. } | ClientMsg::JoinFriend { .. }
         );
         if matches!(msg, ClientMsg::Leave) {
-            self.queue.retain(|w| w.conn != conn);
+            self.unqueue(conn, "cancelled");
         }
         match msg {
             ClientMsg::QuickPlay { map } => self.quick_play(conn, map, now, &mut step.out),
-            ClientMsg::CancelQueue => self.queue.retain(|w| w.conn != conn),
+            ClientMsg::CancelQueue => self.unqueue(conn, "cancelled"),
+            ClientMsg::Join { code } => {
+                step.out.extend(self.rooms.handle(conn, ClientMsg::Join { code }, now));
+                if let Some(code) = joined_room(&step.out, conn) {
+                    let invited = self.invited.iter().any(|i| i.0 == conn && i.1 == code);
+                    self.invited.retain(|i| !(i.0 == conn && i.1 == code));
+                    M.joins.inc(&[if invited { "invite" } else { "code" }]);
+                }
+            }
             ClientMsg::JoinFriend { did } => self.join_friend(conn, &did, now, &mut step.out),
             ClientMsg::Invite { to, map } => self.invite(conn, &to, map, now, &mut step.out),
             ClientMsg::RequestJoin { to } => self.request_join(conn, &to, now, &mut step.out),
@@ -160,7 +209,11 @@ impl Hub {
         }
         // in a room now (any way: a code, an invite, a friend, a request): out of the queue
         let rooms = &self.rooms;
+        let before = self.queue.len();
         self.queue.retain(|w| rooms.room_of(w.conn).is_none());
+        for _ in self.queue.len()..before {
+            M.queue_exits.inc(&["joined_elsewhere"]);
+        }
         if roomy {
             step.out.extend(self.sync_statuses());
         }
@@ -180,10 +233,12 @@ impl Hub {
         self.asks.retain(|a| {
             let waiting = now.duration_since(a.at) < wait;
             if !waiting {
+                M.join_requests.inc(&["expired"]);
                 out.push(Out { to: vec![a.conn], msg: ServerMsg::JoinDeclined(a.asked.clone()) });
             }
             waiting
         });
+        self.invited.retain(|i| now.duration_since(i.2) < INVITE_MEMORY);
         out.extend(self.board.tick(&self.presence, now));
         if self.match_queue(now, &mut out) {
             out.extend(self.sync_statuses());
@@ -205,11 +260,21 @@ impl Hub {
             return;
         }
         self.rooms.leave_room(conn, now, out);
+        // (pressed again while waiting: to the back of the queue, the wait still counting)
+        let since = self.queue.iter().find(|w| w.conn == conn).map_or(now, |w| w.since);
         self.queue.retain(|w| w.conn != conn);
         match self.pick_public(conn) {
-            Some(code) => self.rooms.join_code(conn, &code, now, out),
+            Some(code) => {
+                let from = out.len();
+                self.rooms.join_code(conn, &code, now, out);
+                M.quickplay.inc(&["joined"]);
+                if joined_room(&out[from..], conn).is_some() {
+                    M.joins.inc(&["quickplay"]);
+                }
+            }
             None => {
-                self.queue.push(Waiting { conn, map });
+                M.quickplay.inc(&["queued"]);
+                self.queue.push(Waiting { conn, map, since });
                 out.push(Out { to: vec![conn], msg: ServerMsg::Queued });
                 self.match_queue(now, out);
             }
@@ -237,8 +302,9 @@ impl Hub {
             let conn = self.queue[i].conn;
             match self.pick_public(conn) {
                 Some(code) => {
-                    self.queue.remove(i);
+                    let w = self.queue.remove(i);
                     self.rooms.join_code(conn, &code, now, out);
+                    Self::matched(&w, now);
                 }
                 None => i += 1,
             }
@@ -247,8 +313,11 @@ impl Hub {
             let group: Vec<Waiting> = self.queue.drain(..self.queue.len().min(MAX_PLAYERS)).collect();
             match self.rooms.create_room(group[0].conn, group[0].map, None, RoomKind::Public, now, out) {
                 Some(code) => {
+                    M.queue_matches.inc();
+                    Self::matched(&group[0], now);
                     for w in &group[1..] {
                         self.rooms.join_code(w.conn, &code, now, out);
+                        Self::matched(w, now);
                     }
                 }
                 // (the server's full: `create_room` told the first)
@@ -256,6 +325,13 @@ impl Hub {
             }
         }
         self.queue.len() != before
+    }
+
+    /// A waiting player went into a room.
+    fn matched(w: &Waiting, now: Instant) {
+        M.joins.inc(&["queue"]);
+        M.queue_exits.inc(&["matched"]);
+        M.queue_wait.observe(now.duration_since(w.since));
     }
 
     /// JOIN on a mutual in a public room: straight in if it has a seat.
@@ -273,7 +349,11 @@ impl Hub {
                     && self.rooms.is_public(&code)
                     && self.rooms.room_of(conn).is_none_or(|(mine, _)| mine != code) =>
             {
-                self.rooms.join_code(conn, &code, now, out)
+                let from = out.len();
+                self.rooms.join_code(conn, &code, now, out);
+                if joined_room(&out[from..], conn).is_some() {
+                    M.joins.inc(&["friend"]);
+                }
             }
             _ => out.push(Out { to: vec![conn], msg: ServerMsg::JoinDeclined(to.to_string()) }),
         }
@@ -283,6 +363,13 @@ impl Hub {
     /// to that room's host (who must be a mutual too). Anything that doesn't
     /// go is a plain decline, so it never says where anyone is.
     fn request_join(&mut self, conn: ConnId, to: &str, now: Instant, out: &mut Vec<Out>) {
+        let from = out.len();
+        self.ask_host(conn, to, now, out);
+        let sent = out[from..].iter().any(|o| matches!(o.msg, ServerMsg::JoinRequest(_)));
+        M.join_requests.inc(&[if sent { "sent" } else { "refused" }]);
+    }
+
+    fn ask_host(&mut self, conn: ConnId, to: &str, now: Instant, out: &mut Vec<Out>) {
         let Some(from) = self.dids.get(&conn).cloned() else { return };
         let declined = Out { to: vec![conn], msg: ServerMsg::JoinDeclined(to.to_string()) };
         if !self.presence.online_mutuals(&from, to) {
@@ -319,8 +406,14 @@ impl Hub {
         };
         let ask = self.asks.remove(i);
         if accept && self.dids.contains_key(&ask.conn) {
+            M.join_requests.inc(&["accepted"]);
+            let from = out.len();
             self.rooms.join_code(ask.conn, &ask.code, now, out);
+            if joined_room(&out[from..], ask.conn).is_some() {
+                M.joins.inc(&["request"]);
+            }
         } else {
+            M.join_requests.inc(&["declined"]);
             out.push(Out { to: vec![ask.conn], msg: ServerMsg::JoinDeclined(ask.asked) });
         }
     }
@@ -330,6 +423,7 @@ impl Hub {
         let failed = || Out { to: vec![conn], msg: ServerMsg::InviteFailed(to.to_string()) };
         // (offline and not a mutual fail alike: an invite never tells you who's online)
         if self.rooms.room_of(conn).is_some_and(|(_, full)| full) || !self.presence.may_invite(&from, to, now) {
+            M.invites.inc(&["failed"]);
             out.push(failed());
             return;
         }
@@ -342,7 +436,10 @@ impl Hub {
         };
         out.extend(self.sync_statuses());
         let Some(me) = self.presence.friend(&from) else { return };
-        out.push(Out { to: self.presence.conns(to), msg: ServerMsg::Invited { from: me, code } });
+        M.invites.inc(&["sent"]);
+        let to = self.presence.conns(to);
+        self.invited.extend(to.iter().map(|c| (*c, code.clone(), now)));
+        out.push(Out { to, msg: ServerMsg::Invited { from: me, code } });
     }
 
     /// Friends see who's in a room (and whether it's full).
@@ -848,5 +945,24 @@ mod tests {
         hub2.handle(1, ClientMsg::Create { map: MAP, code: Some("TEST".into()) }, now);
         let step = hub2.handle(4, ClientMsg::RequestJoin { to: "did:dev:alice".into() }, now);
         assert_eq!(step.out, vec![Out { to: vec![4], msg: ServerMsg::JoinDeclined("did:dev:alice".into()) }]);
+    }
+
+    #[test]
+    fn the_metrics_snapshot_counts_rooms_players_and_the_queue() {
+        let now = Instant::now();
+        let (mut hub, graph) = party(now);
+        online(&mut hub, &graph, 4, "dave", now);
+        hub.handle(3, ClientMsg::QuickPlay { map: MAP }, now);
+        let g = hub.gauges();
+        assert_eq!((g.players_online, g.signed_in, g.queue), (4, 4, 1));
+        assert_eq!(g.rooms, [[0, 0], [1, 0]], "one hosted lobby");
+        assert_eq!(g.in_rooms, [0, 2]);
+        assert_eq!(g.sizes[2], 1);
+        hub.handle(4, ClientMsg::QuickPlay { map: MAP }, now);
+        let g = hub.gauges();
+        assert_eq!(g.queue, 0);
+        assert_eq!(g.rooms, [[0, 1], [1, 0]], "carol and dave matched into a public room");
+        assert_eq!(g.in_rooms, [2, 2]);
+        assert_eq!(g.sizes[2], 2);
     }
 }

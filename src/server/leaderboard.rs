@@ -139,6 +139,11 @@ impl Store {
         Ok(best)
     }
 
+    /// How many players have a best run.
+    pub fn size(&self) -> rusqlite::Result<u64> {
+        self.db().query_row("SELECT COUNT(*) FROM best", [], |r| r.get::<_, i64>(0)).map(|n| n as u64)
+    }
+
     /// The player's best and global rank (ties: whoever got there first).
     pub fn standing(&self, did: &str) -> rusqlite::Result<Option<Standing>> {
         self.db()
@@ -269,7 +274,13 @@ impl Board {
     }
 
     /// A challenge round began (the newest start wins).
+    /// How many players are on the board.
+    pub fn size(&self) -> u64 {
+        log_err("size", self.store.size())
+    }
+
     pub fn start(&mut self, did: &str, seed: u32, now: Instant) {
+        crate::metrics::M.challenge_starts.inc();
         if self.start_asks.allow(did, STARTS_PER_MINUTE, now) {
             self.starts.insert(did.to_string(), (seed, now));
         }
@@ -279,6 +290,10 @@ impl Board {
     /// the player's standing (so a rejected run looks like any non-best one).
     pub fn submit(&mut self, conn: ConnId, did: &str, run: Run, now: Instant) -> Vec<Out> {
         let verdict = self.verdict(did, &run, now);
+        match verdict {
+            Ok(()) => crate::metrics::M.challenge_runs.inc(&["accepted", ""]),
+            Err(why) => crate::metrics::M.challenge_runs.inc(&["rejected", &crate::metrics::slug(why)]),
+        }
         match verdict {
             Ok(()) => {
                 let best = log_err("record", self.store.record(did, &run, unix_now()));

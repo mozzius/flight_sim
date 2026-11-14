@@ -496,14 +496,26 @@ impl AppView {
         Self { client, base: base.trim_end_matches('/').to_string() }
     }
 
-    fn get(&self, url: String) -> BoxFuture<Result<Value, String>> {
+    /// `method` names the call in the metrics.
+    fn get(&self, method: &'static str, url: String) -> BoxFuture<Result<Value, String>> {
         let client = self.client.clone();
         Box::pin(async move {
-            let r = client.get(&url).send().await.map_err(|e| e.to_string())?;
-            if !r.status().is_success() {
-                return Err(format!("{}: {}", url.split('?').next().unwrap_or(""), r.status()));
+            let m = &crate::metrics::M;
+            m.appview_calls.inc(&[method]);
+            let t = std::time::Instant::now();
+            let result = async {
+                let r = client.get(&url).send().await.map_err(|e| e.to_string())?;
+                if !r.status().is_success() {
+                    return Err(format!("{}: {}", url.split('?').next().unwrap_or(""), r.status()));
+                }
+                serde_json::from_str(&r.text().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
             }
-            serde_json::from_str(&r.text().await.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+            .await;
+            m.appview_latency.observe(t.elapsed());
+            if result.is_err() {
+                m.appview_errors.inc(&[method]);
+            }
+            result
         })
     }
 }
@@ -522,7 +534,7 @@ impl RelationshipSource for AppView {
             url.push_str("&others=");
             url.push_str(&o);
         }
-        let get = self.get(url);
+        let get = self.get("getRelationships", url);
         Box::pin(async move { Ok(parse_mutuals(&get.await?)) })
     }
 
@@ -535,7 +547,7 @@ impl RelationshipSource for AppView {
             url.push_str("actors=");
             url.push_str(&d);
         }
-        let get = self.get(url);
+        let get = self.get("getProfiles", url);
         Box::pin(async move { Ok(parse_profiles(&get.await?)) })
     }
 }
