@@ -463,6 +463,9 @@ Pushing a `v*` tag builds a universal macOS .app, a Windows .exe and a Linux x86
 
 ## Web build
 
+Staging: `./scripts/deploy-web.sh staging` builds and deploys to <https://staging.flight.mozzius.dev> (Vercel project `flight-sim-staging`, its own OAuth client metadata, no analytics). `./scripts/deploy-web.sh prod` does the same for <https://flight.mozzius.dev>. Both use the production game server unless you add `?server=...`.
+
+
 Live at <https://flight.mozzius.dev> (needs a WebGPU browser). Build and deploy:
 
 ```bash

@@ -20,14 +20,15 @@ const JOIN = "dev.mozzius.flight.join";
 // rpc permission scopes need aud to be "*" or a did#service ref, so the
 // fragment-less server DID is covered by aud=* (still only this one method)
 const SCOPE = `atproto rpc:${JOIN}?aud=*`;
-const PROD_HOST = "flight.mozzius.dev";
+// hosts with their own oauth-client-metadata.json (prod and staging)
+const SITE_HOSTS = ["flight.mozzius.dev", "staging.flight.mozzius.dev"];
 const PROFILE_KEY = "flight-sim:profile";
 
 const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
-const available = loopback || location.hostname === PROD_HOST;
+const available = loopback || SITE_HOSTS.includes(location.hostname);
 
 function clientId() {
-  if (!loopback) return `https://${PROD_HOST}/oauth-client-metadata.json`;
+  if (!loopback) return `https://${location.hostname}/oauth-client-metadata.json`;
   // loopback redirect URIs must be IP literals (the library moves localhost to 127.0.0.1)
   const host = location.hostname === "localhost" ? "127.0.0.1" : location.hostname;
   const redirect = `http://${host}${location.port ? ":" + location.port : ""}/`;
