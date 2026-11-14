@@ -436,7 +436,7 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
         let (backend, rt) = (game.backend.clone(), game.rt.clone());
         std::thread::spawn(move || {
             std::thread::sleep(DRAIN);
-            let _ = rt.block_on(async { tokio::time::timeout(Duration::from_secs(2), push_once(&*backend, &mut BTreeMap::new())).await });
+            let _ = rt.block_on(async { tokio::time::timeout(Duration::from_secs(2), push_once(&*backend)).await });
             info!("bye");
             std::process::exit(0);
         });
@@ -572,21 +572,25 @@ async fn read_views(backend: Arc<dyn Backend>, now: Arc<tokio::sync::Notify>, ev
     }
 }
 
+/// What the cluster's totals have of ours so far (the periodic push and the
+/// last one on the way out share it, or the last would add it all again).
+static PUSHED: tokio::sync::Mutex<BTreeMap<String, u64>> = tokio::sync::Mutex::const_new(BTreeMap::new());
+
 /// Adds what the counters have grown by to the cluster's totals.
-async fn push_once(backend: &dyn Backend, last: &mut BTreeMap<String, u64>) {
+async fn push_once(backend: &dyn Backend) {
+    if !backend.clustered() {
+        return;
+    }
+    let mut last = PUSHED.lock().await;
     let now = metrics::flat(&metrics::M);
-    if backend.push_metrics(metrics::deltas(&now, last)).await {
+    if backend.push_metrics(metrics::deltas(&now, &last)).await {
         *last = now;
     }
 }
 
 async fn push_metrics(backend: Arc<dyn Backend>) {
-    if !backend.clustered() {
-        return;
-    }
-    let mut last = BTreeMap::new();
     loop {
-        push_once(&*backend, &mut last).await;
+        push_once(&*backend).await;
         tokio::time::sleep(metrics::PUSH_EVERY).await;
     }
 }
@@ -612,7 +616,8 @@ async fn serve(port: u16, shared: Shared) {
                 error!("server stopped: {e}");
             }
         }
-        Err(e) => error!("can't listen on {addr}: {e}"),
+        // (stderr too: this can happen before the logger's up)
+        Err(e) => eprintln!("can't listen on {addr}: {e}"),
     }
 }
 

@@ -166,7 +166,7 @@ impl Redis {
     where
         F: Future<Output = redis::RedisResult<T>>,
     {
-        match self.rt.block_on(tokio::time::timeout(SYNC_TIMEOUT, f)) {
+        match self.rt.block_on(async { tokio::time::timeout(SYNC_TIMEOUT, f).await }) {
             Ok(Ok(v)) => Some(v),
             Ok(Err(e)) => {
                 bevy::log::warn!("redis {what}: {e}");
