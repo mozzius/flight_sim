@@ -11,7 +11,8 @@
 //! a room with n players, 7 s in), `friendjoin` (a friend in a public room,
 //! their row showing JOIN), `request` (a join request card), `kill` (our kill banner), `death` (the multiplayer death
 //! screen, killer named), `rank` (the challenge score screen with our rank),
-//! `board` (the leaderboard screen with its rows).
+//! `board` (the leaderboard screen with its rows), `queue` (waiting in the
+//! quick-play queue), `online<n>` (the server says n or more are online).
 
 use bevy::{
     prelude::*,
@@ -193,6 +194,8 @@ fn extra_screenshots(
             t.parse::<f32>().is_ok_and(|t| now >= t)
         } else if let Some(n) = e.strip_prefix("lobby") {
             net.in_lobby() && net.players().len() >= n.parse().unwrap_or(1)
+        } else if let Some(n) = e.strip_prefix("online") {
+            net.online_count().is_some_and(|c| c >= n.parse().unwrap_or(1))
         } else if let Some(n) = e.strip_prefix("room") {
             // flying in a room with at least n players
             *state.get() == crate::loading::GameState::Playing
@@ -202,6 +205,7 @@ fn extra_screenshots(
         } else {
             match e {
                 "request" => net.pending_request().is_some(),
+                "queue" => net.queued(),
                 // a friend in a public room (their row shows JOIN)
                 "friendjoin" => net.friends().iter().any(|f| f.status == crate::net::protocol::FriendStatus::InPublic && !net.in_my_room(&f.did)),
                 "kill" => last_kill.is_some_and(|t| now - t < 2.0),

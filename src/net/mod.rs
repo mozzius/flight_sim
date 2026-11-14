@@ -21,9 +21,14 @@
 //! in [`Net::pending_request`] (the same card, ACCEPT / X). JOIN on a friend
 //! in a public room hops straight in ([`Net::join_friend`]).
 //!
-//! QUICK PLAY ([`Net::quick_play`]): the server finds a public room (or
-//! makes one on the random map we send), which is flying from the start:
-//! no lobby, no host, no code shown.
+//! QUICK PLAY ([`Net::quick_play`]): the server finds a public room with
+//! players in it, which is flying from the start: no lobby, no host, no
+//! code shown. With none we wait in its queue ([`Net::queued`]; the menu
+//! shows SEARCHING), baking the random map we sent meanwhile (a room made
+//! for us and the next player is on the first one's map), until we're
+//! matched (`Joined`) or CANCEL ([`Net::cancel_queue`]). Invites and join
+//! requests still work while we wait. [`Net::online_count`]: how many are
+//! signed in (the server's `Online`).
 //!
 //! The challenge leaderboard rides the same connection: `crate::leaderboard`
 //! calls [`Net::challenge_start`], [`Net::submit_score`] and
@@ -183,8 +188,12 @@ pub struct Net {
     /// Reconnect no sooner than this (real seconds), and the next wait.
     retry_at: f64,
     backoff: f64,
-    /// The server wants a newer game: stop trying.
+    /// The server wants a newer game: stop trying (and say so).
     outdated: bool,
+    /// The server is behind us (deploying): retry, saying SERVER UPDATING.
+    server_behind: bool,
+    /// The version the server said it speaks (before turning us away).
+    server_version: Option<u16>,
     /// Online mutuals, by handle.
     friends: Vec<Friend>,
     /// Bumped whenever `friends` changes (the menus rebuild their rows).
@@ -211,6 +220,14 @@ pub struct Net {
     boards: HashMap<BoardKind, (Vec<BoardRow>, Option<Standing>)>,
     /// Bumped whenever a board arrives.
     board_version: u32,
+
+    // ---- quick play ----
+    /// The map our last QuickPlay sent.
+    quick_map: Option<RoomMap>,
+    /// In the queue: that map, and since when (real seconds).
+    queued: Option<(RoomMap, f64)>,
+    /// Players signed in (the server's last `Online`).
+    online_count: Option<u32>,
 
     // ---- the room ----
     in_room: bool,
@@ -321,7 +338,15 @@ impl Net {
 
     /// The menu's status word: what went wrong, or that we're on our way.
     pub fn label(&self) -> Option<&'static str> {
-        if self.intent.is_some() || self.awaiting { Some("CONNECTING") } else { self.label }
+        if self.outdated {
+            Some(OUTDATED_TEXT)
+        } else if self.server_behind && self.phase != Phase::Online {
+            Some("SERVER UPDATING")
+        } else if self.intent.is_some() || self.awaiting {
+            Some("CONNECTING")
+        } else {
+            self.label
+        }
     }
 
     /// The room's code (public rooms don't show theirs).
@@ -336,6 +361,35 @@ impl Net {
     /// In a room that hasn't started: its map (being baked meanwhile).
     pub fn lobby_map(&self) -> Option<RoomMap> {
         self.room_map.filter(|_| self.in_room && !self.started)
+    }
+
+    /// The map to bake while we wait: the lobby's, or (in the quick-play
+    /// queue) ours, which a room made for us would be on.
+    pub fn prebake_map(&self) -> Option<RoomMap> {
+        self.lobby_map().or(self.queued.map(|q| q.0))
+    }
+
+    /// Waiting in the quick-play queue.
+    pub fn queued(&self) -> bool {
+        self.queued.is_some()
+    }
+
+    /// How long we've been in the queue.
+    pub fn queued_for(&self, now: f64) -> Option<f64> {
+        self.queued.map(|(_, at)| now - at)
+    }
+
+    /// CANCEL (the queue): out of it, still online.
+    pub fn cancel_queue(&mut self) {
+        if self.queued.take().is_some() {
+            info!("multiplayer: leaving the queue");
+            self.send(&ClientMsg::CancelQueue);
+        }
+    }
+
+    /// Players signed in, once the server's said.
+    pub fn online_count(&self) -> Option<u32> {
+        self.online_count
     }
 
     pub fn in_lobby(&self) -> bool {
@@ -371,6 +425,7 @@ impl Net {
 
     /// LEAVE (the lobby): out of the room, still online.
     pub fn leave(&mut self) {
+        self.cancel_queue();
         if self.in_room {
             self.send(&ClientMsg::Leave);
             self.clear_room();
@@ -540,6 +595,13 @@ impl Net {
 
     fn start(&mut self, intent: Intent) {
         self.label = None;
+        if self.outdated {
+            return;
+        }
+        // (somewhere else: out of the queue first)
+        if !matches!(intent, Intent::QuickPlay(_)) {
+            self.cancel_queue();
+        }
         if self.phase == Phase::Online {
             self.send_intent(intent);
             return;
@@ -555,7 +617,10 @@ impl Net {
         match intent {
             Intent::Create(map, code) => self.send(&ClientMsg::Create { map, code }),
             Intent::Join(code) => self.send(&ClientMsg::Join { code }),
-            Intent::QuickPlay(map) => self.send(&ClientMsg::QuickPlay { map }),
+            Intent::QuickPlay(map) => {
+                self.quick_map = Some(map);
+                self.send(&ClientMsg::QuickPlay { map });
+            }
         }
     }
 
@@ -586,6 +651,8 @@ impl Net {
         self.friends_version += 1;
         self.invite = None;
         self.requested.clear();
+        self.queued = None;
+        self.online_count = None;
         self.backoff = if self.backoff == 0.0 { FIRST_RETRY } else { (self.backoff * 2.0).min(MAX_RETRY) };
         self.retry_at = now + self.backoff;
     }
@@ -637,6 +704,8 @@ impl Net {
             ServerMsg::Welcome { handle } => {
                 info!("multiplayer: online as {handle}");
                 self.phase = Phase::Online;
+                self.server_behind = false;
+                self.server_version = None;
                 self.backoff = 0.0;
                 for msg in std::mem::take(&mut self.outbox) {
                     self.send(&msg);
@@ -646,14 +715,29 @@ impl Net {
                 }
             }
             // before Welcome: the server's closing on us
+            ServerMsg::ServerVersion(v) => self.server_version = Some(v),
+            // a version mismatch: if the server's newer we're out of date (stop
+            // trying); else it's behind (not deployed yet: keep retrying)
+            ServerMsg::Error(ErrorCode::Version) if self.phase != Phase::Online => {
+                let theirs = self.server_version.take();
+                if theirs.is_some_and(|v| v > PROTOCOL_VERSION) {
+                    warn!("multiplayer: out of date (server v{theirs:?}, us v{PROTOCOL_VERSION})");
+                    self.outdated = true;
+                    self.disconnect(None, now);
+                } else {
+                    warn!("multiplayer: server behind (v{theirs:?}, us v{PROTOCOL_VERSION}); retrying");
+                    self.server_behind = true;
+                    self.disconnect(None, now);
+                }
+            }
             ServerMsg::Error(code) if self.phase != Phase::Online => {
-                self.outdated |= code == ErrorCode::Version;
                 self.disconnect(Some(code.label()), now);
             }
             // a room we couldn't get into (the server has us in none now)
             ServerMsg::Error(code) => {
                 warn!("multiplayer: {}", code.label());
                 self.awaiting = false;
+                self.queued = None;
                 self.label = Some(code.label());
                 self.lost |= self.in_room;
                 self.clear_room();
@@ -663,6 +747,7 @@ impl Net {
                 info!("multiplayer: room {code}, player {you}, {} here{kind}", players.len());
                 self.clear_room();
                 self.awaiting = false;
+                self.queued = None;
                 self.in_room = true;
                 self.code = Some(code);
                 self.me = Some(you);
@@ -730,6 +815,14 @@ impl Net {
                 self.label = Some("DECLINED");
                 self.friends_version += 1;
             }
+            ServerMsg::Queued => {
+                self.awaiting = false;
+                if let Some(map) = self.quick_map {
+                    info!("multiplayer: waiting for a match");
+                    self.queued = Some((map, now));
+                }
+            }
+            ServerMsg::Online(n) => self.online_count = Some(n),
             ServerMsg::Standing(standing) => {
                 info!("leaderboard: standing {standing:?}");
                 self.standing = standing;

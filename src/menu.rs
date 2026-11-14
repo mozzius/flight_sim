@@ -9,6 +9,11 @@
 //! In a multiplayer room that hasn't started, the menu is the lobby: the
 //! room code, who's in (and who hosts), the friends list, a thin bar for the
 //! map baking meanwhile, START (the host) and LEAVE (Esc / (B) too).
+//!
+//! Waiting in the quick-play queue, the menu is SEARCHING (animated dots),
+//! the online count, the friends list and CANCEL (Esc / (B) too), plus
+//! PLAY SOLO (an endless round) after [`SOLO_AFTER`] seconds. The
+//! MULTIPLAYER panel shows the online count too.
 
 use bevy::{picking::hover::Hovered, prelude::*};
 
@@ -42,7 +47,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(GameState::Menu), despawn_menu)
             .add_systems(
                 Update,
-                (lobby_focus, navigate, crate::leaderboard::handle_pressed, handle_pressed, style_buttons, layout_menu, layout_lobby, layout_account)
+                (lobby_focus, navigate, crate::leaderboard::handle_pressed, handle_pressed, style_buttons, layout_menu, layout_lobby, layout_queue, layout_account)
                     .chain()
                     .in_set(MenuSystems),
             )
@@ -109,6 +114,9 @@ pub enum UiAction {
     /// The lobby's START (the host) and LEAVE.
     StartRoom,
     Leave,
+    /// The quick-play queue's CANCEL and PLAY SOLO.
+    CancelQueue,
+    PlaySolo,
     /// The native sign-in prompt's SIGN IN and CANCEL.
     SignInSubmit,
     SignInCancel,
@@ -181,6 +189,10 @@ const ROW_KEYS: u8 = 11;
 const KEYS_PER_ROW: usize = 8;
 const ORDER_LOBBY: u8 = 60;
 const ROW_LOBBY: u8 = 25;
+const ORDER_QUEUE: u8 = 70;
+const ROW_QUEUE: u8 = 26;
+/// PLAY SOLO shows after this long alone in the queue.
+pub const SOLO_AFTER: f64 = 30.0;
 const ORDER_FRIENDS: u8 = 100;
 const ROW_FRIENDS: u8 = 30;
 
@@ -319,6 +331,24 @@ struct LobbyBar;
 #[derive(Component)]
 struct LobbyStart;
 
+/// The quick-play queue's screen.
+#[derive(Component)]
+struct QueuePanel;
+
+/// SEARCHING and its dots.
+#[derive(Component)]
+struct QueueSearching;
+
+/// Wraps PLAY SOLO (after a while).
+#[derive(Component)]
+struct QueueSolo;
+
+/// `N ONLINE` (the MULTIPLAYER panel's, or the queue's).
+#[derive(Component)]
+struct OnlineText {
+    queue: bool,
+}
+
 /// A small square keypad key.
 fn key(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, order: u8, row: u8, action: UiAction) {
     parent
@@ -387,6 +417,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         button(row, &font, "SIGN IN", Screen::Modes, 3, 2, UiAction::SignIn);
                     });
                 });
+                root.spawn((OnlineText { queue: false }, Text::new(""), font_of(&font, 13.0, DIM), Node { display: Display::None, ..default() }));
             }
             root.spawn((
                 EndlessPanel,
@@ -453,6 +484,26 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         button(w, &font, "START", Screen::Modes, ORDER_LOBBY, ROW_LOBBY, UiAction::StartRoom);
                     });
                     button(row, &font, "LEAVE", Screen::Modes, ORDER_LOBBY + 1, ROW_LOBBY, UiAction::Leave);
+                });
+            });
+            root.spawn((
+                QueuePanel,
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: px(14),
+                    display: Display::None,
+                    ..default()
+                },
+            ))
+            .with_children(|panel| {
+                panel.spawn((QueueSearching, Text::new("SEARCHING"), font_of(&font, 28.0, GREEN)));
+                panel.spawn((OnlineText { queue: true }, Text::new(""), font_of(&font, 14.0, DIM)));
+                panel.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
+                    button(row, &font, "CANCEL", Screen::Modes, ORDER_QUEUE, ROW_QUEUE, UiAction::CancelQueue);
+                    row.spawn((QueueSolo, Node { display: Display::None, ..default() })).with_children(|w| {
+                        button(w, &font, "PLAY SOLO", Screen::Modes, ORDER_QUEUE + 1, ROW_QUEUE, UiAction::PlaySolo);
+                    });
                 });
             });
             root.spawn((SettingsButton, Node::default())).with_children(|row| {
@@ -640,6 +691,8 @@ fn navigate(
         pressed.0.push((UiAction::SignInCancel, 1));
     } else if back && net.in_lobby() {
         pressed.0.push((UiAction::Leave, 1));
+    } else if back && net.queued() {
+        pressed.0.push((UiAction::CancelQueue, 1));
     } else if back {
         *panel = match *panel {
             Panel::Create | Panel::Join => Panel::Multi,
@@ -779,6 +832,11 @@ fn handle_pressed(
             UiAction::DismissInvite => net.dismiss_invite(),
             UiAction::StartRoom => net.start_game(),
             UiAction::Leave => net.leave(),
+            UiAction::CancelQueue => net.cancel_queue(),
+            UiAction::PlaySolo => {
+                net.cancel_queue();
+                begin_round(&mut commands, &mut next, GameMode::Endless, Picks::from_settings());
+            }
             // (taken by `leaderboard::handle_pressed` first)
             UiAction::Leaderboard | UiAction::BoardTab(_) | UiAction::CloseBoard => {}
             UiAction::Account => {
@@ -842,7 +900,7 @@ fn layout_menu(
             Option<&SignedIn>,
             Has<MultiButton>,
             Has<LobbyPanel>,
-            (Has<EndlessOnly>, Has<SettingsButton>, Has<SettingsPanel>, Has<ApplyButton>),
+            (Has<EndlessOnly>, Has<SettingsButton>, Has<SettingsPanel>, Has<ApplyButton>, Has<QueuePanel>),
         ),
         (
             Without<MenuRoot>,
@@ -855,7 +913,7 @@ fn layout_menu(
                 With<crate::friends::FriendsSection>,
                 With<MultiButton>,
                 With<LobbyPanel>,
-                Or<(With<EndlessOnly>, With<SettingsButton>, With<SettingsPanel>, With<ApplyButton>)>,
+                Or<(With<EndlessOnly>, With<SettingsButton>, With<SettingsPanel>, With<ApplyButton>, With<QueuePanel>)>,
             )>,
         ),
     >,
@@ -866,10 +924,15 @@ fn layout_menu(
     applied: Res<crate::settings::Applied>,
 ) {
     let signed_in = crate::identity::current_user().is_some();
-    let lobby = net.in_lobby();
+    let in_lobby = net.in_lobby();
+    let queued = net.queued();
+    // (the lobby and the queue each replace the rest of the menu)
+    let lobby = in_lobby || queued;
     for (mut node, endless, modes, multi, join, friends, signed, multi_button, lobby_panel, extra) in &mut sections {
-        let (endless_only, settings_button, settings_panel, apply) = extra;
-        let show = if endless_only {
+        let (endless_only, settings_button, settings_panel, apply, queue_panel) = extra;
+        let show = if queue_panel {
+            queued
+        } else if endless_only {
             *panel == Panel::Endless
         } else if apply {
             settings.graphics != applied.0
@@ -880,7 +943,7 @@ fn layout_menu(
             }
             (panel.multiplayer() || lobby) && signed_in
         } else if lobby_panel {
-            lobby
+            in_lobby
         } else if lobby {
             // the lobby replaces the rest of the menu
             false
@@ -946,13 +1009,61 @@ fn layout_menu(
 
 /// Into the lobby: the multiplayer panel underneath (for when we leave), and
 /// the focus on START (the host) or LEAVE.
-fn lobby_focus(net: Res<crate::net::Net>, mut was: Local<bool>, mut panel: ResMut<Panel>, mut focus: ResMut<Focus>) {
+fn lobby_focus(net: Res<crate::net::Net>, mut was: Local<(bool, bool)>, mut panel: ResMut<Panel>, mut focus: ResMut<Focus>) {
     let lobby = net.in_lobby();
-    if lobby && !*was {
+    if lobby && !was.0 {
         *panel = Panel::Multi;
         focus.order = if net.is_host() { ORDER_LOBBY } else { ORDER_LOBBY + 1 };
     }
-    *was = lobby;
+    // (the queue: CANCEL)
+    let queued = net.queued();
+    if queued && !was.1 {
+        *panel = Panel::Multi;
+        focus.order = ORDER_QUEUE;
+    }
+    *was = (lobby, queued);
+}
+
+/// The queue's dots and PLAY SOLO, and the online counts.
+#[allow(clippy::type_complexity)]
+fn layout_queue(
+    net: Res<crate::net::Net>,
+    panel: Res<Panel>,
+    time: Res<Time<Real>>,
+    mut searching: Query<&mut Text, (With<QueueSearching>, Without<OnlineText>)>,
+    mut online: Query<(&OnlineText, &mut Text, &mut Node), Without<QueueSearching>>,
+    mut solo: Query<&mut Node, (With<QueueSolo>, Without<OnlineText>)>,
+) {
+    let now = time.elapsed_secs_f64();
+    let waited = net.queued_for(now);
+    if let (Some(w), Ok(mut t)) = (waited, searching.single_mut()) {
+        // (monospace: the padding keeps it from shuffling)
+        let s = format!("SEARCHING{:<3}", ".".repeat((w / 0.4) as usize % 4));
+        if t.0 != s {
+            t.0 = s;
+        }
+    }
+    if let Ok(mut node) = solo.single_mut() {
+        let d = if waited.is_some_and(|w| w >= SOLO_AFTER) { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+        }
+    }
+    let count = net.online_count().map(|n| format!("{n} ONLINE"));
+    let signed_in = crate::identity::current_user().is_some();
+    for (o, mut text, mut node) in &mut online {
+        let show = count.is_some()
+            && if o.queue { net.queued() } else { *panel == Panel::Multi && signed_in && !net.queued() && !net.in_lobby() };
+        let d = if show { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+        }
+        if let Some(c) = &count
+            && text.0 != *c
+        {
+            text.0 = c.clone();
+        }
+    }
 }
 
 /// The lobby's code, players, bake bar and START.

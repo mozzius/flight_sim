@@ -109,14 +109,18 @@ impl Prebake {
     }
 }
 
-/// Bakes the lobby's map while we wait (and drops it if we leave).
-fn prebake(mut pre: ResMut<Prebake>, net: Res<crate::net::Net>) {
-    let Some(map) = net.lobby_map() else {
-        if pre.key.is_some() {
+/// Bakes the lobby's map (or the quick-play queue's) while we wait, and
+/// drops it if we leave.
+fn prebake(mut pre: ResMut<Prebake>, net: Res<crate::net::Net>, mut gone: Local<u32>) {
+    let Some(map) = net.prebake_map() else {
+        // (a frame's grace: matched or started, we're off to load it next frame)
+        *gone += 1;
+        if pre.key.is_some() && *gone > 1 {
             *pre = Prebake::default();
         }
         return;
     };
+    *gone = 0;
     let biome = Environment::choose(map.seed, crate::net::room_picks(map)).biome;
     let key = Some((map.seed, biome));
     if pre.key != key {
