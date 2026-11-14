@@ -158,9 +158,18 @@ mutual, one per friend per 10 s and 10 a minute. Join requests (protocol v3: `Re
 the host's `JoinRequest` → `AnswerJoin`, else `JoinDeclined` after 20 s) need the friend and the
 room's host to be online mutuals of the requester, one per host per 10 s and 6 a minute, and any
 failure is the same decline. MULTIPLAYER offers QUICK PLAY, HOST GAME and JOIN GAME (a code).
-Quick play (protocol v5: `QuickPlay { map }`) puts you in a public room with a seat, preferring
-rooms with your online mutuals, then the fullest; with none it makes a new one on the random map
-the client sent. Public rooms have no host, lobby or visible code, fly from the start (late joiners
+Quick play (protocol v5: `QuickPlay { map }`) puts you in a public room that has players and a
+seat, preferring rooms with your online mutuals, then the fullest. With none (protocol v6) you
+wait in a queue (`Queued`; the menu shows SEARCHING, the online count, CANCEL, and PLAY SOLO
+after 30 s, which starts an endless round) while the client bakes the random map it sent. As soon
+as a second player queues, the server makes a public room on the first one's map and moves them
+in together (up to 8 at once); a waiting player also goes into any public room that gets players
+(checked every tick). Players already in rooms are never moved, so the last one left in a public
+room keeps flying and the next quick play joins them. `CancelQueue`, `Leave`, going offline, or
+joining any room another way (an invite, an accepted join request, a code) takes you out of the
+queue. The server also tells every signed-in client how many are online (`Online(n)`: on sign-in,
+then on change at most every 5 s), shown as `N ONLINE` under the MULTIPLAYER buttons and on the
+queue screen; it's a count only. Public rooms have no host, lobby or visible code, fly from the start (late joiners
 drop in) and go 15 s after the last player leaves. A mutual in a public room with a seat shows
 JOIN (`FriendStatus::InPublic`), which hops straight in (`JoinFriend { did }`, checked for
 mutuals and a seat; any failure is a plain `JoinDeclined`); JOIN on a hosted room (`InRoom`)
@@ -179,7 +188,7 @@ starts its lobby 3 s after n players are in), `FLIGHT_SIM_DEV_REQUEST=<handle>` 
 friend 4 s after they're seen in a room: straight into a public room, a request for a hosted one), `FLIGHT_SIM_DEV_ACCEPT_REQUESTS=1` (let any join
 request in after 2 s), `FLIGHT_SIM_DEV_HIT=1` (land gun hits on anyone within range: a quick
 kill), `FLIGHT_SIM_SCREENSHOT_EXTRA=<event>:<path>,...` (extra shots without exiting on
-`t<secs>`, `lobby<n>`, `room<n>`, `friendjoin`, `request`, `kill`, `death`),
+`t<secs>`, `lobby<n>`, `room<n>`, `friendjoin`, `request`, `kill`, `death`, `queue`, `online<n>`),
 `FLIGHT_SIM_MODE=menu-multiplayer|menu-create|menu-join` (open that panel in a screenshot run).
 
 Run a server locally and two headless clients that fight each other:
@@ -196,7 +205,15 @@ FLIGHT_SIM_DEV_USER=bob FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=join
 Server env: `PORT` (default 8080), `FLIGHT_SIM_DEV_AUTH=1` (accept `dev:` tokens and requested
 room codes: never in production), `FLIGHT_SIM_DEV_MUTUALS=1` (dev users are all each other's
 mutuals; they're never anyone's otherwise), `FLIGHT_SIM_APPVIEW` (default
-`https://public.api.bsky.app`), `RUST_LOG`. Endpoints: `/ws` (the game) and `/health` ("ok").
+`https://public.api.bsky.app`), `FLIGHT_SIM_DEV_PROTOCOL=<n>` (a dev server pretends to speak
+protocol n, to test version mismatches), `RUST_LOG`.
+
+Version mismatches (v6): the server answers a `Hello` with the wrong version with
+`ServerVersion(its version)` and then `Error(Version)`. A client older than the server says
+"This client is out of date. Update to play multiplayer." in the multiplayer menu, for good
+(no fading, no reconnecting; single player is unaffected). A client newer than the server (or
+one hearing no `ServerVersion`: servers before v6 don't send it) means the server hasn't
+deployed yet: it shows SERVER UPDATING and keeps reconnecting with its usual back-off. Endpoints: `/ws` (the game) and `/health` ("ok").
 `cargo test --no-default-features --features server --bin flight_sim_server` runs the room,
 presence and invite tests (against a mock AppView; `real_appview -- --ignored` asks the real one).
 
