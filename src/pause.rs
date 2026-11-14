@@ -150,6 +150,10 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     use crate::menu::{Screen, UiAction, button};
                     button(row, &font, "RESUME", Screen::Pause, 0, 0, UiAction::Resume);
                     button(row, &font, "MENU", Screen::Pause, 1, 0, UiAction::Menu);
+                    // (the tutorial: skip the current step)
+                    row.spawn((crate::tutorial::TutorialOnly, Node { display: Display::None, ..default() })).with_children(|w| {
+                        button(w, &font, "SKIP", Screen::Pause, 2, 0, UiAction::SkipStep);
+                    });
                 });
                 // (multiplayer only: shown in a room)
                 crate::friends::spawn_list(panel, &font, crate::menu::Screen::Pause, 100, 1);

@@ -47,7 +47,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(GameState::Menu), despawn_menu)
             .add_systems(
                 Update,
-                (lobby_focus, navigate, crate::leaderboard::handle_pressed, handle_pressed, style_buttons, layout_menu, layout_lobby, layout_queue, layout_account)
+                (lobby_focus, navigate, crate::leaderboard::handle_pressed, crate::tutorial::handle_pressed, handle_pressed, style_buttons, layout_menu, layout_lobby, layout_queue, layout_account)
                     .chain()
                     .in_set(MenuSystems),
             )
@@ -124,6 +124,11 @@ pub enum UiAction {
     Leaderboard,
     BoardTab(crate::net::protocol::BoardKind),
     CloseBoard,
+    /// TUTORIAL (the main menu), SKIP (its pause menu) and ENDLESS (its
+    /// last screen), handled in `tutorial`.
+    Tutorial,
+    SkipStep,
+    TutorialEndless,
 }
 
 /// A menu button. `order` is the focus order on its screen; buttons sharing a
@@ -506,7 +511,8 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     });
                 });
             });
-            root.spawn((SettingsButton, Node::default())).with_children(|row| {
+            root.spawn((SettingsButton, Node { column_gap: px(14), ..default() })).with_children(|row| {
+                button(row, &font, "TUTORIAL", Screen::Modes, ORDER_SETTINGS - 1, ROW_SETTINGS, UiAction::Tutorial);
                 button(row, &font, "SETTINGS", Screen::Modes, ORDER_SETTINGS, ROW_SETTINGS, UiAction::Settings);
             });
             root.spawn((
@@ -571,7 +577,8 @@ pub(crate) fn active_screen(state: GameState, paused: bool, challenge_over: bool
     match state {
         GameState::Menu => Some(Screen::Modes),
         GameState::Playing if paused => Some(Screen::Pause),
-        GameState::Playing if challenge_over => Some(Screen::Score),
+        // (the tutorial's last screen shares the score screen's buttons)
+        GameState::Playing if challenge_over || crate::tutorial::complete_screen() => Some(Screen::Score),
         _ => None,
     }
 }
@@ -839,6 +846,8 @@ fn handle_pressed(
             }
             // (taken by `leaderboard::handle_pressed` first)
             UiAction::Leaderboard | UiAction::BoardTab(_) | UiAction::CloseBoard => {}
+            // (taken by `tutorial::handle_pressed` first)
+            UiAction::Tutorial | UiAction::SkipStep | UiAction::TutorialEndless => {}
             UiAction::Account => {
                 if crate::identity::current_user().is_some() {
                     crate::identity::sign_out();
@@ -853,6 +862,7 @@ fn handle_pressed(
 fn style_buttons(
     focus: Res<Focus>,
     panel: Res<Panel>,
+    settings: Res<crate::settings::Settings>,
     mut buttons: Query<(&UiButton, &mut BackgroundColor, &mut BorderColor)>,
 ) {
     for (b, mut bg, mut border) in &mut buttons {
@@ -863,6 +873,8 @@ fn style_buttons(
             UiAction::Create => *panel == Panel::Create,
             UiAction::Join => *panel == Panel::Join,
             UiAction::Settings => *panel == Panel::Settings,
+            // lit until it's been finished once
+            UiAction::Tutorial => !settings.tutorial_done,
             _ => false,
         };
         let color = if focused {

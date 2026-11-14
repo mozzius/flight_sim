@@ -39,6 +39,8 @@ mod net;
 mod oauth;
 mod signin;
 mod touch;
+mod tutorial;
+mod waypoints;
 mod weapons;
 mod world;
 
@@ -109,5 +111,6 @@ fn main() {
             dev::DevPlugin,
         ))
         .add_plugins((settings::SettingsPlugin, loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin, signin::SignInPlugin, leaderboard::LeaderboardPlugin))
+        .add_plugins((waypoints::WaypointsPlugin, tutorial::TutorialPlugin))
         .run();
 }
