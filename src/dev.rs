@@ -12,7 +12,9 @@
 //! their row showing JOIN), `request` (a join request card), `kill` (our kill banner), `death` (the multiplayer death
 //! screen, killer named), `rank` (the challenge score screen with our rank),
 //! `board` (the leaderboard screen with its rows), `queue` (waiting in the
-//! quick-play queue), `online<n>` (the server says n or more are online).
+//! quick-play queue), `online<n>` (the server says n or more are online),
+//! `tut-<step>` (in that tutorial step, e.g. `tut-flares`, `tut-complete`;
+//! `tut-rings+20` waits 20 s into it).
 
 use bevy::{
     prelude::*,
@@ -183,6 +185,7 @@ fn extra_screenshots(
     mut last_kill: Local<Option<f32>>,
     board: Res<crate::leaderboard::BoardUi>,
     state: Res<State<crate::loading::GameState>>,
+    tutorial: Res<crate::tutorial::Tutorial>,
 ) {
     let now = time.elapsed_secs();
     if kills.read().count() > 0 {
@@ -190,7 +193,15 @@ fn extra_screenshots(
     }
     for shot in shots.0.iter_mut().filter(|s| !s.done) {
         let e = shot.event.as_str();
-        let happening = if let Some(t) = e.strip_prefix('t') {
+        // `tut-<step>` (in that tutorial step), optionally `+<secs>` to wait that long into it
+        let (e, wait_override) = match e.split_once('+') {
+            Some((e, w)) => (e, w.parse::<f32>().ok()),
+            None => (e, None),
+        };
+        let happening = if let Some(step) = e.strip_prefix("tut-") {
+            *state.get() == crate::loading::GameState::Playing
+                && crate::tutorial::Step::parse(step).is_some_and(|s| tutorial.step() == s)
+        } else if let Some(t) = e.strip_prefix('t') {
             t.parse::<f32>().is_ok_and(|t| now >= t)
         } else if let Some(n) = e.strip_prefix("lobby") {
             net.in_lobby() && net.players().len() >= n.parse().unwrap_or(1)
@@ -221,7 +232,11 @@ fn extra_screenshots(
         }
         let since = *shot.since.get_or_insert(now);
         // (time events go at once; the others wait for the screen to settle)
-        let wait = if e.starts_with('t') {
+        let wait = if let Some(w) = wait_override {
+            w
+        } else if e.starts_with("tut-") {
+            1.0
+        } else if e.starts_with('t') {
             0.0
         } else if e == "kill" {
             0.6
@@ -284,8 +299,13 @@ fn hide_player_model(mut player: Query<&mut Visibility, With<crate::game::Player
 /// automated screenshot runs show real combat.
 fn autopilot_player(
     mut commands: Commands,
+    mode: Res<crate::modes::GameMode>,
     new: Query<Entity, (Added<crate::game::Player>, Without<crate::ai::Pilot>)>,
 ) {
+    // (the tutorial has its own autopilot, which works its lessons: see `tutorial`)
+    if *mode == crate::modes::GameMode::Tutorial {
+        return;
+    }
     for e in &new {
         commands.entity(e).insert(crate::ai::Pilot::new());
     }

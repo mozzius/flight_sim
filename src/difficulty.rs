@@ -36,9 +36,13 @@ impl Difficulty {
     }
 }
 
-/// The round's difficulty: the picked one in endless, NORMAL otherwise.
+/// The round's difficulty: the picked one in endless, EASY in the tutorial, NORMAL otherwise.
 pub fn active(mode: GameMode, picked: Difficulty) -> &'static DifficultyParams {
-    if mode == GameMode::Endless { picked.params() } else { &NORMAL }
+    match mode {
+        GameMode::Endless => picked.params(),
+        GameMode::Tutorial => &EASY,
+        _ => &NORMAL,
+    }
 }
 
 pub struct DifficultyParams {

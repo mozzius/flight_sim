@@ -49,6 +49,21 @@ reloads the page. `?low` / `?high` and `FLIGHT_SIM_LOW_MEMORY=1` override it.
   D-pad down) leaves what you're doing, single-player rounds included (no score is saved);
   X or 20 s dismisses it.
 
+- **Tutorial** (TUTORIAL, next to SETTINGS; lit up until you've finished it once, kept in
+  `localStorage` / the settings file): a fixed map (farmland, a clear morning, seed 4242), no
+  intro shot, and 16 lessons, each a one-line prompt at the top of the HUD naming the controls of
+  whatever you last touched (keyboard and mouse, gamepad, or touch): throttle, pitch, roll, four
+  rings round a curve, a low ring and a high one, afterburner, airbrake, throttle back up, a low
+  pass into a valley ring, then cycling targets and locking on to slow drones that circle and never
+  shoot back, a gun kill, a missile kill, flares against a missile fired at you (one that always
+  takes the bait; a hit and it goes again), and a dogfight with two rookies. A tick shows when a
+  step's done; a step that drags on flashes its prompt now and then and moves on by itself after a
+  while (40 s to 5 min). You can't be shot down (in the dogfight hits hurt but stop at a quarter),
+  a crash puts you back in the air pointed at the next ring, and drones that crash come back.
+  The pause menu has SKIP (the current step); the end screen has ENDLESS and MENU. Rings come from
+  `src/waypoints.rs` (glowing rings, a HUD marker with the distance that turns into an arrow at
+  the screen edge when the next ring is off screen; `Course::set` takes any list of gates).
+
 Esc → MENU goes back to the mode menu; every round bakes a fresh map.
 
 The world is procedurally generated eroded mountains (Rune Skovbo Johansen's
@@ -118,9 +133,16 @@ settings for a run without saving them; screenshot runs never read or write the 
 (the plain gradient sky), `FLIGHT_SIM_BIOME=alpine|tundra|farmland|archipelago`,
 `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` (pin the environment; screenshot runs
-default to alpine, clear midday), `FLIGHT_SIM_MODE=endless|challenge` (skip the menu;
+default to alpine, clear midday), `FLIGHT_SIM_MODE=endless|challenge|tutorial` (skip the menu;
 screenshot runs default to endless), `FLIGHT_SIM_MODE=menu|menu-endless|menu-settings` (show the menu in a
-screenshot run), `FLIGHT_SIM_DIE_AT=<secs>` (shoot the player down, for the score screen). Biome parameter sets live in `src/terrain_gen/biome.rs`,
+screenshot run), `FLIGHT_SIM_DIE_AT=<secs>` (shoot the player down, for the score screen). Tutorial:
+`FLIGHT_SIM_AUTOPILOT=1` flies the lessons with the player's own controls (each step's condition
+for real; step changes are logged as `tutorial: rings -> dive (Done, 41.2 s)`),
+`FLIGHT_SIM_TUTORIAL_START=<step>` (throttle, pitch, roll, rings, dive, climb, afterburner,
+airbrake, cruise, valley, targets, lock, gun, missile, flares, dogfight, complete),
+`FLIGHT_SIM_TUTORIAL_STEP_SECS=<n>` (every step gives up after n s),
+`FLIGHT_SIM_INPUT=keyboard|gamepad|touch` (pin the prompts' controls; touch also shows the touch
+controls) and the shot event `tut-<step>[+<secs>]` (e.g. `tut-flares+5.5:/tmp/f.png`). Biome parameter sets live in `src/terrain_gen/biome.rs`,
 the farmland fields in `src/terrain_gen/fields.rs` (the terrain shader redraws them per pixel from a small farm-layout texture, so they stay crisp on phones), lakes and the sea in `src/terrain_gen/water.rs`
 (shader `assets/shaders/water.wesl`).
 Screenshot runs are headless (no window) and silent.

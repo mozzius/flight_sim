@@ -1,5 +1,5 @@
 //! Player settings: GRAPHICS (the main menu's SETTINGS) and the endless
-//! DIFFICULTY. Kept in `localStorage` on the web and in
+//! DIFFICULTY, plus whether the tutorial's been finished. Kept in `localStorage` on the web and in
 //! `<data dir>/flight_sim/settings` (`key=value` lines) natively; screenshot
 //! runs keep none. `FLIGHT_SIM_GRAPHICS=auto|low|high` and
 //! `FLIGHT_SIM_DIFFICULTY=easy|normal|hard` pin them for a run without saving.
@@ -72,6 +72,8 @@ impl Graphics {
 pub struct Settings {
     pub graphics: Graphics,
     pub difficulty: Difficulty,
+    /// The tutorial has been finished once (the menu stops highlighting it).
+    pub tutorial_done: bool,
 }
 
 /// The graphics setting the running game uses (on the web, the one the page
@@ -81,6 +83,7 @@ pub struct Applied(pub Graphics);
 
 const GRAPHICS_KEY: &str = "flight_sim_graphics";
 const DIFFICULTY_KEY: &str = "flight_sim_difficulty";
+const TUTORIAL_KEY: &str = "flight_sim_tutorial";
 
 impl Settings {
     pub fn load() -> Self {
@@ -88,6 +91,7 @@ impl Settings {
         Self {
             graphics: pick("FLIGHT_SIM_GRAPHICS", GRAPHICS_KEY).and_then(|s| Graphics::parse(&s)).unwrap_or_default(),
             difficulty: pick("FLIGHT_SIM_DIFFICULTY", DIFFICULTY_KEY).and_then(|s| Difficulty::parse(&s)).unwrap_or_default(),
+            tutorial_done: store::get(TUTORIAL_KEY).is_some_and(|v| v == "done"),
         }
     }
 }
@@ -111,6 +115,11 @@ pub fn apply_graphics(settings: &Settings, applied: &mut Applied) {
 
 pub fn save_difficulty(difficulty: Difficulty) {
     store::set(DIFFICULTY_KEY, difficulty.name());
+}
+
+/// Remembers that the tutorial was finished.
+pub fn save_tutorial_done() {
+    store::set(TUTORIAL_KEY, "done");
 }
 
 /// The stored graphics pick (natively: what `platform::low_memory` starts from).

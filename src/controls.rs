@@ -35,6 +35,7 @@ impl Plugin for ControlsPlugin {
             .init_resource::<ThrottleLever>()
             .init_resource::<MouseAim>()
             .init_resource::<LookAround>()
+            .insert_resource(InputDevice::pinned().unwrap_or_default())
             .add_systems(
                 Update,
                 (
@@ -43,6 +44,7 @@ impl Plugin for ControlsPlugin {
                     gather_actions.before(crate::touch::TouchSystems),
                     update_mouse_aim.after(crate::touch::TouchSystems),
                     update_look_around,
+                    track_input_device.after(crate::touch::TouchSystems),
                 ),
             )
             .add_systems(
@@ -57,6 +59,75 @@ pub enum ControlMode {
     #[default]
     MouseAim,
     Direct,
+}
+
+/// What the player is flying with: the last thing touched (the tutorial's
+/// prompts name its controls). `FLIGHT_SIM_INPUT=keyboard|gamepad|touch`
+/// pins it (touch also shows the touch controls), for screenshots.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum InputDevice {
+    /// Keyboard and mouse.
+    #[default]
+    Keyboard,
+    Gamepad,
+    Touch,
+}
+
+impl InputDevice {
+    fn pinned() -> Option<Self> {
+        match crate::environment::setting("FLIGHT_SIM_INPUT")?.to_ascii_lowercase().as_str() {
+            "keyboard" | "mouse" => Some(Self::Keyboard),
+            "gamepad" | "pad" => Some(Self::Gamepad),
+            "touch" => Some(Self::Touch),
+            other => {
+                warn!("unknown FLIGHT_SIM_INPUT {other:?}");
+                None
+            }
+        }
+    }
+}
+
+fn track_input_device(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    motion: Res<AccumulatedMouseMotion>,
+    touches: Res<Touches>,
+    gamepads: Query<&Gamepad>,
+    mut touch: ResMut<crate::touch::TouchInput>,
+    mut device: ResMut<InputDevice>,
+    mut pinned: Local<Option<Option<InputDevice>>>,
+) {
+    if let Some(pin) = *pinned.get_or_insert_with(InputDevice::pinned) {
+        if pin == InputDevice::Touch && !touch.active {
+            touch.active = true;
+        }
+        return;
+    }
+    let pad = gamepads.iter().any(|g| {
+        g.get_just_pressed().next().is_some()
+            || g.left_stick().length() > 0.5
+            || g.right_stick().length() > 0.5
+            || g.get(GamepadButton::RightTrigger2).unwrap_or(0.0) > 0.3
+            || g.get(GamepadButton::LeftTrigger2).unwrap_or(0.0) > 0.3
+    });
+    let next = if touches.any_just_pressed() {
+        InputDevice::Touch
+    } else if pad {
+        InputDevice::Gamepad
+    } else if keys.get_just_pressed().next().is_some() {
+        InputDevice::Keyboard
+    } else if *device != InputDevice::Touch
+        && (mouse.get_just_pressed().next().is_some() || motion.delta.length() > 4.0)
+    {
+        // (browsers report finger drags and taps as the mouse too: only a key
+        // takes us off touch)
+        InputDevice::Keyboard
+    } else {
+        *device
+    };
+    if *device != next {
+        *device = next;
+    }
 }
 
 /// Discrete actions captured in `Update` (so presses are never missed) and
@@ -159,6 +230,7 @@ fn manage_cursor(
         && !prompt.ready()
         && window.focused
         && !touch.active
+        && !crate::tutorial::complete_screen()
         && *state.get() == crate::loading::GameState::Playing;
     let (grab, visible) = if want {
         (CursorGrabMode::Locked, false)

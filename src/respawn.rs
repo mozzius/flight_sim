@@ -171,7 +171,10 @@ fn update_prompt(
             text.0 = s;
         }
     }
-    let show = prompt.ready() && !paused.0 && *mode != crate::modes::GameMode::Challenge;
+    // (the tutorial puts you back in the air itself)
+    let show = prompt.ready()
+        && !paused.0
+        && !matches!(*mode, crate::modes::GameMode::Challenge | crate::modes::GameMode::Tutorial);
     if let Ok(mut node) = root.single_mut() {
         let display = if show { Display::Flex } else { Display::None };
         if node.display != display {
@@ -205,7 +208,7 @@ fn respawn_on_request(
     friendlies: Query<(&Transform, &Team), (With<Pilot>, Without<Player>)>,
 ) {
     let clicked = std::mem::take(&mut clicked.0);
-    if !prompt.ready() || paused.0 || *mode == crate::modes::GameMode::Challenge {
+    if !prompt.ready() || paused.0 || matches!(*mode, crate::modes::GameMode::Challenge | crate::modes::GameMode::Tutorial) {
         return;
     }
     let pressed = keys.just_pressed(KeyCode::Enter)

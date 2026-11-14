@@ -6,7 +6,9 @@
 //!   the player goes down the score screen shows the score and the best
 //!   (kept in `localStorage` on the web, a small file natively).
 //!
-//! `FLIGHT_SIM_MODE=endless|challenge` (`?mode=` on the web) skips the menu;
+//! - Tutorial: lessons on a fixed map (`tutorial`).
+//!
+//! `FLIGHT_SIM_MODE=endless|challenge|tutorial` (`?mode=` on the web) skips the menu;
 //! screenshot runs default to endless. `FLIGHT_SIM_MODE=menu` (or
 //! `menu-endless`, with the pickers open) shows the menu in screenshot runs.
 
@@ -37,6 +39,8 @@ pub enum GameMode {
     Challenge,
     /// A free-for-all with other players (see `net`).
     Multiplayer,
+    /// The guided lessons on a fixed map (see `tutorial`).
+    Tutorial,
 }
 
 impl GameMode {
@@ -50,6 +54,7 @@ impl GameMode {
         match crate::environment::setting("FLIGHT_SIM_MODE").map(|s| s.to_ascii_lowercase()).as_deref() {
             Some("endless") => Some(Self::Endless),
             Some("challenge") => Some(Self::Challenge),
+            Some("tutorial") => Some(Self::Tutorial),
             Some(m) if m.starts_with("menu") => None,
             Some(m) => {
                 warn!("unknown FLIGHT_SIM_MODE {m:?}");

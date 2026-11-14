@@ -34,9 +34,13 @@ impl Plugin for LoadingPlugin {
         match GameMode::from_settings() {
             // screenshot runs and FLIGHT_SIM_MODE skip the menu
             Some(mode) => {
-                let seed = round_seed();
+                let (seed, picks) = if mode == GameMode::Tutorial {
+                    (crate::tutorial::SEED, crate::tutorial::picks())
+                } else {
+                    (round_seed(), Picks::from_settings())
+                };
                 app.insert_resource(MapSeed(seed))
-                    .insert_resource(Environment::choose(seed, Picks::from_settings()))
+                    .insert_resource(Environment::choose(seed, picks))
                     .insert_resource(mode)
                     .insert_state(GameState::Loading);
             }

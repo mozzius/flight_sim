@@ -32,15 +32,20 @@ impl Plugin for GamePlugin {
                     handle_damage,
                     handle_crashes,
                     respawn,
-                    // (multiplayer: other players, no waves)
-                    wave_system.run_if(|mode: Res<GameMode>| *mode != GameMode::Multiplayer),
+                    // (multiplayer: other players; the tutorial brings its own)
+                    wave_system.run_if(|mode: Res<GameMode>| matches!(*mode, GameMode::Endless | GameMode::Challenge)),
                 )
                     .chain()
+                    .in_set(RoundSystems)
                     .after(FlightSystems::Combat)
                     .run_if(in_state(crate::loading::GameState::Playing)),
             );
     }
 }
+
+/// Damage, crashes, respawns and waves (after the weapons, in `FixedUpdate`).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoundSystems;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Team {
@@ -219,6 +224,10 @@ fn initial_spawn(
     }
     spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0), north, true);
     aim.reset = true;
+    // (the tutorial brings its own targets, and no wingmen)
+    if *mode == GameMode::Tutorial {
+        return;
+    }
     // wingmen in a loose finger-four (a pair in a challenge, and they don't come back)
     let wingmen = if *mode == GameMode::Challenge { 2 } else { 3 };
     for offset in [
