@@ -180,6 +180,8 @@ pub struct Bullet {
     team: Team,
     /// Another player's tracer (multiplayer): their game decides what it hits.
     visual: bool,
+    /// Extra hit radius: the player's bullets are a little forgiving (by difficulty).
+    bonus: f32,
 }
 
 #[derive(Component)]
@@ -423,6 +425,7 @@ fn fire_weapons(
     let dt = time.delta_secs();
     let mut rng = rand::rng();
     let player_seeker = crate::difficulty::active(*mode, settings.difficulty).seeker;
+    let player_gun_bonus = crate::difficulty::active(*mode, settings.difficulty).gun_bonus;
     for (entity, transform, state, team, mut weapons, targeting, disabled, player) in &mut shooters {
         weapons.gun_cooldown -= dt;
         weapons.missile_cooldown -= dt;
@@ -470,7 +473,7 @@ fn fire_weapons(
                 // stagger spawn positions along the path so bursts don't clump
                 let muzzle = transform.transform_point(Vec3::new(0.9, 0.4, -7.0))
                     + velocity * dt * rng.random_range(0.0..1.0);
-                spawn_tracer(&mut commands, &assets, muzzle, velocity, entity, *team, false);
+                spawn_tracer(&mut commands, &assets, muzzle, velocity, entity, *team, false, if player { player_gun_bonus } else { 0.0 });
             }
         } else {
             weapons.gun_cooldown = weapons.gun_cooldown.max(0.0);
@@ -545,10 +548,11 @@ pub fn spawn_tracer(
     owner: Entity,
     team: Team,
     visual: bool,
+    bonus: f32,
 ) -> Entity {
     commands
         .spawn((
-            Bullet { velocity, life: BULLET_LIFE, owner, team, visual },
+            Bullet { velocity, life: BULLET_LIFE, owner, team, visual, bonus },
             Mesh3d(assets.tracer_mesh.clone()),
             MeshMaterial3d(assets.tracer_material.clone()),
             Transform::from_translation(pos).looking_to(velocity, Vec3::Y)
@@ -614,7 +618,7 @@ fn move_bullets(
             if target == bullet.owner || (*team == bullet.team && !bullet.visual) {
                 continue;
             }
-            if segment_sphere_distance(from, to, t.translation) < ac.radius {
+            if segment_sphere_distance(from, to, t.translation) < ac.radius + bullet.bonus {
                 if bullet.visual {
                     // another player's tracer: the sparks, but they report the hit
                 } else if remote {

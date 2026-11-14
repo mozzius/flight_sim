@@ -1387,7 +1387,7 @@ fn interpolate(
                 let f = spawn_flare(&mut commands, &assets, pos, vel, owner);
                 decoy.get_or_insert(f);
             } else {
-                spawn_tracer(&mut commands, &assets, pos, vel, owner, crate::game::Team::Red, true);
+                spawn_tracer(&mut commands, &assets, pos, vel, owner, crate::game::Team::Red, true, 0.0);
             }
         }
         // their flares can pull our missiles off them (we fly our missiles)

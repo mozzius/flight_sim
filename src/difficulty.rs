@@ -58,6 +58,8 @@ pub struct DifficultyParams {
     pub seeker: Seeker,
     /// Seconds for the player's missile lock to build.
     pub lock_time: f32,
+    /// Extra hit radius (m) for the player's bullets, on top of the jet's 9 m.
+    pub gun_bonus: f32,
 }
 
 impl DifficultyParams {
@@ -89,6 +91,7 @@ pub const EASY: DifficultyParams = DifficultyParams {
     skill_skew: 2.0,
     seeker: Seeker { max_g: 65.0, gimbal: 1.25, lag: 0.5, nav_gain: 4.0, decoy_odds: 0.15 },
     lock_time: 0.6,
+    gun_bonus: 5.0,
 };
 
 /// The original game: 6, 8, 10, 12 hostiles, skill evenly 0.55..1.0.
@@ -100,6 +103,7 @@ pub const NORMAL: DifficultyParams = DifficultyParams {
     skill_skew: 1.0,
     seeker: Seeker::NORMAL,
     lock_time: 1.2,
+    gun_bonus: 2.5,
 };
 
 /// 8, 10, 12, 14, 16 hostiles, mostly aces; the player's missiles are a
@@ -112,6 +116,7 @@ pub const HARD: DifficultyParams = DifficultyParams {
     skill_skew: 0.5,
     seeker: Seeker { max_g: 40.0, gimbal: 0.87, lag: 1.1, nav_gain: 3.0, decoy_odds: 0.65 },
     lock_time: 1.5,
+    gun_bonus: 2.0,
 };
 
 #[cfg(test)]
