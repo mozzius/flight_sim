@@ -41,11 +41,12 @@ pub enum RoomKind {
 }
 
 /// The matchmaker: of the public rooms (code, players, our online mutuals
-/// in it), one with a seat, preferring our mutuals, then the fullest.
+/// in it), one with players and a seat, preferring our mutuals, then the
+/// fullest. (An empty one never: nobody's there to play with, so we queue.)
 pub fn choose_public<'a>(rooms: impl IntoIterator<Item = (&'a str, usize, usize)>) -> Option<&'a str> {
     rooms
         .into_iter()
-        .filter(|(_, players, _)| *players < MAX_PLAYERS)
+        .filter(|(_, players, _)| (1..MAX_PLAYERS).contains(players))
         // (ties by code: the same pick every time)
         .max_by(|a, b| (a.2, a.1).cmp(&(b.2, b.1)).then(b.0.cmp(a.0)))
         .map(|(code, _, _)| code)
@@ -159,7 +160,7 @@ impl Server {
             // (auth is done by the connection before it gets here)
             ClientMsg::Hello { .. } | ClientMsg::Ping => {}
             // (the hub handles join requests and matchmaking: they need presence)
-            ClientMsg::RequestJoin { .. } | ClientMsg::AnswerJoin { .. } | ClientMsg::QuickPlay { .. } | ClientMsg::JoinFriend { .. } => {}
+            ClientMsg::RequestJoin { .. } | ClientMsg::AnswerJoin { .. } | ClientMsg::QuickPlay { .. } | ClientMsg::JoinFriend { .. } | ClientMsg::CancelQueue => {}
             ClientMsg::Create { map, code } => {
                 self.create_room(conn, map, code, RoomKind::Hosted, now, &mut out);
             }
@@ -454,7 +455,8 @@ impl Room {
             | ClientMsg::SubmitScore(_)
             | ClientMsg::Leaderboard(_)
             | ClientMsg::QuickPlay { .. }
-            | ClientMsg::JoinFriend { .. } => {}
+            | ClientMsg::JoinFriend { .. }
+            | ClientMsg::CancelQueue => {}
         }
     }
 
@@ -735,8 +737,9 @@ mod tests {
         assert_eq!(choose_public([("AAAA", MAX_PLAYERS, 3), ("BBBB", 1, 0)]), Some("BBBB"), "never a full one");
         assert_eq!(choose_public([("AAAA", MAX_PLAYERS, 0)]), None);
         assert_eq!(choose_public([("BBBB", 3, 0), ("AAAA", 3, 0)]), Some("AAAA"), "ties by code");
-        // an empty room (in its grace period) still beats making another
-        assert_eq!(choose_public([("AAAA", 0, 0)]), Some("AAAA"));
+        // an empty room (in its grace period) is nobody to play with
+        assert_eq!(choose_public([("AAAA", 0, 0)]), None);
+        assert_eq!(choose_public([("AAAA", 0, 0), ("BBBB", 1, 0)]), Some("BBBB"));
     }
 
     #[test]

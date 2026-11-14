@@ -15,11 +15,19 @@
 //! (`JoinRequest` / `AnswerJoin`), without the room code ever leaving the
 //! server until they say yes.
 //!
-//! Quick play (v5): `QuickPlay` puts us in a public room with a seat (one
-//! with our mutuals first, then the fullest), or makes one on the map we
-//! sent. Public rooms have no host, no lobby and no visible code: they're
-//! flying from the start and last while anyone's in them. `JoinFriend`
-//! hops straight into the public room a mutual is in.
+//! Quick play (v5, the queue v6): `QuickPlay` puts us in a public room
+//! that has players and a seat (one with our mutuals first, then the
+//! fullest). With none, we wait in the queue (`Queued`) until a second
+//! player queues or such a room turns up; two or more waiting get a new
+//! public room together, on the first one's map (the one they sent, which
+//! they can bake while they wait). `CancelQueue` (or `Leave`, or joining
+//! any room) takes us out of the queue. Public rooms have no host, no lobby
+//! and no visible code: they're flying from the start and last while
+//! anyone's in them. `JoinFriend` hops straight into the public room a
+//! mutual is in.
+//!
+//! `Online(n)` (v6): how many players are signed in, on sign-in and then
+//! now and then when it changes (a count only, never who).
 //!
 //! Challenge leaderboard (v4): a signed-in client says `ChallengeStart` when
 //! a challenge round begins and `SubmitScore` when it ends; the server checks
@@ -37,7 +45,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the messages change shape.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// Service-auth audience and method the server checks tokens against.
 pub const AUTH_AUDIENCE: &str = "did:web:flight.mozzius.dev";
@@ -184,11 +192,15 @@ pub enum ClientMsg {
     SubmitScore(Run),
     /// Asks for a board (`LeaderboardData`).
     Leaderboard(BoardKind),
-    /// Into a public room with a seat; none: a new one on `map`.
+    /// Into a public room with players and a seat; none: the queue (`Queued`),
+    /// until someone else is matched with us (a new room on the first
+    /// queued player's `map`).
     QuickPlay { map: RoomMap },
     /// Into the public room an online mutual (by DID) is in, if it has a
     /// seat (else `JoinDeclined`).
     JoinFriend { did: String },
+    /// Out of the quick-play queue.
+    CancelQueue,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -286,7 +298,20 @@ pub enum ServerMsg {
     Standing(Option<Standing>),
     /// A board: the top rows, and where we stand on it.
     LeaderboardData { kind: BoardKind, rows: Vec<BoardRow>, you: Option<Standing> },
+    /// No public room to put us in: we're in the quick-play queue (`Joined`
+    /// when matched; out with `CancelQueue`).
+    Queued,
+    /// Players signed in right now.
+    Online(u32),
+    /// The server's `PROTOCOL_VERSION`, sent just before `Error(Version)`
+    /// (v6), so the client can tell whether it or the server is behind. (A
+    /// server that doesn't send it is v5 or older.) Keep this variant's
+    /// place in the enum, so every later version can still read it.
+    ServerVersion(u16),
 }
+
+/// What an out-of-date client says (the one exception to one-word labels).
+pub const OUTDATED_TEXT: &str = "This client is out of date. Update to play multiplayer.";
 
 // ---- challenge leaderboard ----
 
@@ -444,6 +469,9 @@ mod tests {
             ServerMsg::Host(3),
             ServerMsg::Started,
             ServerMsg::Killed { victim: 2, killer: Some(1), record: (2, 3) },
+            ServerMsg::Queued,
+            ServerMsg::Online(12),
+            ServerMsg::ServerVersion(PROTOCOL_VERSION),
         ] {
             assert_eq!(decode::<ServerMsg>(&encode(&msg)), Some(msg));
         }
@@ -452,6 +480,7 @@ mod tests {
         for msg in [
             ClientMsg::QuickPlay { map: RoomMap { seed: 3, biome: 2, time: 1, weather: 0 } },
             ClientMsg::JoinFriend { did: "did:plc:b".into() },
+            ClientMsg::CancelQueue,
         ] {
             assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
         }

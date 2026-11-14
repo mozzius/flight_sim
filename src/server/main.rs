@@ -8,6 +8,8 @@
 //! Env: `PORT` (default 8080), `FLIGHT_SIM_DEV_AUTH=1` (accept `dev:<handle>`
 //! tokens and honour requested room codes, for local testing),
 //! `FLIGHT_SIM_DEV_MUTUALS=1` (dev users are all each other's mutuals),
+//! `FLIGHT_SIM_DEV_PROTOCOL=<n>` (a dev server pretends to speak version n,
+//! to test the client's version-mismatch handling),
 //! `FLIGHT_SIM_APPVIEW` (default the public Bluesky AppView),
 //! `FLIGHT_SIM_DB` (the leaderboard's SQLite file, default `./flight_sim.db`;
 //! on Railway a path on the attached volume, `/data/flight_sim.db`).
@@ -80,6 +82,8 @@ struct Game {
 struct Shared {
     events: UnboundedSender<NetEvent>,
     next_conn: std::sync::Arc<AtomicU64>,
+    /// The protocol version we speak (`FLIGHT_SIM_DEV_PROTOCOL` fakes another on dev servers).
+    version: u16,
 }
 
 /// Game loop rate: relays wait at most this long.
@@ -109,7 +113,8 @@ fn main() {
     };
     let (events, inbox) = unbounded_channel();
     let (jobs, jobs_rx) = unbounded_channel();
-    let shared = Shared { events: events.clone(), next_conn: Default::default() };
+    let version = std::env::var("FLIGHT_SIM_DEV_PROTOCOL").ok().filter(|_| dev).and_then(|v| v.parse().ok()).unwrap_or(PROTOCOL_VERSION);
+    let shared = Shared { events: events.clone(), next_conn: Default::default(), version };
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
@@ -156,6 +161,9 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
                 | ClientMsg::RequestJoin { .. }
                 | ClientMsg::AnswerJoin { .. }
                 | ClientMsg::ChallengeStart { .. }
+                | ClientMsg::QuickPlay { .. }
+                | ClientMsg::CancelQueue
+                | ClientMsg::JoinFriend { .. }
                 | ClientMsg::Leaderboard(_) = &msg
                 {
                     info!("conn {conn}: {msg:?}");
@@ -174,6 +182,7 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
     }
     drop(rx);
     let s = game.hub.tick(now);
+    step.out.extend(s.out);
     step.jobs.extend(s.jobs);
     for job in step.jobs {
         let _ = game.jobs.send(job);
@@ -193,6 +202,8 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
             ServerMsg::InviteFailed(_) => info!("invite failed (conn {:?})", o.to),
             ServerMsg::Standing(s) => info!("standing {s:?} -> conn {:?}", o.to),
             ServerMsg::LeaderboardData { kind, rows, you } => info!("{kind:?} board: {} rows, you {you:?} -> conn {:?}", rows.len(), o.to),
+            ServerMsg::Queued => info!("queued (conn {:?}, {} waiting)", o.to, game.hub.queued()),
+            ServerMsg::Online(n) => info!("{n} online -> {} conns", o.to.len()),
             ServerMsg::FriendUpdate(f) => info!("friend {} ({:?}) -> conns {:?}", f.handle, f.status, o.to),
             _ => {}
         }
@@ -206,10 +217,11 @@ fn pump(inbox: Res<Inbox>, mut game: ResMut<Game>) {
     if now.duration_since(game.last_report) > Duration::from_secs(60) {
         game.last_report = now;
         info!(
-            "{} rooms, {} players, {} online",
+            "{} rooms, {} players, {} online, {} queued",
             game.hub.rooms.room_count(),
             game.hub.rooms.player_count(),
-            game.hub.presence.online_count()
+            game.hub.presence.online_count(),
+            game.hub.queued()
         );
     }
 }
@@ -266,7 +278,9 @@ async fn connection(socket: WebSocket, shared: Shared) {
         let _ = sink.send(reply(ServerMsg::Error(ErrorCode::BadRequest))).await;
         return;
     };
-    if version != PROTOCOL_VERSION {
+    if version != shared.version {
+        // (our version first: older clients can't read it and skip it)
+        let _ = sink.send(reply(ServerMsg::ServerVersion(shared.version))).await;
         let _ = sink.send(reply(ServerMsg::Error(ErrorCode::Version))).await;
         return;
     }

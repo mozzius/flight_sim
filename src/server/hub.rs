@@ -6,7 +6,17 @@
 //!
 //! Matchmaking too: `QuickPlay` picks a public room by who's in it (our
 //! online mutuals first: see `rooms::choose_public`), and `JoinFriend` hops
-//! into a mutual's public room, both needing presence.
+//! into a mutual's public room, both needing presence. With no public room
+//! that has players, quick play waits in the queue ([`Hub::match_queue`]):
+//! two or more waiting get a new public room together (on the first one's
+//! map), and a waiting player goes into any public room that has players
+//! as soon as there is one. Players in rooms are never moved, so the last
+//! one left in a public room keeps flying (and the next quick play joins
+//! them). Joining any room, `Leave`, `CancelQueue` or going offline takes
+//! a player out of the queue.
+//!
+//! And the online count: `Online(n)` to each new connection, then to
+//! everyone when it changes, at most every [`ONLINE_GAP`].
 //!
 //! The challenge leaderboard (`leaderboard`) hangs off the hub too: it
 //! needs the player's DID and presence's relationship cache.
@@ -34,6 +44,21 @@ pub struct Hub {
     dids: HashMap<ConnId, Did>,
     asks: Vec<Ask>,
     pub board: Board,
+    /// Quick play's waiting players, first come first.
+    queue: Vec<Waiting>,
+    /// The online count everyone was last told, and when.
+    online_sent: Option<(u32, Instant)>,
+}
+
+/// The online count goes out at most this often.
+pub const ONLINE_GAP: Duration = Duration::from_secs(5);
+
+/// A player in the quick-play queue.
+#[derive(Debug)]
+struct Waiting {
+    conn: ConnId,
+    /// The map they sent (a room made for them is on the first one's).
+    map: RoomMap,
 }
 
 /// A join request waiting for the host.
@@ -62,7 +87,14 @@ impl Hub {
             dids: HashMap::new(),
             asks: vec![],
             board: Board::new(store),
+            queue: vec![],
+            online_sent: None,
         }
+    }
+
+    /// How many are waiting for a quick-play match.
+    pub fn queued(&self) -> usize {
+        self.queue.len()
     }
 
     pub fn connect(&mut self, conn: ConnId, did: String, handle: String, now: Instant) -> Step {
@@ -72,6 +104,7 @@ impl Hub {
         step.jobs.extend(jobs);
         self.board.connect(&did, &handle);
         self.dids.insert(conn, did);
+        step.out.push(Out { to: vec![conn], msg: ServerMsg::Online(self.presence.online_count() as u32) });
         step
     }
 
@@ -81,6 +114,7 @@ impl Hub {
             step.out.extend(self.presence.offline(conn, &did));
         }
         self.asks.retain(|a| a.conn != conn);
+        self.queue.retain(|w| w.conn != conn);
         self.board.disconnect(conn);
         step.out.extend(self.sync_statuses());
         step
@@ -92,8 +126,12 @@ impl Hub {
             msg,
             ClientMsg::Create { .. } | ClientMsg::Join { .. } | ClientMsg::Leave | ClientMsg::QuickPlay { .. } | ClientMsg::JoinFriend { .. }
         );
+        if matches!(msg, ClientMsg::Leave) {
+            self.queue.retain(|w| w.conn != conn);
+        }
         match msg {
             ClientMsg::QuickPlay { map } => self.quick_play(conn, map, now, &mut step.out),
+            ClientMsg::CancelQueue => self.queue.retain(|w| w.conn != conn),
             ClientMsg::JoinFriend { did } => self.join_friend(conn, &did, now, &mut step.out),
             ClientMsg::Invite { to, map } => self.invite(conn, &to, map, now, &mut step.out),
             ClientMsg::RequestJoin { to } => self.request_join(conn, &to, now, &mut step.out),
@@ -120,6 +158,9 @@ impl Hub {
             }
             other => step.out.extend(self.rooms.handle(conn, other, now)),
         }
+        // in a room now (any way: a code, an invite, a friend, a request): out of the queue
+        let rooms = &self.rooms;
+        self.queue.retain(|w| rooms.room_of(w.conn).is_none());
         if roomy {
             step.out.extend(self.sync_statuses());
         }
@@ -144,25 +185,77 @@ impl Hub {
             waiting
         });
         out.extend(self.board.tick(&self.presence, now));
+        if self.match_queue(now, &mut out) {
+            out.extend(self.sync_statuses());
+        }
+        // the online count, when it's changed (not too often)
+        let n = self.presence.online_count() as u32;
+        let due = self.online_sent.is_none_or(|(sent, at)| sent != n && now.duration_since(at) >= ONLINE_GAP);
+        if due && !self.dids.is_empty() {
+            self.online_sent = Some((n, now));
+            out.push(Out { to: self.dids.keys().copied().collect(), msg: ServerMsg::Online(n) });
+        }
         Step { out, jobs: self.presence.tick(now) }
     }
 
     /// QUICK PLAY: into the public room with the most of our online mutuals,
-    /// then the fullest (with a seat); none, a new one on `map`.
+    /// then the fullest (with players and a seat); none, the queue.
     fn quick_play(&mut self, conn: ConnId, map: RoomMap, now: Instant, out: &mut Vec<Out>) {
-        let Some(from) = self.dids.get(&conn).cloned() else { return };
+        if !self.dids.contains_key(&conn) {
+            return;
+        }
         self.rooms.leave_room(conn, now, out);
+        self.queue.retain(|w| w.conn != conn);
+        match self.pick_public(conn) {
+            Some(code) => self.rooms.join_code(conn, &code, now, out),
+            None => {
+                self.queue.push(Waiting { conn, map });
+                out.push(Out { to: vec![conn], msg: ServerMsg::Queued });
+                self.match_queue(now, out);
+            }
+        }
+    }
+
+    /// The public room (with players and a seat) quick play would put `conn` in.
+    fn pick_public(&self, conn: ConnId) -> Option<String> {
+        let from = self.dids.get(&conn)?;
         let rooms = self.rooms.public_rooms();
         let candidates: Vec<(&str, usize, usize)> = rooms
             .iter()
-            .map(|(code, dids)| (*code, dids.len(), dids.iter().filter(|d| self.presence.online_mutuals(&from, d)).count()))
+            .map(|(code, dids)| (*code, dids.len(), dids.iter().filter(|d| self.presence.online_mutuals(from, d)).count()))
             .collect();
-        match rooms::choose_public(candidates).map(str::to_string) {
-            Some(code) => self.rooms.join_code(conn, &code, now, out),
-            None => {
-                self.rooms.create_room(conn, map, None, RoomKind::Public, now, out);
+        rooms::choose_public(candidates).map(str::to_string)
+    }
+
+    /// Moves waiting players into rooms: each into a public room with
+    /// players if there is one, then any two or more left into a new public
+    /// room together (on the first one's map). True if anyone moved.
+    fn match_queue(&mut self, now: Instant, out: &mut Vec<Out>) -> bool {
+        let before = self.queue.len();
+        let mut i = 0;
+        while i < self.queue.len() {
+            let conn = self.queue[i].conn;
+            match self.pick_public(conn) {
+                Some(code) => {
+                    self.queue.remove(i);
+                    self.rooms.join_code(conn, &code, now, out);
+                }
+                None => i += 1,
             }
         }
+        while self.queue.len() >= 2 {
+            let group: Vec<Waiting> = self.queue.drain(..self.queue.len().min(MAX_PLAYERS)).collect();
+            match self.rooms.create_room(group[0].conn, group[0].map, None, RoomKind::Public, now, out) {
+                Some(code) => {
+                    for w in &group[1..] {
+                        self.rooms.join_code(w.conn, &code, now, out);
+                    }
+                }
+                // (the server's full: `create_room` told the first)
+                None => out.push(Out { to: group[1..].iter().map(|w| w.conn).collect(), msg: ServerMsg::Error(ErrorCode::Full) }),
+            }
+        }
+        self.queue.len() != before
     }
 
     /// JOIN on a mutual in a public room: straight in if it has a seat.
@@ -348,7 +441,7 @@ mod tests {
         let graph = DevAware { inner: MockAppView::default(), dev_mutuals: false };
         let mut hub = Hub::new(true);
         let out = online(&mut hub, &graph, 1, "alice", now);
-        assert!(matches!(sent_to(&out, 1)[..], [ServerMsg::Welcome { .. }, ServerMsg::Friends(l)] if l.is_empty()));
+        assert!(matches!(sent_to(&out, 1)[..], [ServerMsg::Welcome { .. }, ServerMsg::Friends(l), ServerMsg::Online(1)] if l.is_empty()));
         let out = online(&mut hub, &graph, 2, "bob", now);
         assert!(sent_to(&out, 1).is_empty(), "alice hears nothing about bob");
         for to in ["did:dev:bob", "did:dev:nobody"] {
@@ -425,30 +518,159 @@ mod tests {
         })
     }
 
-    #[test]
-    fn quick_play_makes_a_room_then_fills_it() {
-        let now = Instant::now();
+    fn queued(out: &[Out], conn: ConnId) -> bool {
+        sent_to(out, conn).contains(&&ServerMsg::Queued)
+    }
+
+    /// Strangers (dev users who aren't mutuals) online on conns 1.., by handle.
+    fn strangers(handles: &[&str], now: Instant) -> Hub {
         let graph = DevAware { inner: MockAppView::default(), dev_mutuals: false };
         let mut hub = Hub::new(true);
-        for (c, h) in [(1, "alice"), (2, "bob")] {
-            online(&mut hub, &graph, c, h, now);
+        for (i, h) in handles.iter().enumerate() {
+            online(&mut hub, &graph, i as ConnId + 1, h, now);
         }
-        // nobody's playing: a new public room on our map
+        hub
+    }
+
+    #[test]
+    fn two_queued_players_are_matched_together() {
+        let now = Instant::now();
+        let mut hub = strangers(&["alice", "bob", "carol"], now);
+        // nobody's playing: alice waits (no room made for her alone)
         let step = hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
-        let (code, public, n) = joined(&step.out, 1).expect("alice gets a room");
-        assert!(public && n == 1);
-        assert!(sent_to(&step.out, 1).iter().any(|m| matches!(m, ServerMsg::Joined { map, started: true, host: 0, .. } if *map == MAP)));
-        // the next player lands in it (strangers too: it's public)
+        assert!(queued(&step.out, 1));
+        assert!(joined(&step.out, 1).is_none());
+        assert_eq!((hub.rooms.room_count(), hub.queued()), (0, 1));
+        // ...and keeps waiting
+        assert!(joined(&hub.tick(now + Duration::from_secs(30)).out, 1).is_none());
+        // bob quick-plays: both go into a new public room, on alice's map (the one she's been baking)
         let other = RoomMap { seed: 1, ..MAP };
         let step = hub.handle(2, ClientMsg::QuickPlay { map: other }, now);
+        let (code, public, _) = joined(&step.out, 1).expect("alice is matched");
+        assert!(public);
         assert_eq!(joined(&step.out, 2), Some((code.clone(), true, 2)));
-        assert_eq!(hub.rooms.room_count(), 1);
+        assert!(sent_to(&step.out, 2).iter().any(|m| matches!(m, ServerMsg::Joined { map, started: true, host: 0, .. } if *map == MAP)));
+        assert_eq!((hub.rooms.room_count(), hub.queued()), (1, 0));
+        // the next goes straight in
+        let step = hub.handle(3, ClientMsg::QuickPlay { map: other }, now);
+        assert!(!queued(&step.out, 3));
+        assert_eq!(joined(&step.out, 3), Some((code, true, 3)));
+    }
+
+    #[test]
+    fn a_queued_player_joins_a_populated_room() {
+        let now = Instant::now();
+        let mut hub = strangers(&["alice", "bob", "carol", "dave"], now);
         // a hosted room is never matched
-        online(&mut hub, &graph, 3, "carol", now);
-        hub.handle(3, ClientMsg::Create { map: MAP, code: Some("HOST".into()) }, now);
-        online(&mut hub, &graph, 4, "dave", now);
-        let step = hub.handle(4, ClientMsg::QuickPlay { map: other }, now);
-        assert_eq!(joined(&step.out, 4), Some((code, true, 3)));
+        hub.handle(4, ClientMsg::Create { map: MAP, code: Some("TEST".into()) }, now);
+        hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        let step = hub.handle(2, ClientMsg::QuickPlay { map: MAP }, now);
+        let (code, ..) = joined(&step.out, 2).unwrap();
+        // bob leaves: alice is alone in the room, and keeps flying there
+        hub.handle(2, ClientMsg::Leave, now);
+        let later = now + Duration::from_secs(60);
+        let step = hub.tick(later);
+        assert!(sent_to(&step.out, 1).iter().all(|m| !matches!(m, ServerMsg::Joined { .. } | ServerMsg::Queued)));
+        assert_eq!(hub.rooms.room_of(1).map(|(c, _)| c.to_string()), Some(code.clone()), "alice isn't moved");
+        assert_eq!(hub.queued(), 0);
+        // carol quick-plays: into alice's room, no wait
+        let step = hub.handle(3, ClientMsg::QuickPlay { map: RoomMap { seed: 2, ..MAP } }, later);
+        assert!(!queued(&step.out, 3));
+        assert_eq!(joined(&step.out, 3), Some((code.clone(), true, 2)));
+        assert_eq!(hub.rooms.room_of(1).map(|(c, _)| c.to_string()), Some(code), "alice stays put");
+    }
+
+    #[test]
+    fn a_waiting_player_goes_in_when_a_room_fills() {
+        let now = Instant::now();
+        let mut hub = strangers(&["alice", "bob", "carol"], now);
+        // an empty public room in its grace period isn't a match...
+        let mut out = vec![];
+        let code = hub.rooms.create_room(2, MAP, Some("PUBB".into()), RoomKind::Public, now, &mut out).unwrap();
+        hub.handle(2, ClientMsg::Leave, now);
+        let step = hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        assert!(queued(&step.out, 1));
+        // ...until someone's in it (by its code): then the next tick takes alice there
+        hub.handle(3, ClientMsg::Join { code: code.clone() }, now);
+        let step = hub.tick(now);
+        assert_eq!(joined(&step.out, 1), Some((code, true, 2)));
+        assert_eq!(hub.queued(), 0);
+    }
+
+    #[test]
+    fn cancelling_or_going_offline_leaves_the_queue() {
+        let now = Instant::now();
+        let mut hub = strangers(&["alice", "bob", "carol", "dave"], now);
+        hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        hub.handle(1, ClientMsg::CancelQueue, now);
+        assert_eq!(hub.queued(), 0);
+        // bob isn't matched with her
+        let step = hub.handle(2, ClientMsg::QuickPlay { map: MAP }, now);
+        assert!(queued(&step.out, 2) && joined(&step.out, 2).is_none());
+        assert!(sent_to(&step.out, 1).is_empty());
+        // bob drops: carol waits alone
+        hub.disconnect(2, now);
+        let step = hub.handle(3, ClientMsg::QuickPlay { map: MAP }, now);
+        assert!(queued(&step.out, 3) && joined(&step.out, 3).is_none());
+        // LEAVE does it too
+        hub.handle(3, ClientMsg::Leave, now);
+        let step = hub.handle(4, ClientMsg::QuickPlay { map: MAP }, now);
+        assert!(queued(&step.out, 4));
+        assert_eq!(hub.rooms.room_count(), 0);
+    }
+
+    #[test]
+    fn joining_a_room_another_way_leaves_the_queue() {
+        let now = Instant::now();
+        let graph = DevAware { inner: MockAppView::default(), dev_mutuals: true };
+        let mut hub = Hub::new(true);
+        for (c, h) in [(1, "alice"), (2, "bob"), (3, "carol")] {
+            online(&mut hub, &graph, c, h, now);
+        }
+        hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
+        // bob invites alice from the menu; she accepts (a code join)
+        let step = hub.handle(2, ClientMsg::Invite { to: "did:dev:alice".into(), map: MAP }, now);
+        let code = sent_to(&step.out, 1)
+            .iter()
+            .find_map(|m| match m {
+                ServerMsg::Invited { code, .. } => Some(code.clone()),
+                _ => None,
+            })
+            .expect("a queued player still gets invites");
+        hub.handle(1, ClientMsg::Join { code }, now);
+        assert_eq!(hub.queued(), 0);
+        // carol isn't matched with anyone
+        let step = hub.handle(3, ClientMsg::QuickPlay { map: MAP }, now);
+        assert!(queued(&step.out, 3));
+        // carol asks to join bob's room (a request, from the queue): the host lets her in
+        hub.handle(3, ClientMsg::RequestJoin { to: "did:dev:bob".into() }, now);
+        hub.handle(2, ClientMsg::AnswerJoin { did: "did:dev:carol".into(), accept: true }, now);
+        assert!(hub.rooms.room_of(3).is_some());
+        assert_eq!(hub.queued(), 0);
+    }
+
+    #[test]
+    fn the_online_count_goes_out_on_change_now_and_then() {
+        let now = Instant::now();
+        let mut hub = strangers(&["alice"], now);
+        let graph = DevAware { inner: MockAppView::default(), dev_mutuals: false };
+        let count = |out: &[Out], c| {
+            sent_to(out, c).iter().find_map(|m| match m {
+                ServerMsg::Online(n) => Some(*n),
+                _ => None,
+            })
+        };
+        assert_eq!(count(&hub.tick(now).out, 1), Some(1));
+        // bob hears the count at once; alice at the next broadcast, not before the gap
+        let out = online(&mut hub, &graph, 2, "bob", now);
+        assert_eq!(count(&out, 2), Some(2));
+        assert_eq!(count(&hub.tick(now + Duration::from_secs(1)).out, 1), None);
+        let step = hub.tick(now + ONLINE_GAP);
+        assert_eq!((count(&step.out, 1), count(&step.out, 2)), (Some(2), Some(2)));
+        // unchanged: nothing more
+        assert_eq!(count(&hub.tick(now + ONLINE_GAP * 3).out, 1), None);
+        hub.disconnect(2, now);
+        assert_eq!(count(&hub.tick(now + ONLINE_GAP * 4).out, 1), Some(1));
     }
 
     #[test]
@@ -501,12 +723,15 @@ mod tests {
         let step = hub.handle(3, ClientMsg::JoinFriend { did: "did:dev:bob".into() }, now);
         assert_eq!(step.out, vec![Out { to: vec![3], msg: ServerMsg::JoinDeclined("did:dev:bob".into()) }]);
         assert!(!mentions_code(&step.out, 3));
-        // bob goes quick-playing: carol sees him in a public room and hops in
+        // bob goes quick-playing (matched with erin): carol sees him in a public room and hops in
+        let graph = DevAware { inner: MockAppView::default(), dev_mutuals: true };
+        online(&mut hub, &graph, 5, "erin", now);
+        hub.handle(5, ClientMsg::QuickPlay { map: MAP }, now);
         let step = hub.handle(2, ClientMsg::QuickPlay { map: MAP }, now);
         let (code, true, _) = joined(&step.out, 2).unwrap() else { panic!() };
         assert!(sent_to(&step.out, 3).iter().any(|m| matches!(m, ServerMsg::FriendUpdate(f) if f.handle == "bob" && f.status == FriendStatus::InPublic)));
         let step = hub.handle(3, ClientMsg::JoinFriend { did: "did:dev:bob".into() }, now);
-        assert_eq!(joined(&step.out, 3), Some((code.clone(), true, 2)));
+        assert_eq!(joined(&step.out, 3), Some((code.clone(), true, 3)));
         // again from inside: nothing to do
         let step = hub.handle(3, ClientMsg::JoinFriend { did: "did:dev:bob".into() }, now);
         assert_eq!(step.out, vec![Out { to: vec![3], msg: ServerMsg::JoinDeclined("did:dev:bob".into()) }]);
@@ -550,10 +775,10 @@ mod tests {
         assert_eq!(alice.status, FriendStatus::RoomFull);
         let step = hub.handle(2, ClientMsg::JoinFriend { did: "did:dev:alice".into() }, now);
         assert_eq!(step.out, vec![Out { to: vec![2], msg: ServerMsg::JoinDeclined("did:dev:alice".into()) }]);
-        // and quick play makes bob a new room
+        // and quick play has bob wait (no room of his own)
         let step = hub.handle(2, ClientMsg::QuickPlay { map: MAP }, now);
-        assert_eq!(joined(&step.out, 2).map(|j| (j.1, j.2)), Some((true, 1)));
-        assert_eq!(hub.rooms.room_count(), 2);
+        assert!(queued(&step.out, 2) && joined(&step.out, 2).is_none());
+        assert_eq!(hub.rooms.room_count(), 1);
     }
 
     #[test]
@@ -563,13 +788,15 @@ mod tests {
         let mut hub = Hub::new(true);
         online(&mut hub, &graph, 1, "alice", now);
         online(&mut hub, &graph, 2, "bob", now);
+        online(&mut hub, &graph, 3, "carol", now);
+        hub.handle(3, ClientMsg::QuickPlay { map: MAP }, now);
         let step = hub.handle(1, ClientMsg::QuickPlay { map: MAP }, now);
         let (code, ..) = joined(&step.out, 1).unwrap();
         let step = hub.handle(1, ClientMsg::Invite { to: "did:dev:bob".into(), map: MAP }, now);
         assert!(sent_to(&step.out, 2).iter().any(|m| matches!(m, ServerMsg::Invited { code: c, .. } if *c == code)));
         assert_eq!(hub.rooms.room_count(), 1, "no new room");
         let step = hub.handle(2, ClientMsg::Join { code: code.clone() }, now);
-        assert_eq!(joined(&step.out, 2), Some((code, true, 2)));
+        assert_eq!(joined(&step.out, 2), Some((code, true, 3)));
     }
 
     #[test]
@@ -606,7 +833,8 @@ mod tests {
         let later = now + crate::presence::REQUEST_GAP;
         let step = hub.handle(3, ClientMsg::RequestJoin { to: "did:dev:alice".into() }, later);
         assert!(!sent_to(&step.out, 1).is_empty());
-        assert!(hub.tick(later + Duration::from_secs(5)).out.is_empty());
+        // (only the online count goes out)
+        assert!(hub.tick(later + Duration::from_secs(5)).out.iter().all(|o| matches!(o.msg, ServerMsg::Online(_))));
         assert!(declined(&hub.tick(later + Duration::from_secs_f32(JOIN_REQUEST_SECS + 1.0)).out, 3));
 
         // a friend who's in no room, and a stranger
