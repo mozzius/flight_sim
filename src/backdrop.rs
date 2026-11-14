@@ -1,5 +1,4 @@
-//! The dogfight behind the menu: a small furball of AI jets (2v2, 1v1 on
-//! low-memory devices) in front of the menu camera, below the cloud base.
+//! The dogfight behind the menu: a small furball of AI jets (3v3) in front of the menu camera, below the cloud base.
 //! They use the real AI, flight model and weapons, but nothing here touches
 //! the round: no score, no HUD boxes, no player, no network. Shot-down jets
 //! fall for a few seconds, blow up, and a replacement flies in from its
@@ -63,7 +62,7 @@ const FALL: f32 = 5.0;
 const RESPAWN: f32 = 4.0;
 
 fn jets_per_side() -> usize {
-    if crate::platform::low_memory() { 1 } else { 2 }
+    3
 }
 
 /// The arena in front of the menu camera now.
