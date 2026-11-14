@@ -40,6 +40,36 @@ pub enum Mode {
     AvoidTerrain,
 }
 
+/// Keeps a pilot's fight inside a volume (the menu's backdrop dogfight): past
+/// the radius or outside the floor/ceiling it's steered gently back.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Arena {
+    pub centre: Vec3,
+    /// Horizontal radius (m).
+    pub radius: f32,
+    pub floor: f32,
+    pub ceiling: f32,
+}
+
+impl Arena {
+    /// Blends a desired direction back toward the volume when outside it.
+    pub fn steer(&self, pos: Vec3, desired: Vec3) -> Vec3 {
+        let flat = Vec3::new(self.centre.x - pos.x, 0.0, self.centre.z - pos.z);
+        let dist = flat.length();
+        let mut d = desired;
+        if dist > self.radius {
+            let out = ((dist - self.radius) / self.radius).min(1.0);
+            d += flat / dist * (0.5 + 2.5 * out);
+        }
+        if pos.y < self.floor {
+            d.y += ((self.floor - pos.y) / 120.0).min(3.0);
+        } else if pos.y > self.ceiling {
+            d.y -= ((pos.y - self.ceiling) / 100.0).min(3.0);
+        }
+        d.normalize_or(desired)
+    }
+}
+
 #[derive(Component)]
 pub struct Pilot {
     /// 0.5 (rookie) .. 1.0 (ace): aim, reactions, how hard they pull.
@@ -50,7 +80,8 @@ pub struct Pilot {
     break_dir: Option<Vec3>,
     break_timer: f32,
     jink_phase: f32,
-    missile_cooldown: f32,
+    /// Seconds until the next missile (the menu's backdrop fight shortens it).
+    pub(crate) missile_cooldown: f32,
     /// Trigger discipline: short bursts.
     burst_timer: f32,
     /// Enemies favour attacking the player.
@@ -202,6 +233,7 @@ fn ai_pilots(
             &mut ControlInput,
             &mut Weapons,
             &mut Targeting,
+            Option<&Arena>,
         ),
         Without<Disabled>,
     >,
@@ -224,7 +256,7 @@ fn ai_pilots(
         })
         .collect();
 
-    for (me, mut pilot, transform, state, team, mut input, mut weapons, mut targeting) in
+    for (me, mut pilot, transform, state, team, mut input, mut weapons, mut targeting, arena) in
         &mut pilots
     {
         let pos = transform.translation;
@@ -423,6 +455,12 @@ fn ai_pilots(
             (fwd + to_centre * 0.3 + Vec3::Y * ((1_500.0 - pos.y) / 3_000.0)).normalize()
         };
 
+        // ---- stay in the arena (the menu's backdrop fight) ----
+        let desired = match arena {
+            Some(a) if pilot.mode != Mode::AvoidTerrain => a.steer(pos, desired),
+            _ => desired,
+        };
+
         // ---- separation from other aircraft ----
         let mut desired = desired;
         if pilot.mode != Mode::AvoidTerrain {
@@ -531,6 +569,18 @@ mod tests {
             survive *= 1.0 - panic_rate(s, skill) * DT;
         }
         1.0 - survive
+    }
+
+    #[test]
+    fn arena_leaves_pilots_alone_inside_and_turns_them_back_outside() {
+        let arena = Arena { centre: Vec3::new(0.0, 1500.0, 0.0), radius: 500.0, floor: 1200.0, ceiling: 1800.0 };
+        let away = Vec3::X;
+        assert_eq!(arena.steer(Vec3::new(100.0, 1500.0, 0.0), away), away);
+        // past the radius, flying away: pulled back toward the centre
+        assert!(arena.steer(Vec3::new(900.0, 1500.0, 0.0), away).x < 0.5);
+        // under the floor / over the ceiling: nosed up / down
+        assert!(arena.steer(Vec3::new(0.0, 1000.0, 0.0), away).y > 0.5);
+        assert!(arena.steer(Vec3::new(0.0, 2000.0, 0.0), away).y < -0.5);
     }
 
     #[test]

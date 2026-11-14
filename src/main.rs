@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use bevy_transform_interpolation::prelude::*;
 
 mod ai;
+mod backdrop;
 // server-side token verification: the game server's (it includes this file
 // via #[path]); only built into the client with the `atproto` feature
 #[cfg(all(feature = "atproto", not(target_arch = "wasm32")))]
@@ -111,6 +112,6 @@ fn main() {
             dev::DevPlugin,
         ))
         .add_plugins((settings::SettingsPlugin, loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin, signin::SignInPlugin, leaderboard::LeaderboardPlugin))
-        .add_plugins((waypoints::WaypointsPlugin, tutorial::TutorialPlugin))
+        .add_plugins((waypoints::WaypointsPlugin, tutorial::TutorialPlugin, backdrop::BackdropPlugin))
         .run();
 }

@@ -1344,6 +1344,12 @@ fn layout_account(
 /// not a map is loaded.
 const MENU_PITCH: f32 = 0.6;
 
+/// The menu camera's eye and yaw at a time (the backdrop dogfight follows it).
+pub(crate) fn menu_view(secs: f32, terrain: Option<&crate::world::Terrain>) -> (Vec3, f32) {
+    let ground = terrain.map_or(0.0, |t| t.height_at(0.0, 0.0));
+    (Vec3::new(0.0, (ground + 700.0).max(900.0), 0.0), secs * 0.015)
+}
+
 /// Behind the menu the camera turns slowly under the sky (a fixed spot above
 /// the last map, or the bare planet before the first round).
 fn menu_camera(
@@ -1355,9 +1361,7 @@ fn menu_camera(
         return;
     }
     let Ok(mut cam) = camera.single_mut() else { return };
-    let ground = terrain.map_or(0.0, |t| t.height_at(0.0, 0.0));
-    let yaw = time.elapsed_secs() * 0.015;
-    let eye = Vec3::new(0.0, (ground + 700.0).max(1400.0), 0.0);
+    let (eye, yaw) = menu_view(time.elapsed_secs(), terrain.as_deref());
     *cam = Transform::from_translation(eye).with_rotation(Quat::from_euler(EulerRot::YXZ, yaw, MENU_PITCH, 0.0));
 }
 

@@ -519,7 +519,7 @@ fn arrange(
 fn spawn_markers(
     mut commands: Commands,
     font: Res<HudFont>,
-    new: Query<(Entity, &Team, Option<&crate::net::RemoteName>), (Added<Aircraft>, Without<Player>)>,
+    new: Query<(Entity, &Team, Option<&crate::net::RemoteName>), (Added<Aircraft>, Without<Player>, Without<crate::backdrop::MenuJet>)>,
 ) {
     for (entity, team, name) in &new {
         let color = if name.is_some() {

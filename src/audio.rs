@@ -626,6 +626,7 @@ fn doppler(listener_pos: Vec3, listener_vel: Vec3, source_pos: Vec3, source_vel:
 fn remote_loops(
     time: Res<Time>,
     muted: Res<Muted>,
+    state: Res<State<crate::loading::GameState>>,
     camera: Query<&GlobalTransform, With<MainCamera>>,
     player: Query<&FlightState, With<Player>>,
     aircraft: Query<(&GlobalTransform, &FlightState, &Weapons, Has<Disabled>)>,
@@ -666,7 +667,8 @@ fn remote_loops(
                 )
             }
         };
-        let target = if muted.0 { 0.0 } else { target };
+        // (the menu's backdrop dogfight is silent)
+        let target = if muted.0 || *state.get() == crate::loading::GameState::Menu { 0.0 } else { target };
         let current = sink.volume().to_linear();
         let rate = if *kind == RemoteLoop::Gun { 40.0 } else { 5.0 };
         sink.set_volume(Volume::Linear(approach(current, target, dt, rate)));
@@ -689,11 +691,17 @@ fn one_shots(
     new_flares: Query<&GlobalTransform, Added<Flare>>,
     mut flare_cooldown: Local<f32>,
     time: Res<Time>,
+    state: Res<State<crate::loading::GameState>>,
 ) {
     let Ok(cam) = camera.single() else {
         explosions.clear();
         return;
     };
+    // (the menu's backdrop dogfight is silent)
+    if *state.get() == crate::loading::GameState::Menu {
+        explosions.clear();
+        return;
+    }
     let listener = cam.translation();
     let mut queue = |handle: &Handle<AudioSource>, pos: Vec3, volume: f32, scale: f32| {
         let delay = listener.distance(pos) / SPEED_OF_SOUND;
