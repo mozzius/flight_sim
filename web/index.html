@@ -267,15 +267,39 @@
       window.FLIGHT_SIM_SERVER = q.get("server") || window.FLIGHT_SIM_SERVER || "";
     }
 
-    // Safe-area insets for the touch controls (read by src/platform.rs)
+    // Safe-area insets (src/platform.rs reads them every frame). An iOS home
+    // screen app often reports env(safe-area-inset-*) as 0 at launch and
+    // fills them in a moment later without a resize, and rotation can land
+    // before the new insets do, so re-measure on everything that might move
+    // them, every frame for the first few seconds, when the probe's size
+    // changes, and on a slow poll as a backstop.
     {
       const probe = document.getElementById("safe");
       const read = () => {
         const cs = getComputedStyle(probe);
         window.FLIGHT_SIM_SAFE_AREA = ["paddingLeft", "paddingTop", "paddingRight", "paddingBottom"].map((k) => parseFloat(cs[k]) || 0);
       };
-      read();
-      addEventListener("resize", read);
+      // a burst of per-frame reads (after load, rotation, coming back to the app)
+      let until = 0;
+      const burst = (ms = 1500) => {
+        read();
+        const running = performance.now() < until;
+        until = Math.max(until, performance.now() + ms);
+        if (running) return;
+        const tick = () => {
+          read();
+          if (performance.now() < until) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      };
+      burst(3000);
+      for (const e of ["resize", "orientationchange", "pageshow", "load"]) addEventListener(e, () => burst());
+      document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && burst());
+      window.visualViewport?.addEventListener("resize", () => burst());
+      screen.orientation?.addEventListener?.("change", () => burst());
+      // the probe's padding is the insets, so its box changes size with them
+      if (window.ResizeObserver) new ResizeObserver(read).observe(probe, { box: "border-box" });
+      setInterval(read, 500);
     }
 
     // Sign-in (web/auth.js): restore a stored session, or finish an OAuth
