@@ -50,12 +50,12 @@ struct Fight {
 }
 
 /// How far ahead of the camera the fight is centred (horizontally, m).
-const RANGE: f32 = 1_000.0;
+const RANGE: f32 = 600.0;
 /// Altitude band above the camera's eye: under the cloud base (~1.9 km).
 const FLOOR: f32 = 350.0;
 const CENTRE: f32 = 600.0;
 const CEILING: f32 = 850.0;
-const RADIUS: f32 = 450.0;
+const RADIUS: f32 = 350.0;
 /// A shot-down jet falls this long before it blows up.
 const FALL: f32 = 5.0;
 /// Then its replacement arrives after this long.
