@@ -202,7 +202,9 @@ impl Environment {
         let rolled = Self::roll(seed, Some(biome));
         let time = picks.time.unwrap_or(if headless { fixed.time } else { rolled.time });
         let weather = picks.weather.unwrap_or(if headless { fixed.weather } else { rolled.weather });
-        let sun_azimuth = if headless { DEFAULT_AZIMUTH } else { rolled.sun_azimuth };
+        // (FLIGHT_SIM_SUN_AZIMUTH=<degrees> pins it for screenshots)
+        let pinned = std::env::var("FLIGHT_SIM_SUN_AZIMUTH").ok().and_then(|v| v.parse::<f32>().ok()).map(f32::to_radians);
+        let sun_azimuth = pinned.unwrap_or(if headless { DEFAULT_AZIMUTH } else { rolled.sun_azimuth });
         let env = Self { biome, time, weather, sun_azimuth };
         info!("environment: {:?} {:?} {:?}, sun bearing {:.0}°", env.biome, env.time, env.weather, env.sun_azimuth.to_degrees());
         env
