@@ -171,7 +171,10 @@ fn spaced(last: &mut Option<Vec3>, now: Vec3, spacing: f32, out: &mut Vec<Vec3>)
 
 /// Exhaust nozzle positions in aircraft-local space (metres).
 // measured from the model: nose at z=-12, tail fins reach z=+8.9, nozzle discs ~5.0, exit lip ~6.6-7.0. The flame starts deep inside the nozzle (the plume shader treats the first 2.4 m as the nozzle interior) so it always emerges from within, with no gap from any angle.
-const NOZZLES: [Vec3; 2] = [Vec3::new(0.75, 0.05, 4.4), Vec3::new(-0.75, 0.05, 4.4)];
+// The 2D nozzle openings (from the glTF's vertices, through the model's
+// transform in `game.rs`) span x 0.50..1.08 and y -0.13..0.68 inside the
+// flaps, so they're centred at x ±0.79, y 0.27.
+const NOZZLES: [Vec3; 2] = [Vec3::new(0.79, 0.27, 4.4), Vec3::new(-0.79, 0.27, 4.4)];
 const WINGTIPS: [Vec3; 2] = [Vec3::new(7.3, 0.0, 2.0), Vec3::new(-7.3, 0.0, 2.0)];
 const GUN_PORT: Vec3 = Vec3::new(0.9, 0.9, -7.5);
 /// Upper wing surface (right wing) as a quad: root LE, tip LE, tip TE, root TE.
@@ -229,7 +232,7 @@ fn attach_aircraft_effects(
                     },
                     noise: assets.noise.clone(),
                 })),
-                Transform::from_translation(Vec3::new(0.0, 0.05, 6.8 + plume::HAZE_HALF_LENGTH))
+                Transform::from_translation(Vec3::new(0.0, NOZZLES[0].y, 6.8 + plume::HAZE_HALF_LENGTH))
                     .with_rotation(along),
                 NotShadowCaster,
                 ChildOf(aircraft),
