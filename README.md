@@ -14,6 +14,12 @@ Run the game using `cargo run`
   game (6 up to 12); challenge and multiplayer always play it. The numbers are in
   `src/difficulty.rs`.
 
+**Menu**: the title on the left (on top in portrait), one column of buttons on the right:
+ENDLESS, CHALLENGE, MULTIPLAYER, then TUTORIAL (a dot until finished once), LEADERBOARD and
+SETTINGS, outlined. Each opens its own page with BACK (Esc / B). Behind it the camera turns
+slowly under the sky, darkened by a gradient (`menu::backdrop`, the leaderboard's too). The
+account corner shows `@handle` (SIGN OUT is in SETTINGS) or a small SIGN IN.
+
 **Settings** (main menu): GRAPHICS is AUTO (the lighter scene on phones and tablets on the
 web, full elsewhere), LOW or HIGH, kept in `localStorage` / `<data dir>/flight_sim/settings`.
 Natively it switches straight away: shadow-map size, cloud resolution and the trees live,
@@ -25,7 +31,7 @@ reloads the page. `?low` / `?high` and `FLIGHT_SIM_LOW_MEMORY=1` override it.
   OS data dir natively). Signed in, runs also go on the server's leaderboard: the score
   screen shows `BEST <n>  #<rank>` and LEADERBOARD (SIGN IN when signed out), which opens
   GLOBAL / FRIENDS boards (`#  @handle  score  W<wave>`, your row highlighted); the menu
-  has it top left too.
+  has LEADERBOARD too (signed in).
 
 - **Multiplayer**: a free-for-all dogfight with respawns, up to 8 players per room. CREATE picks
   the room's location, weather and time (like Endless) and opens the room's lobby: the code,
@@ -120,7 +126,9 @@ tablets get a lighter scene (fewer trees, half-res terrain textures; SETTINGS â†
 
 `FLIGHT_SIM_SCREENSHOT=out.png cargo run` saves a screenshot after 5 seconds
 (`FLIGHT_SIM_SCREENSHOT_AFTER=<secs>` to change) and exits;
-`FLIGHT_SIM_SCREENSHOT_BURST=<count>,<secs>` saves a numbered sequence instead. Other switches:
+`FLIGHT_SIM_SCREENSHOT_BURST=<count>,<secs>` saves a numbered sequence instead.
+`FLIGHT_SIM_SCREENSHOT_SIZE=<w>x<h>` and `FLIGHT_SIM_SCREENSHOT_DPR=<n>` set the image size and
+scale factor (a landscape phone: `2556x1179`, `3`; default 2560x1440 at 1). Other switches:
 `FLIGHT_SIM_LOG=1` (FPS + flight state each second), `FLIGHT_SIM_AUTOPILOT=1`
 (the AI flies your jet), `FLIGHT_SIM_NO_HUD=1` (no HUD or player jet), `FLIGHT_SIM_FX_TEST=1` (afterburner + an explosion),
 `TERRAIN_DEBUG_CAM=1..4` (terrain viewpoints), `FLIGHT_SIM_FX_TEST=explosion|engines|missile|vapour|...`
@@ -134,7 +142,7 @@ settings for a run without saving them; screenshot runs never read or write the 
 `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` (pin the environment; screenshot runs
 default to alpine, clear midday), `FLIGHT_SIM_MODE=endless|challenge|tutorial` (skip the menu;
-screenshot runs default to endless), `FLIGHT_SIM_MODE=menu|menu-endless|menu-settings` (show the menu in a
+screenshot runs default to endless), `FLIGHT_SIM_MODE=menu|menu-endless|menu-settings|menu-signin` (show the menu in a
 screenshot run), `FLIGHT_SIM_DIE_AT=<secs>` (shoot the player down, for the score screen). Tutorial:
 `FLIGHT_SIM_AUTOPILOT=1` flies the lessons with the player's own controls (each step's condition
 for real; step changes are logged as `tutorial: rings -> dive (Done, 41.2 s)`),
