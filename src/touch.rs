@@ -1,5 +1,6 @@
-//! Touchscreen controls (phones and tablets). They stay hidden until the first
-//! touch, so mouse/keyboard players never see them.
+//! Touchscreen controls (phones and tablets). On a touch-first device
+//! (`platform::touch_first`) they're up from the start; elsewhere they stay
+//! hidden until the first touch, so mouse/keyboard players never see them.
 //!
 //! - Swipe anywhere to move the aim point; an autopilot flies to it, banking
 //!   into turns and levelling the wings once the nose is on it
@@ -27,7 +28,8 @@ pub struct TouchPlugin;
 
 impl Plugin for TouchPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TouchInput>()
+        // (on a phone or tablet they're up from the start: `platform::touch_first`)
+        app.insert_resource(TouchInput { active: crate::platform::touch_first(), ..default() })
             .add_systems(Startup, spawn_ui)
             .add_systems(
                 Update,
@@ -45,7 +47,7 @@ pub struct TouchSystems;
 /// What the touch controls want this frame.
 #[derive(Resource, Default)]
 pub struct TouchInput {
-    /// A touch has been seen: show the controls and fly by autopilot.
+    /// A touch-first device, or a touch has been seen: show the controls and fly by autopilot.
     pub active: bool,
     /// Aim drag accumulated since the aim last consumed it, in pixels.
     pub pan: Vec2,
@@ -69,6 +71,35 @@ enum Role {
 
 /// Swipe-to-aim sensitivity relative to the mouse's.
 pub const PAN_SCALE: f32 = 1.8;
+
+/// The screen's size in logical pixels: the window's, or in a headless
+/// screenshot run the image's (`FLIGHT_SIM_SCREENSHOT_SIZE` / `_DPR`), so
+/// the controls lay out (and show in the shot) there too.
+pub fn screen_size(window: Option<&Window>) -> Option<Vec2> {
+    match window {
+        Some(w) => Some(w.size()),
+        None if crate::dev::headless() => Some(crate::dev::headless_size().as_vec2() / crate::dev::headless_dpr()),
+        None => None,
+    }
+}
+
+/// Where the touch controls are, for the HUD to keep clear of (logical pixels).
+pub struct Clearance {
+    /// The buttons bottom left (not the pause button): centre and radius.
+    pub buttons: Vec<(Vec2, f32)>,
+    /// The right-hand edge of those buttons.
+    pub buttons_right: f32,
+    /// The left-hand edge of the throttle slider (its handle).
+    pub throttle_left: f32,
+}
+
+pub fn clearance(size: Vec2) -> Clearance {
+    let l = Layout::new(size);
+    let buttons: Vec<(Vec2, f32)> =
+        l.buttons().into_iter().filter(|(role, ..)| *role != Role::Pause).map(|(_, c, r)| (c, r)).collect();
+    let buttons_right = buttons.iter().map(|(c, r)| c.x + r).fold(0.0, f32::max);
+    Clearance { buttons, buttons_right, throttle_left: l.throttle_x - l.handle_w() * 0.5 }
+}
 
 /// Where everything sits for a given window size, in logical pixels.
 struct Layout {
@@ -105,6 +136,14 @@ impl Layout {
             throttle_top: top + (bottom - top) * 0.25,
             throttle_bottom: bottom - 40.0 * s,
         }
+    }
+
+    fn track_w(&self) -> f32 {
+        22.0 * self.scale
+    }
+
+    fn handle_w(&self) -> f32 {
+        self.track_w() * 2.2
     }
 
     fn buttons(&self) -> [(Role, Vec2, f32); 5] {
@@ -162,10 +201,10 @@ fn read_touches(
     mut actions: ResMut<PlayerActions>,
     mut input: ResMut<TouchInput>,
 ) {
-    let Ok(window) = windows.single() else {
+    let Some(size) = screen_size(windows.single().ok()) else {
         return;
     };
-    let layout = Layout::new(window.size());
+    let layout = Layout::new(size);
     if touches.any_just_pressed() {
         input.active = true;
     }
@@ -318,7 +357,7 @@ fn layout_ui(
     mut root: Query<&mut Node, (With<TouchRoot>, Without<Widget>)>,
     mut widgets: Query<(&Widget, &mut Node, &mut BackgroundColor, &mut Visibility)>,
 ) {
-    let (Ok(window), Ok(mut root)) = (windows.single(), root.single_mut()) else {
+    let (Some(size), Ok(mut root)) = (screen_size(windows.single().ok()), root.single_mut()) else {
         return;
     };
     let playing = *state.get() == crate::loading::GameState::Playing;
@@ -329,11 +368,11 @@ fn layout_ui(
     if display == Display::None {
         return;
     }
-    let l = Layout::new(window.size());
+    let l = Layout::new(size);
     // while paused or waiting to respawn only the pause button stays
     let only_pause = paused.0 || prompt.ready();
     let held = |role: Role| input.fingers.values().any(|r| *r == role);
-    let track_w = 22.0 * l.scale;
+    let track_w = l.track_w();
     let rect = |node: &mut Node, x: f32, top: f32, w: f32, h: f32| {
         node.left = px(x - w * 0.5);
         node.top = px(top);
@@ -367,7 +406,7 @@ fn layout_ui(
             }
             Widget::ThrottleHandle => {
                 let h = 10.0 * l.scale;
-                rect(&mut node, l.throttle_x, lever_y - h * 0.5, track_w * 2.2, h)
+                rect(&mut node, l.throttle_x, lever_y - h * 0.5, l.handle_w(), h)
             }
         }
     }

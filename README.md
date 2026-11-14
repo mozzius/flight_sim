@@ -117,7 +117,9 @@ fly-by shot: any key, click, tap or gamepad A skips it.
 
 On a touchscreen: swipe anywhere to aim and an autopilot flies there (banking into turns,
 levelling out once on target); GUN (hold), MSL, FLR and TGT on the left, the throttle slider
-on the right edge (top = afterburner, bottom = airbrake), pause top left. Phones and
+on the right edge (top = afterburner, bottom = airbrake), pause top left. On a phone or
+tablet (a coarse main pointer) they're up from the start; elsewhere the first touch brings
+them up, and the HUD readouts move clear of them. Phones and
 tablets get a lighter scene (fewer trees, half-res terrain textures; SETTINGS → GRAPHICS).
 
 ## Dev
@@ -145,12 +147,15 @@ default to alpine, clear midday), `FLIGHT_SIM_MODE=endless|challenge|tutorial` (
 screenshot runs default to endless), `FLIGHT_SIM_MODE=menu|menu-endless|menu-settings|menu-signin` (show the menu in a
 screenshot run), `FLIGHT_SIM_DIE_AT=<secs>` (shoot the player down, for the score screen). Tutorial:
 `FLIGHT_SIM_AUTOPILOT=1` flies the lessons with the player's own controls (each step's condition
-for real; step changes are logged as `tutorial: rings -> dive (Done, 41.2 s)`),
+for real; step changes are logged as `tutorial: rings -> dive (Done, 41.2 s, out to 5.3 km)`,
+the last being the player's furthest from the map centre in that step: the course and the
+fights stay within ~7 km of it, where the terrain is detailed),
 `FLIGHT_SIM_TUTORIAL_START=<step>` (throttle, pitch, roll, rings, dive, climb, afterburner,
 airbrake, cruise, valley, targets, lock, gun, missile, flares, dogfight, complete),
 `FLIGHT_SIM_TUTORIAL_STEP_SECS=<n>` (every step gives up after n s),
 `FLIGHT_SIM_INPUT=keyboard|gamepad|touch` (pin the prompts' controls; touch also shows the touch
-controls) and the shot event `tut-<step>[+<secs>]` (e.g. `tut-flares+5.5:/tmp/f.png`). Biome parameter sets live in `src/terrain_gen/biome.rs`,
+controls), `FLIGHT_SIM_TOUCH_FIRST=1` (start as a phone does: touch controls up, a key still
+switches away; on the web `?touch` / `?notouch`) and the shot event `tut-<step>[+<secs>]` (e.g. `tut-flares+5.5:/tmp/f.png`). Biome parameter sets live in `src/terrain_gen/biome.rs`,
 the farmland fields in `src/terrain_gen/fields.rs` (the terrain shader redraws them per pixel from a small farm-layout texture, so they stay crisp on phones), lakes and the sea in `src/terrain_gen/water.rs`
 (shader `assets/shaders/water.wesl`).
 Screenshot runs are headless (no window) and silent.

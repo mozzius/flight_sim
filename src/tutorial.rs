@@ -62,7 +62,7 @@ impl Plugin for TutorialPlugin {
             .add_systems(FixedUpdate, fly_drones.in_set(FlightSystems::Pilots).run_if(active))
             .add_systems(
                 FixedUpdate,
-                (autopilot.run_if(autopilot_on), gate_inputs)
+                (leash_rookies, autopilot.run_if(autopilot_on), gate_inputs)
                     .chain()
                     .after(FlightSystems::Pilots)
                     .before(FlightSystems::Physics)
@@ -229,7 +229,7 @@ pub fn prompt(step: Step, device: InputDevice, direct: bool) -> &'static str {
     match (step, device) {
         (Step::Throttle, Keyboard) => "Throttle up \u{2014} hold Shift",
         (Step::Throttle, Gamepad) => "Throttle up \u{2014} squeeze RT",
-        (Step::Throttle, Touch) => "Throttle up \u{2014} slide the right edge up",
+        (Step::Throttle, Touch) => "Throttle up \u{2014} slide the right-hand bar up",
         (Step::Pitch, Keyboard) if direct => "Pitch up \u{2014} hold S",
         (Step::Pitch, Keyboard) => "Pitch up \u{2014} move the mouse up",
         (Step::Pitch, Gamepad) => "Pitch up \u{2014} pull back on the left stick",
@@ -257,7 +257,7 @@ pub fn prompt(step: Step, device: InputDevice, direct: bool) -> &'static str {
         (Step::Airbrake, Touch) => "Airbrake \u{2014} slide the throttle to the bottom",
         (Step::Cruise, Keyboard) => "Throttle back up \u{2014} hold Shift",
         (Step::Cruise, Gamepad) => "Throttle back up \u{2014} squeeze RT",
-        (Step::Cruise, Touch) => "Throttle back up \u{2014} slide the right edge up",
+        (Step::Cruise, Touch) => "Throttle back up \u{2014} slide the throttle up",
         (Step::Valley, _) => "Low pass \u{2014} follow the arrow down into the valley ring",
         (Step::Targets, Keyboard) => "Cycle targets \u{2014} press Tab",
         (Step::Targets, Gamepad) => "Cycle targets \u{2014} press D-pad right",
@@ -384,6 +384,8 @@ pub struct Tutorial {
     safe: Option<(Vec3, Vec3)>,
     down_for: f32,
     skip: bool,
+    /// The furthest the player has been from the map centre this step (logged).
+    furthest: f32,
 }
 
 impl Tutorial {
@@ -407,6 +409,7 @@ impl Tutorial {
             safe: None,
             down_for: 0.0,
             skip: false,
+            furthest: 0.0,
         }
     }
 
@@ -453,7 +456,47 @@ struct Drone {
 }
 
 const DRONE_SPEED: f32 = 175.0;
-const DRONE_CIRCLE: f32 = 3_500.0;
+/// Drones circle the map centre this far out (the second a little wider).
+const DRONE_CIRCLE: f32 = 3_000.0;
+const DRONE_CIRCLE_STEP: f32 = 600.0;
+
+/// The middle of the map: the terrain's detail (the 32 m near grid, and on
+/// phones the 64 m one) is centred on the world origin, and it gets coarser
+/// past ~9 km (the near grid's edge is 12.8 km out, the fine one's 25.6 km).
+pub const CENTRE: Vec2 = Vec2::ZERO;
+/// Everything the tutorial puts in the world stays within this of the centre.
+pub const SAFE_RADIUS: f32 = 7_000.0;
+/// Rookies past this turn back toward the centre (the player chasing them follows).
+const LEASH_RADIUS: f32 = 5_500.0;
+
+/// How far `p` is from the map centre (horizontally).
+pub fn from_centre(p: Vec3) -> f32 {
+    p.xz().distance(CENTRE)
+}
+
+/// `heading` (flattened) turned toward the map centre by up to `max_deg`,
+/// more the further out `pos` is (not at all within 2 km).
+fn toward_centre(pos: Vec3, heading: Vec3, max_deg: f32) -> Vec3 {
+    let h = flat(heading);
+    let to = CENTRE - pos.xz();
+    let d = to.length();
+    if d < 1.0 {
+        return h;
+    }
+    let to = Vec3::new(to.x, 0.0, to.y) / d;
+    let w = ((d - 2_000.0) / 4_000.0).clamp(0.0, 1.0);
+    let angle = h.angle_between(to).min(max_deg.to_radians() * w);
+    // (positive about +Y turns -Z toward -X: left)
+    let sign = if h.cross(to).y >= 0.0 { 1.0 } else { -1.0 };
+    Quat::from_rotation_y(angle * sign) * h
+}
+
+/// `p` pulled in to within `radius` of the map centre (height kept).
+fn clamp_to_centre(p: Vec3, radius: f32) -> Vec3 {
+    let rel = p.xz() - CENTRE;
+    let rel = rel.clamp_length_max(radius) + CENTRE;
+    Vec3::new(rel.x, p.y, rel.y)
+}
 
 fn flat(v: Vec3) -> Vec3 {
     Vec3::new(v.x, 0.0, v.z).normalize_or(Vec3::NEG_Z)
@@ -464,48 +507,91 @@ fn tangent(r_hat: Vec2, turn: f32) -> Vec2 {
     Vec2::new(-r_hat.y, r_hat.x) * turn
 }
 
-/// A drone `ahead` metres in front of `pos` (offset `side` metres to the
-/// right), flying along `heading` round a circle of `radius`.
+/// Where a drone goes on a circle of `radius` round the map centre: the
+/// point of it nearest `near` (at `near`'s height), the way round that goes
+/// most along `heading`. Returns (position, heading, turn).
+fn on_circle(near: Vec3, heading: Vec3, radius: f32) -> (Vec3, Vec3, f32) {
+    let r_hat = (near.xz() - CENTRE).normalize_or(Vec2::Y);
+    let at = CENTRE + r_hat * radius;
+    let turn = if tangent(r_hat, 1.0).dot(flat(heading).xz()) >= 0.0 { 1.0 } else { -1.0 };
+    let t = tangent(r_hat, turn);
+    (Vec3::new(at.x, near.y, at.y), Vec3::new(t.x, 0.0, t.y), turn)
+}
+
+/// A drone circling the map centre at `radius`, put on the circle near
+/// `ahead` metres in front of `pos`.
 #[allow(clippy::too_many_arguments)]
-fn spawn_drone(
+fn spawn_circling_drone(
     commands: &mut Commands,
     models: &Models,
     terrain: &Terrain,
     pos: Vec3,
     heading: Vec3,
     ahead: f32,
-    side: f32,
     radius: f32,
     health: f32,
 ) -> Entity {
+    let (at, h, turn) = on_circle(pos + flat(heading) * ahead, heading, radius);
+    spawn_drone(commands, models, terrain, at, h, CENTRE, radius, turn, health)
+}
+
+/// A drone at `at` flying along `heading`, round a circle of `radius` about
+/// `centre` (`turn`: which way round).
+#[allow(clippy::too_many_arguments)]
+fn spawn_drone(
+    commands: &mut Commands,
+    models: &Models,
+    terrain: &Terrain,
+    mut at: Vec3,
+    heading: Vec3,
+    centre: Vec2,
+    radius: f32,
+    turn: f32,
+    health: f32,
+) -> Entity {
     let h = flat(heading);
-    let right = h.cross(Vec3::Y);
-    let mut at = pos + h * ahead + right * side;
     at.y = at.y.max(terrain.max_height_along(at, at + h * 4_000.0) + 500.0);
-    // the circle's centre off to the right, so we start along `heading`
-    let centre = at + right * radius;
-    let r_hat = (at - centre).xz().normalize_or(Vec2::X);
-    let turn = if tangent(r_hat, 1.0).dot(h.xz()) >= 0.0 { 1.0 } else { -1.0 };
     let e = spawn_aircraft(commands, models, terrain, Team::Red, at, h, false);
     commands.entity(e).remove::<Pilot>().insert((
         Name::new("Drone"),
-        Drone { centre: centre.xz(), radius, turn, altitude: at.y },
+        Drone { centre, radius, turn, altitude: at.y },
         Health::new(health),
     ));
     e
 }
 
-/// Four rings round an easy right-hand curve, starting ahead of `pos`.
+/// Rings in a course.
+const RINGS: usize = 4;
+const RING_SPACING: f32 = 1_800.0;
+/// How far each ring turns from the last.
+const RING_TURN_DEG: f32 = 40.0;
+
+/// Four rings round an easy curve starting ahead of `pos`, bending back
+/// toward the map centre (whichever way round stays closer to it).
 pub fn ring_course(terrain: &Terrain, pos: Vec3, heading: Vec3) -> Vec<Gate> {
+    let first = toward_centre(pos, heading, 60.0);
+    let course = |turn: f32| {
+        let mut points = Vec::new();
+        let mut prev = pos;
+        let mut dir = first;
+        for i in 0..RINGS {
+            if i > 0 {
+                // (negative about +Y: to the right)
+                dir = Quat::from_rotation_y(-turn * RING_TURN_DEG.to_radians()) * dir;
+            }
+            let p = prev + dir * RING_SPACING;
+            points.push(p);
+            prev = p;
+        }
+        points
+    };
+    let furthest = |points: &Vec<Vec3>| points.iter().map(|p| from_centre(*p)).fold(0.0, f32::max);
+    // to the right unless the left stays clearly more central
+    let (right, left) = (course(1.0), course(-1.0));
+    let points = if furthest(&left) < furthest(&right) - 300.0 { left } else { right };
     let mut gates = Vec::new();
     let mut prev = pos;
-    let mut dir = flat(heading);
-    for i in 0..4 {
-        if i > 0 {
-            // (negative about +Y: to the right)
-            dir = Quat::from_rotation_y(-32f32.to_radians()) * dir;
-        }
-        let mut p = prev + dir * 1_800.0;
+    for mut p in points {
         p.y = clear_of_ground(terrain, prev, p, pos.y);
         gates.push(Gate::new(p, p - prev, 70.0));
         prev = p;
@@ -519,21 +605,25 @@ fn clear_of_ground(terrain: &Terrain, from: Vec3, to: Vec3, want: f32) -> f32 {
     want.max(ground + 250.0)
 }
 
-/// One ring `dist` ahead at `want` metres (lifted clear of the ground).
+/// One ring `dist` ahead at `want` metres (lifted clear of the ground),
+/// bent toward the map centre when we're far out.
 fn ring_ahead(terrain: &Terrain, pos: Vec3, heading: Vec3, dist: f32, want: f32) -> Gate {
-    let mut p = pos + flat(heading) * dist;
+    let mut p = pos + toward_centre(pos, heading, 50.0) * dist;
     p.y = clear_of_ground(terrain, pos, p, want);
     Gate::new(p, p - pos, 75.0)
 }
 
-/// A low ring in the deepest bit of ground a few km ahead.
+/// A low ring in the deepest bit of ground a few km ahead (well inside the map).
 fn valley_ring(terrain: &Terrain, pos: Vec3, heading: Vec3) -> Gate {
-    let h = flat(heading);
+    let h = toward_centre(pos, heading, 70.0);
     let right = h.cross(Vec3::Y);
-    let mut best = (f32::MAX, pos + h * 3_500.0);
+    let mut best = (f32::MAX, clamp_to_centre(pos + h * 3_500.0, SAFE_RADIUS - 1_500.0));
     for ahead in [3_000.0, 3_800.0, 4_600.0] {
         for across in -3..=3 {
             let p = pos + h * ahead + right * (across as f32 * 700.0);
+            if from_centre(p) > SAFE_RADIUS - 1_500.0 {
+                continue;
+            }
             let g = terrain.height_at(p.x, p.z);
             if g < best.0 {
                 best = (g, p);
@@ -590,7 +680,8 @@ fn set_up_step(
                 }
             }
             for i in tutorial.drones.len()..step.drones() {
-                let e = spawn_drone(&mut commands, &models, &terrain, pos, heading, 2_000.0, i as f32 * 500.0 - 250.0, DRONE_CIRCLE, hp);
+                let radius = DRONE_CIRCLE + i as f32 * DRONE_CIRCLE_STEP;
+                let e = spawn_circling_drone(&mut commands, &models, &terrain, pos, heading, 2_000.0, radius, hp);
                 tutorial.drones.push(e);
             }
         }
@@ -605,14 +696,17 @@ fn set_up_step(
             for e in tutorial.drones.drain(..).chain(tutorial.launcher.take()) {
                 commands.entity(e).despawn();
             }
+            // a few km ahead, but never far from the centre (they come at us)
             let h = flat(heading);
+            let meet = clamp_to_centre(pos + h * 5_000.0, 2_500.0);
+            let to_us = flat(pos - meet);
             for side in [-300.0, 300.0] {
-                let at = pos + h * 6_000.0 + h.cross(Vec3::Y) * side;
-                let e = spawn_aircraft(&mut commands, &models, &terrain, Team::Red, at, -h, false);
+                let at = meet + to_us.cross(Vec3::Y) * side;
+                let e = spawn_aircraft(&mut commands, &models, &terrain, Team::Red, at, to_us, false);
                 let mut pilot = Pilot::new();
                 // below the softest wave pilot (0.5): wobblier aim, slower to react
                 pilot.skill = 0.35;
-                commands.entity(e).insert((Name::new("Rookie"), pilot));
+                commands.entity(e).insert((Name::new("Rookie"), Rookie, pilot));
                 tutorial.rookies.push(e);
             }
         }
@@ -681,7 +775,8 @@ fn track_targets(
     {
         tutorial.drone_in = 2.5;
         let hp = tutorial.step().drone_health();
-        let e = spawn_drone(&mut commands, &models, &terrain, t.translation, t.forward().as_vec3(), 2_000.0, 0.0, DRONE_CIRCLE, hp);
+        let radius = DRONE_CIRCLE + tutorial.drones.len() as f32 * DRONE_CIRCLE_STEP;
+        let e = spawn_circling_drone(&mut commands, &models, &terrain, t.translation, t.forward().as_vec3(), 2_000.0, radius, hp);
         tutorial.drones.push(e);
     }
 }
@@ -707,6 +802,30 @@ fn fly_drones(terrain: Res<Terrain>, mut drones: Query<(&Drone, &Transform, &Fli
         input.throttle = (0.55 + (DRONE_SPEED - state.airspeed) / 60.0).clamp(0.15, 1.0);
         input.afterburner = false;
         input.airbrake = false;
+    }
+}
+
+/// A dogfight opponent (kept near the centre by [`leash_rookies`]).
+#[derive(Component)]
+struct Rookie;
+
+/// Rookies that stray past [`LEASH_RADIUS`] heading outward turn back
+/// toward the centre (overriding their pilot), so a dogfight that drifts
+/// comes back to the detailed middle of the map and the player follows.
+fn leash_rookies(mut rookies: Query<(&Transform, &FlightState, &mut ControlInput), (With<Rookie>, Without<Disabled>)>) {
+    for (t, state, mut input) in &mut rookies {
+        let pos = t.translation;
+        let out = pos.xz() - CENTRE;
+        let d = out.length();
+        if d < LEASH_RADIUS || state.velocity.xz().dot(out / d.max(1.0)) < -40.0 {
+            continue;
+        }
+        let home = Vec3::new(-out.x, 0.0, -out.y).normalize_or(Vec3::NEG_Z);
+        let desired = (home + Vec3::Y * ((1_400.0 - pos.y) / 3_000.0).clamp(-0.2, 0.4)).normalize();
+        let (pitch, roll, yaw) = steer_towards(t, state, desired, 0.8);
+        input.pitch = pitch;
+        input.roll = roll;
+        input.yaw = yaw;
     }
 }
 
@@ -758,7 +877,10 @@ fn flare_drill(
     let h = flat(t.forward().as_vec3());
     let launcher = tutorial.launcher.and_then(|e| jets.get(e).ok().map(|j| (e, j)));
     let Some((launcher, (lt, ls))) = launcher else {
-        let e = spawn_drone(&mut commands, &models, &terrain, t.translation, h, -3_500.0, -500.0, 100_000.0, 100.0);
+        let at = t.translation - h * 3_500.0 - h.cross(Vec3::Y) * 500.0;
+        // (round a huge circle off to the right: near enough straight)
+        let centre = (at + h.cross(Vec3::Y) * 100_000.0).xz();
+        let e = spawn_drone(&mut commands, &models, &terrain, at, h, centre, 100_000.0, 1.0, 100.0);
         tutorial.launcher = Some(e);
         return;
     };
@@ -882,6 +1004,9 @@ fn run_steps(
     }
     let (presses, kills, drill_done, no_rookies) =
         (tutorial.presses, tutorial.kills, tutorial.drill_done, tutorial.rookies.is_empty());
+    if let Ok((t, ..)) = player.single() {
+        tutorial.furthest = tutorial.furthest.max(from_centre(t.translation));
+    }
     let mut held_for = tutorial.held;
     let met = tutorial.ready
         && player.single().is_ok_and(|(t, state, input, targeting)| {
@@ -913,7 +1038,8 @@ fn run_steps(
     let timeout = fast.unwrap_or(step.timeout()).min(step.timeout());
     let secs = tutorial.progress.t + dt;
     if let Some((from, to, reason)) = tutorial.progress.tick(dt, met, skip, timeout) {
-        info!("tutorial: {} -> {} ({reason:?}, {secs:.1} s)", from.name(), to.name());
+        let furthest = std::mem::take(&mut tutorial.furthest);
+        info!("tutorial: {} -> {} ({reason:?}, {secs:.1} s, out to {:.1} km)", from.name(), to.name(), furthest / 1_000.0);
         let t = &mut *tutorial;
         t.ready = false;
         t.held = 0.0;
@@ -950,7 +1076,8 @@ fn autopilot(
     *missile_wait -= dt;
     let pos = t.translation;
     let fwd = t.forward().as_vec3();
-    let level = flat(fwd);
+    // (between lessons it heads back toward the middle, as a player would follow the lessons there)
+    let level = toward_centre(pos, fwd, 25.0);
     let (mut throttle, mut afterburner, mut airbrake) = (1.0, false, false);
     let mut desired = level;
     let mut roll = None;
@@ -1032,6 +1159,7 @@ const GREEN: Color = Color::srgb(0.4, 1.0, 0.55);
 const DIM: Color = Color::srgb(0.65, 0.8, 0.7);
 const WHITE: Color = Color::WHITE;
 const PANEL: Color = Color::srgba(0.02, 0.04, 0.03, 0.97);
+const PROMPT_SIZE: f32 = 22.0;
 
 #[derive(Component)]
 struct PromptRoot;
@@ -1094,7 +1222,7 @@ fn spawn_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
                     BorderColor::all(GREEN),
                     UiTransform::from_rotation(Rot2::degrees(45.0)),
                 ));
-                row.spawn((PromptText, Text::new(""), text(22.0, GREEN), shadow));
+                row.spawn((PromptText, Text::new(""), text(PROMPT_SIZE, GREEN), shadow));
             });
             root.spawn((StatusLine, Text::new(""), text(16.0, WHITE), shadow));
         });
@@ -1149,7 +1277,11 @@ fn update_ui(
         (&mut Node, Has<PromptRoot>, Has<Tick>, Has<DoneScreen>, Has<TutorialOnly>),
         Or<(With<PromptRoot>, With<Tick>, With<DoneScreen>, With<TutorialOnly>)>,
     >,
-    mut texts: Query<(&mut Text, &mut TextColor, Has<PromptText>, Has<StatusLine>), Or<(With<PromptText>, With<StatusLine>, With<StepCount>)>>,
+    mut texts: Query<
+        (&mut Text, &mut TextColor, &mut TextFont, Has<PromptText>, Has<StatusLine>),
+        Or<(With<PromptText>, With<StatusLine>, With<StepCount>)>,
+    >,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
     let on = *mode == GameMode::Tutorial && *state.get() == GameState::Playing;
     let step = tutorial.step();
@@ -1181,10 +1313,21 @@ fn update_ui(
         return;
     }
     let flash = tutorial.progress.hinting() && (time.elapsed_secs() * 4.0).fract() < 0.5;
-    for (mut text, mut color, is_prompt, is_status) in &mut texts {
+    // room for the prompt: clear of the pause button and the throttle on a phone
+    let width = crate::touch::screen_size(windows.single().ok()).map(|size| {
+        let safe = crate::platform::safe_area();
+        size.x - safe.x - safe.z - 2.0 * 80.0
+    });
+    for (mut text, mut color, mut font, is_prompt, is_status) in &mut texts {
         let (value, c) = if is_prompt {
             let c = if ticked || flash { WHITE } else { GREEN };
-            (prompt(step, *device, *control == ControlMode::Direct).to_string(), c)
+            let p = prompt(step, *device, *control == ControlMode::Direct);
+            // (the font's 0.6 em wide: shrink a long prompt to fit a narrow screen)
+            let size = width.map_or(PROMPT_SIZE, |w| (w / (p.chars().count() as f32 * 0.6)).clamp(13.0, PROMPT_SIZE));
+            if font.font_size != FontSize::Px(size) {
+                font.font_size = FontSize::Px(size);
+            }
+            (p.to_string(), c)
         } else if is_status {
             (tutorial.status.as_ref().map_or(String::new(), |(s, _)| s.clone()), WHITE)
         } else {
@@ -1332,8 +1475,41 @@ mod tests {
         }
         // to the right (+X when heading -Z)
         assert!(gates[3].pos.x > 1_000.0);
+        // and from out toward the edge, heading further out, the rings bend back in
+        for start in [Vec3::new(0.0, 1_500.0, 5_000.0), Vec3::new(-4_000.0, 1_500.0, 4_000.0), Vec3::new(6_000.0, 1_500.0, 0.0)] {
+            for heading in [Vec3::NEG_Z, Vec3::Z, Vec3::X, Vec3::NEG_X, flat(start)] {
+                let gates = ring_course(&terrain, start, heading);
+                let worst = gates.iter().map(|g| from_centre(g.pos)).fold(0.0, f32::max);
+                // (heading straight out from 5-6 km it gets to ~8 km: still inside the fine detail)
+                assert!(worst < SAFE_RADIUS + 1_500.0, "{start} {heading}: out to {worst}");
+                // and the last ring heads back in (or stays close)
+                let last = gates.last().unwrap().pos;
+                assert!(from_centre(last) < SAFE_RADIUS, "{start} {heading}: ends {last}");
+            }
+        }
         // a dive ring on flat ground keeps 250 m of air under it
         let low = ring_ahead(&terrain, Vec3::new(0.0, 300.0, 0.0), Vec3::NEG_Z, 2_400.0, -150.0);
         assert_eq!(low.pos.y, 250.0);
+    }
+
+    #[test]
+    fn targets_stay_near_the_centre() {
+        let terrain = Terrain::default();
+        // drones go on their circle round the centre, wherever the player is
+        for near in [Vec3::new(0.0, 1_500.0, 20_000.0), Vec3::new(-9_000.0, 900.0, 3_000.0), Vec3::new(10.0, 1_000.0, 0.0)] {
+            let (at, h, turn) = on_circle(near, Vec3::NEG_Z, DRONE_CIRCLE);
+            assert!((from_centre(at) - DRONE_CIRCLE).abs() < 1.0);
+            assert_eq!(at.y, near.y);
+            assert!(h.length() > 0.99 && turn.abs() == 1.0);
+        }
+        // the valley ring stays well inside, even from far out heading away
+        for (pos, heading) in [(Vec3::new(0.0, 1_500.0, 8_000.0), Vec3::Z), (Vec3::new(6_500.0, 1_500.0, 0.0), Vec3::X)] {
+            let g = valley_ring(&terrain, pos, heading);
+            assert!(from_centre(g.pos) <= SAFE_RADIUS - 1_400.0, "{pos}: {}", g.pos);
+        }
+        // turning toward the centre: none near it, up to the cap far out
+        assert_eq!(toward_centre(Vec3::new(0.0, 0.0, 1_000.0), Vec3::X, 40.0), Vec3::X);
+        let t = toward_centre(Vec3::new(0.0, 0.0, 9_000.0), Vec3::X, 40.0);
+        assert!((t.angle_between(Vec3::X).to_degrees() - 40.0).abs() < 0.1 && t.z < 0.0, "{t}");
     }
 }

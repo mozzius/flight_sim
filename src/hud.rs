@@ -52,6 +52,7 @@ impl Plugin for HUDPlugin {
             .add_systems(
                 PostUpdate,
                 (
+                    arrange,
                     spawn_markers,
                     update_markers,
                     update_center_symbols,
@@ -71,7 +72,7 @@ impl Plugin for HUDPlugin {
 }
 
 /// Which readout a text element shows.
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 enum Readout {
     Speed,
     Altitude,
@@ -151,33 +152,25 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     let font: Handle<Font> = asset_server.load("fonts/RobotoMono/RobotoMono-Medium.ttf");
     commands.insert_resource(HudFont(font.clone()));
 
-    let mut readout = |kind: Readout, node: Node, size: f32, justify: Justify| {
+    // (placed by `arrange`: see `Layout`)
+    for (kind, justify) in [
+        (Readout::Speed, Justify::Right),
+        (Readout::GLoad, Justify::Right),
+        (Readout::Altitude, Justify::Left),
+        (Readout::Throttle, Justify::Left),
+        (Readout::Weapons, Justify::Left),
+        (Readout::Health, Justify::Left),
+    ] {
+        let spot = Layout::DESKTOP.spot(Some(kind));
         commands.spawn((
             Text::new(""),
-            text(&font, size, HUD_GREEN),
+            text(&font, spot.font, HUD_GREEN),
             TextLayout::justify(justify),
             shadow(),
-            node,
+            spot.node(),
             kind,
         ));
-    };
-    let at = |left: Option<Val>, right: Option<Val>, top: Option<Val>, bottom: Option<Val>| Node {
-        position_type: PositionType::Absolute,
-        left: left.unwrap_or(Val::Auto),
-        right: right.unwrap_or(Val::Auto),
-        top: top.unwrap_or(Val::Auto),
-        bottom: bottom.unwrap_or(Val::Auto),
-        ..default()
-    };
-
-    // either side of the centre: speed + G on the left, altitude + throttle on the right
-    readout(Readout::Speed, at(None, Some(percent(66)), Some(percent(42)), None), 20.0, Justify::Right);
-    readout(Readout::GLoad, at(None, Some(percent(66)), Some(percent(52)), None), 16.0, Justify::Right);
-    readout(Readout::Altitude, at(Some(percent(66)), None, Some(percent(42)), None), 20.0, Justify::Left);
-    readout(Readout::Throttle, at(Some(percent(66)), None, Some(percent(52)), None), 16.0, Justify::Left);
-    // bottom left: weapons and health
-    readout(Readout::Weapons, at(Some(px(24)), None, None, Some(px(52))), 18.0, Justify::Left);
-    readout(Readout::Health, at(Some(px(24)), None, None, Some(px(24))), 18.0, Justify::Left);
+    }
 
     // centre warnings
     commands
@@ -317,17 +310,13 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             }
         });
     // target info, bottom right
+    let spot = Layout::DESKTOP.spot(None);
     commands.spawn((
         Text::new(""),
-        text(&font, 17.0, HOSTILE),
+        text(&font, spot.font, HOSTILE),
         TextLayout::justify(Justify::Right),
         shadow(),
-        Node {
-            position_type: PositionType::Absolute,
-            right: px(24),
-            bottom: px(24),
-            ..default()
-        },
+        spot.node(),
         TargetPanel,
     ));
     commands.spawn((
@@ -344,6 +333,186 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         UiTransform::from_rotation(Rot2::degrees(45.0)),
         CenterSymbol::OffscreenArrow,
     ));
+}
+
+/// Where a readout (or the target panel) sits: absolute insets and a font size.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Spot {
+    left: Val,
+    right: Val,
+    top: Val,
+    bottom: Val,
+    font: f32,
+}
+
+impl Spot {
+    const fn new(left: Val, right: Val, top: Val, bottom: Val, font: f32) -> Self {
+        Spot { left, right, top, bottom, font }
+    }
+
+    fn node(&self) -> Node {
+        let mut node = Node { position_type: PositionType::Absolute, ..default() };
+        self.apply(&mut node);
+        node
+    }
+
+    fn apply(&self, node: &mut Node) {
+        if (node.left, node.right, node.top, node.bottom) != (self.left, self.right, self.top, self.bottom) {
+            (node.left, node.right, node.top, node.bottom) = (self.left, self.right, self.top, self.bottom);
+        }
+    }
+}
+
+/// Where the readouts and the target panel go. On the desktop: speed + G
+/// left of centre, altitude + throttle right of it, weapons and health
+/// bottom left, the target panel bottom right. With the touch controls up
+/// they move clear of them (`Layout::touch`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Layout {
+    speed: Spot,
+    g: Spot,
+    altitude: Spot,
+    throttle: Spot,
+    weapons: Spot,
+    health: Spot,
+    panel: Spot,
+}
+
+const AUTO: Val = Val::Auto;
+
+/// A line of text at `font` px, in px (roughly).
+fn line(font: f32) -> f32 {
+    font * 1.2
+}
+
+/// `chars` characters of the (monospaced) HUD font at `font` px, in px.
+fn text_width(chars: usize, font: f32) -> f32 {
+    chars as f32 * font * 0.6
+}
+
+impl Layout {
+    const DESKTOP: Layout = Layout {
+        speed: Spot::new(AUTO, Val::Percent(66.0), Val::Percent(42.0), AUTO, 20.0),
+        g: Spot::new(AUTO, Val::Percent(66.0), Val::Percent(52.0), AUTO, 16.0),
+        altitude: Spot::new(Val::Percent(66.0), AUTO, Val::Percent(42.0), AUTO, 20.0),
+        throttle: Spot::new(Val::Percent(66.0), AUTO, Val::Percent(52.0), AUTO, 16.0),
+        weapons: Spot::new(Val::Px(24.0), AUTO, AUTO, Val::Px(52.0), 18.0),
+        health: Spot::new(Val::Px(24.0), AUTO, AUTO, Val::Px(24.0), 18.0),
+        panel: Spot::new(AUTO, Val::Px(24.0), AUTO, Val::Px(24.0), 17.0),
+    };
+
+    /// `None`: the target panel.
+    fn spot(&self, readout: Option<Readout>) -> Spot {
+        match readout {
+            Some(Readout::Speed) => self.speed,
+            Some(Readout::GLoad) => self.g,
+            Some(Readout::Altitude) => self.altitude,
+            Some(Readout::Throttle) => self.throttle,
+            Some(Readout::Weapons) => self.weapons,
+            Some(Readout::Health) => self.health,
+            None => self.panel,
+        }
+    }
+
+    /// With the touch controls up on a `size` screen (logical px; `safe`:
+    /// the safe-area insets): the speed and G readouts go up clear of the
+    /// buttons below them, weapons and health go just right of the buttons
+    /// at the bottom, and the target panel left of the throttle slider
+    /// (raised above weapons and health if they'd meet). All a little
+    /// smaller, and in pixels, since phones are short.
+    fn touch(size: Vec2, safe: Vec4, clear: &crate::touch::Clearance) -> Layout {
+        let (w, h) = (size.x, size.y);
+        // smaller type on a short screen
+        let k = (h / 400.0).clamp(0.75, 1.0);
+        // the tutorial's step count and prompt across the top (its status line is short and centred)
+        let top_min = safe.y + 84.0;
+        let under = |x0: f32, x1: f32, y0: f32, y1: f32| {
+            clear.buttons.iter().filter(move |(c, r)| {
+                let r = r * 1.15 + 6.0;
+                c.x - r < x1 && c.x + r > x0 && c.y - r < y1 && c.y + r > y0
+            })
+        };
+        // The speed and G readouts: (top, right edge, scale). Where they'd sit
+        // on the desktop (in px: 42% down, right edge 34% across) if the
+        // buttons leave room; else up clear of the buttons below, if that
+        // stays clear of the prompt; else in toward the middle, right of the
+        // buttons alongside; else all that again a size smaller.
+        let place = |k: f32, margin: f32| {
+            let (speed_h, g_h) = (2.0 * line(20.0 * k), 2.0 * line(16.0 * k));
+            let stack_h = speed_h + 4.0 + g_h;
+            let block_w = text_width(10, 20.0 * k);
+            let (x1, top) = (w * 0.34, (h * 0.42).max(top_min));
+            if under(x1 - block_w, x1, top, top + stack_h).next().is_none() {
+                return Some((top, x1));
+            }
+            let clear_top = under(x1 - block_w, x1, 0.0, h).map(|(c, r)| c.y - r * 1.15 - 6.0).fold(h, f32::min);
+            if clear_top - stack_h >= top_min {
+                return Some((clear_top - stack_h, x1));
+            }
+            let right = under(0.0, w * 0.5, top, top + stack_h).map(|(c, r)| c.x + r * 1.15 + 8.0).fold(0.0, f32::max);
+            let x1 = x1.max(right + block_w);
+            (x1 < w * 0.5 - margin).then_some((top, x1))
+        };
+        // (last, a little closer to the middle still)
+        let (speed_top, x1, k_read) = [(k, 40.0), (k * 0.88, 40.0), (k * 0.76, 40.0), (k * 0.76, 18.0)]
+            .into_iter()
+            .find_map(|(k, margin)| place(k, margin).map(|(top, x1)| (top, x1, k)))
+            .unwrap_or((top_min, w * 0.34, k * 0.76));
+        let (big, small) = (20.0 * k_read, 16.0 * k_read);
+        let speed_h = 2.0 * line(big);
+        let g_top = speed_top + speed_h + 4.0;
+        // (the right-hand pair mirrors the left)
+        let (left_x, right_x) = (Val::Px(w - x1), Val::Px(w - x1));
+
+        let ammo_left = clear.buttons_right + 14.0;
+        // "GUN 600   MSL 4 [===  ]   FLR 4/4", smaller on a narrow phone so it fits before the throttle
+        let ammo_font = ((clear.throttle_left - 12.0 - ammo_left) / text_width(34, 1.0)).clamp(11.0, 15.0 * k.max(0.85));
+        let health_bottom = safe.w + 10.0;
+        let weapons_bottom = health_bottom + line(ammo_font) + 2.0;
+        let ammo_w = text_width(34, ammo_font);
+        let panel_font = 14.0 * k.max(0.85);
+        let panel_right = w - clear.throttle_left + 12.0;
+        // "1.7 km   +314 km/h closing" (no [TAB] on touch)
+        let panel_w = text_width(27, panel_font);
+        let panel_bottom = if w - panel_right - panel_w > ammo_left + ammo_w + 16.0 {
+            health_bottom
+        } else {
+            weapons_bottom + line(ammo_font) + 12.0
+        };
+        Layout {
+            speed: Spot::new(AUTO, left_x, px(speed_top), AUTO, big),
+            g: Spot::new(AUTO, left_x, px(g_top), AUTO, small),
+            altitude: Spot::new(right_x, AUTO, px(speed_top), AUTO, big),
+            throttle: Spot::new(right_x, AUTO, px(g_top), AUTO, small),
+            weapons: Spot::new(px(ammo_left), AUTO, AUTO, px(weapons_bottom), ammo_font),
+            health: Spot::new(px(ammo_left), AUTO, AUTO, px(health_bottom), ammo_font),
+            panel: Spot::new(AUTO, px(panel_right), AUTO, px(panel_bottom), panel_font),
+        }
+    }
+}
+
+/// Moves the readouts and the target panel clear of the touch controls while
+/// they're up (and back for the desktop).
+#[allow(clippy::type_complexity)]
+fn arrange(
+    touch: Res<crate::touch::TouchInput>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut texts: Query<(Option<&Readout>, &mut Node, &mut TextFont), Or<(With<Readout>, With<TargetPanel>)>>,
+) {
+    let size = crate::touch::screen_size(windows.single().ok());
+    let layout = match size {
+        Some(size) if touch.active => {
+            Layout::touch(size, crate::platform::safe_area(), &crate::touch::clearance(size))
+        }
+        _ => Layout::DESKTOP,
+    };
+    for (readout, mut node, mut font) in &mut texts {
+        let spot = layout.spot(readout.copied());
+        spot.apply(&mut node);
+        if font.font_size != FontSize::Px(spot.font) {
+            font.font_size = FontSize::Px(spot.font);
+        }
+    }
 }
 
 /// Give every aircraft (except the player) a tracking box.
@@ -831,6 +1000,7 @@ fn gun_cue(
 /// Bottom-right: what you're locked on to.
 #[allow(clippy::type_complexity)]
 fn target_panel(
+    touch: Res<crate::touch::TouchInput>,
     player: Query<(&Transform, &FlightState, &Targeting, &Team), With<Player>>,
     aircraft: Query<(&Transform, &FlightState, &Team), (With<Aircraft>, Without<Disabled>)>,
     mut panel: Query<&mut Text, With<TargetPanel>>,
@@ -854,8 +1024,10 @@ fn target_panel(
                 "NO LOCK".to_string()
             };
             Some(format!(
-                "TGT  {} hostiles  [TAB]\n{:.1} km   {:>+5.0} km/h closing\n{:>5.0} m alt   {:>4.0} km/h\n{lock}",
+                "TGT  {} hostiles{}\n{:.1} km   {:>+5.0} km/h closing\n{:>5.0} m alt   {:>4.0} km/h\n{lock}",
                 hostiles.len(),
+                // (the keyboard's key; on touch the TGT button says it)
+                if touch.active { "" } else { "  [TAB]" },
                 to.length() / 1000.0,
                 closure * 3.6,
                 tt.translation.y,
@@ -1073,5 +1245,81 @@ fn hit_marker(
             node.top = px(p.y - 20.0);
         }
         None => node.display = Display::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (left, top, right, bottom) of a block of `lines` x `chars` text at a spot.
+    fn rect(size: Vec2, s: Spot, chars: usize, lines: usize, right_aligned_at: Option<f32>) -> Rect {
+        let (w, h) = (text_width(chars, s.font), lines as f32 * line(s.font));
+        let left = match (s.left, s.right, right_aligned_at) {
+            (_, _, Some(x)) => x - w,
+            (Val::Px(l), ..) => l,
+            (Val::Percent(p), ..) => size.x * p / 100.0,
+            (_, Val::Px(r), _) => size.x - r - w,
+            other => panic!("{other:?}"),
+        };
+        let top = match (s.top, s.bottom) {
+            (Val::Px(t), _) => t,
+            (_, Val::Px(b)) => size.y - b - h,
+            other => panic!("{other:?}"),
+        };
+        Rect::new(left, top, left + w, top + h)
+    }
+
+    fn hits(r: Rect, (c, rad): (Vec2, f32)) -> bool {
+        let nearest = c.clamp(r.min, r.max);
+        nearest.distance(c) < rad
+    }
+
+    #[test]
+    fn touch_hud_keeps_clear_of_the_buttons() {
+        // (phones in landscape at DPR 1.5-3, a tablet; 574x265 is what headless Chrome's phone emulation gave)
+        for size in [
+            Vec2::new(852.0, 393.0),
+            Vec2::new(667.0, 375.0),
+            Vec2::new(932.0, 430.0),
+            Vec2::new(574.0, 265.0),
+            Vec2::new(640.0, 300.0),
+            Vec2::new(1180.0, 820.0),
+        ] {
+            // (a notch's insets only on phone-sized screens: 574 px less 118 of insets has no room left)
+            let notch = (size.x > 600.0).then_some(Vec4::new(59.0, 0.0, 59.0, 21.0));
+            for safe in [Some(Vec4::ZERO), notch].into_iter().flatten() {
+                let clear = {
+                    // (the touch layout reads the safe area itself natively as zero: shift by hand)
+                    let mut c = crate::touch::clearance(size - Vec2::new(safe.x + safe.z, safe.w));
+                    for b in &mut c.buttons {
+                        b.0.x += safe.x;
+                    }
+                    c.buttons_right += safe.x;
+                    c.throttle_left += safe.x;
+                    c
+                };
+                let l = Layout::touch(size, safe, &clear);
+                let Val::Px(right) = l.speed.right else { panic!() };
+                let x1 = size.x - right;
+                assert!(x1 < size.x * 0.5 - 15.0, "{size} {safe}: speed into the middle ({x1})");
+                let speed = rect(size, l.speed, 10, 2, Some(x1));
+                let g = rect(size, l.g, 8, 2, Some(x1));
+                let Val::Px(top) = l.speed.top else { panic!() };
+                assert!(top >= safe.y + 84.0, "{size} {safe}: speed up in the prompt ({top})");
+                let weapons = rect(size, l.weapons, 34, 1, None);
+                let health = rect(size, l.health, 25, 1, None);
+                let panel = rect(size, l.panel, 27, 4, None);
+                for (name, r) in [("speed", speed), ("g", g), ("weapons", weapons), ("health", health), ("panel", panel)] {
+                    for b in &clear.buttons {
+                        assert!(!hits(r, *b), "{size} {safe}: {name} {r:?} on a button {b:?}");
+                    }
+                    assert!(r.max.x < clear.throttle_left, "{size} {safe}: {name} {r:?} on the throttle");
+                    assert!(r.min.y >= 0.0 && r.max.y <= size.y - safe.w, "{size} {safe}: {name} off screen {r:?}");
+                }
+                assert!(speed.max.y <= g.min.y, "{size}: speed on G");
+                assert!(panel.intersect(weapons).is_empty() && panel.intersect(health).is_empty(), "{size} {safe}: panel on ammo");
+            }
+        }
     }
 }

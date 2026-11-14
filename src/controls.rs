@@ -35,7 +35,7 @@ impl Plugin for ControlsPlugin {
             .init_resource::<ThrottleLever>()
             .init_resource::<MouseAim>()
             .init_resource::<LookAround>()
-            .insert_resource(InputDevice::pinned().unwrap_or_default())
+            .insert_resource(InputDevice::pinned().unwrap_or_else(InputDevice::at_start))
             .add_systems(
                 Update,
                 (
@@ -62,7 +62,7 @@ pub enum ControlMode {
 }
 
 /// What the player is flying with: the last thing touched (the tutorial's
-/// prompts name its controls). `FLIGHT_SIM_INPUT=keyboard|gamepad|touch`
+/// prompts name its controls), touch from the start on a touch-first device. `FLIGHT_SIM_INPUT=keyboard|gamepad|touch`
 /// pins it (touch also shows the touch controls), for screenshots.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum InputDevice {
@@ -74,6 +74,11 @@ pub enum InputDevice {
 }
 
 impl InputDevice {
+    /// Touch on a touch-first device (a phone or tablet), else the keyboard and mouse.
+    fn at_start() -> Self {
+        if crate::platform::touch_first() { Self::Touch } else { Self::Keyboard }
+    }
+
     fn pinned() -> Option<Self> {
         match crate::environment::setting("FLIGHT_SIM_INPUT")?.to_ascii_lowercase().as_str() {
             "keyboard" | "mouse" => Some(Self::Keyboard),
