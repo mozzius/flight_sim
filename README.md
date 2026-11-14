@@ -305,9 +305,11 @@ that dies uncleanly: its view expires within 10 s, and then the others end their
 hasn't been heard from for 30 s. Redis keys and channels carry the cluster version (`v<N>`, from the
 protocol version), so a deploy that changes it runs as a separate cluster until the old replicas go.
 
-Scale with `numReplicas` in `railway.json` (and push), or `railway scale --service server eu-west=<n>`
-(the next deploy resets it to `railway.json`'s). One replica works exactly as before, the bridge just
-never used. The leaderboard needs no volume (Postgres), so nothing pins the service to one replica.
+Scale with `railway scale --service server eu-west=<n>` (it redeploys with n replicas; production runs
+2). Keep `numReplicas` in `railway.json` the same: on its own (pushing a change to it) it didn't change
+the count, because the service's region setting wins. One replica works exactly as before, the bridge just
+never used. The leaderboard needs no volume (Postgres), so nothing pins the service to one replica (the
+old SQLite volume, `server-volume`, is detached but kept as a backup).
 
 Redis layout (prefix `FLIGHT_SIM_REDIS_PREFIX`, default `fs:`): `v<N>:view:*`, `v<N>:views`,
 `v<N>:queue` / `v<N>:queue:info`, channels `v<N>:all` and `v<N>:r:*`; `rl:*` (rate limits),
