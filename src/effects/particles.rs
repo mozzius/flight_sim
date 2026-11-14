@@ -29,6 +29,10 @@ use crate::camera::MainCamera;
 
 pub const MAX_PARTICLES: usize = 16_000;
 
+/// A `life` that draws a particle for exactly one frame (it dies at the next
+/// `simulate`), for glows re-emitted every frame on moving things.
+pub const ONE_FRAME: f32 = 1e-4;
+
 /// Steady breeze that carries smoke (m/s).
 pub const WIND: Vec3 = Vec3::new(5.0, 0.0, 2.0);
 
@@ -186,11 +190,14 @@ pub struct Particles {
 impl Particles {
     /// Adds a particle unless the system is full. Lower priority effects
     /// (`priority` < 1) give up earlier so explosions always have room.
-    pub fn add(&mut self, p: Particle, priority: f32) {
+    /// Returns whether it was added.
+    pub fn add(&mut self, p: Particle, priority: f32) -> bool {
         let cap = (MAX_PARTICLES as f32 * priority.clamp(0.0, 1.0)) as usize;
-        if self.list.len() < cap.max(MAX_PARTICLES / 2) {
+        let room = self.list.len() < cap.max(MAX_PARTICLES / 2);
+        if room {
             self.list.push(p);
         }
+        room
     }
 }
 
@@ -357,10 +364,11 @@ pub fn simulate(
         return;
     }
     let list = &mut particles.list;
+    let rush = smoke_rush(list.len());
     let mut i = 0;
     while i < list.len() {
         let p = &mut list[i];
-        p.age += dt;
+        p.age += if p.life > RUSH_MIN_LIFE { dt * rush } else { dt };
         let dead = p.age >= p.life || p.frame.is_some_and(|f| !frames.contains(f));
         if dead {
             list.swap_remove(i);
@@ -381,6 +389,23 @@ pub fn simulate(
         }
         i += 1;
     }
+}
+
+/// Long-lived particles (smoke trails, columns) age faster once the system
+/// is this full, so old smoke makes way for new effects instead of new ones
+/// being dropped: with a few missiles in flight their trails used to fill the
+/// budget, and the next missile launched got no smoke at all. It keeps the
+/// count well under the 3/4 mark where missile smoke gives up.
+const RUSH_FROM: f32 = MAX_PARTICLES as f32 * 0.45;
+const RUSH_FULL: f32 = MAX_PARTICLES as f32 * 0.6;
+/// Only particles that live longer than this (s) are hurried along.
+const RUSH_MIN_LIFE: f32 = 2.0;
+
+/// How much faster long-lived particles age with `n` alive: 1 up to
+/// `RUSH_FROM`, 9x at `RUSH_FULL`, and on up from there.
+fn smoke_rush(n: usize) -> f32 {
+    let x = ((n as f32 - RUSH_FROM) / (RUSH_FULL - RUSH_FROM)).max(0.0);
+    1.0 + 8.0 * x * x
 }
 
 pub struct Built {

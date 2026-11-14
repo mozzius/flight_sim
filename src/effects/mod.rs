@@ -74,7 +74,11 @@ impl Plugin for EffectsPlugin {
             )
                 .chain()
                 .in_set(EffectsSystems)
-                .after(TransformSystems::Propagate),
+                .after(TransformSystems::Propagate)
+                // the particle mesh and plume materials are rewritten here: their
+                // change events must go out this frame, or the render world draws
+                // last frame's particles (a missile's glow trailed ~10 m behind it)
+                .before(bevy::asset::AssetEventSystems),
         );
     }
 }
@@ -167,7 +171,10 @@ fn spaced(last: &mut Option<Vec3>, now: Vec3, spacing: f32, out: &mut Vec<Vec3>)
 
 /// Exhaust nozzle positions in aircraft-local space (metres).
 // measured from the model: nose at z=-12, tail fins reach z=+8.9, nozzle discs ~5.0, exit lip ~6.6-7.0. The flame starts deep inside the nozzle (the plume shader treats the first 2.4 m as the nozzle interior) so it always emerges from within, with no gap from any angle.
-const NOZZLES: [Vec3; 2] = [Vec3::new(0.75, 0.05, 4.4), Vec3::new(-0.75, 0.05, 4.4)];
+// The 2D nozzle openings (from the glTF's vertices, through the model's
+// transform in `game.rs`) span x 0.50..1.08 and y -0.13..0.68 inside the
+// flaps, so they're centred at x ±0.79, y 0.27.
+const NOZZLES: [Vec3; 2] = [Vec3::new(0.79, 0.27, 4.4), Vec3::new(-0.79, 0.27, 4.4)];
 const WINGTIPS: [Vec3; 2] = [Vec3::new(7.3, 0.0, 2.0), Vec3::new(-7.3, 0.0, 2.0)];
 const GUN_PORT: Vec3 = Vec3::new(0.9, 0.9, -7.5);
 /// Upper wing surface (right wing) as a quad: root LE, tip LE, tip TE, root TE.
@@ -225,7 +232,7 @@ fn attach_aircraft_effects(
                     },
                     noise: assets.noise.clone(),
                 })),
-                Transform::from_translation(Vec3::new(0.0, 0.05, 6.8 + plume::HAZE_HALF_LENGTH))
+                Transform::from_translation(Vec3::new(0.0, NOZZLES[0].y, 6.8 + plume::HAZE_HALF_LENGTH))
                     .with_rotation(along),
                 NotShadowCaster,
                 ChildOf(aircraft),
@@ -572,6 +579,7 @@ fn projectile_fx(
     camera: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
     mut last: Local<HashMap<Entity, Option<Vec3>>>,
     mut points: Local<Vec<Vec3>>,
+    mut trails: Local<TrailLog>,
 ) {
     let mut rng = rand::rng();
     let t = time.elapsed_secs();
@@ -579,10 +587,12 @@ fn projectile_fx(
     // world size of ~one pixel at a distance (65° fov, ~1440 px tall)
     let pixel = |p: Vec3| p.distance(cam) * 0.00088;
     last.retain(|e, _| missiles.contains(*e) || flares.contains(*e));
+    trails.report(|e| missiles.contains(e));
     for (entity, gt, missile) in &missiles {
-        // missile meshes point along local +Y; the motor is at -Y
-        let motor = gt.transform_point(Vec3::new(0.0, -2.0, 0.0));
-        let dir = missile.velocity.normalize_or(Vec3::Y);
+        // missile meshes point along local -Y (looking_to(velocity) then +90°
+        // about X takes -Y to -Z); the motor is at +Y
+        const MOTOR: Vec3 = Vec3::new(0.0, 2.0, 0.0);
+        let motor = gt.transform_point(MOTOR);
         let flick = plume::turbulence(t * 1.7, entity.index().index() as f32);
         // never let it shrink below a few pixels, so missiles stay visible far out
         let min_size = pixel(motor) * 4.0;
@@ -591,11 +601,12 @@ fn projectile_fx(
             let s = (0.8_f32).max(min_size * 0.7);
             particles.add(
                 Particle {
-                    life: 0.025,
+                    life: particles::ONE_FRAME,
                     size: (s, s),
                     glow: 1.5,
                     heat: 0.3,
-                    ..Particle::glow(motor)
+                    frame: Some(entity),
+                    ..Particle::glow(MOTOR)
                 },
                 1.0,
             );
@@ -605,12 +616,15 @@ fn projectile_fx(
         let boost = missile.motor_burning();
         // hot exhaust flame just behind the nozzle
         let s = (if boost { 2.2 } else { 1.4 } * flick).max(min_size);
+        // (riding on the missile, for exactly one frame: a world-space glow
+        // that outlived its frame hung in the air ~10 m behind, a second light)
         particles.add(
             Particle {
-                life: 0.025,
+                life: particles::ONE_FRAME,
                 size: (s, s),
                 glow: if boost { 6.5 } else { 4.0 },
-                ..Particle::glow(motor - dir * 0.8)
+                frame: Some(entity),
+                ..Particle::glow(MOTOR + Vec3::Y * 0.8)
             },
             1.0,
         );
@@ -620,8 +634,10 @@ fn projectile_fx(
         // the sustainer leaves a thinner trail
         spaced(entry, motor, if boost { 1.1 } else { 1.6 }, &mut points);
         let thin = if boost { 1.0 } else { 0.75 };
+        let stats = trails.missiles.entry(entity).or_insert((0, 0, particles.list.len()));
         for &p in points.iter() {
-            particles.add(
+            stats.1 += 1;
+            stats.0 += particles.add(
                 Particle {
                     vel: missile.velocity * 0.04 + rand_dir(&mut rng) * 2.5,
                     life: rng.random_range(10.0..14.0),
@@ -642,7 +658,7 @@ fn projectile_fx(
                     ..Particle::puff(p + rand_dir(&mut rng) * 0.3)
                 },
                 0.75,
-            );
+            ) as u32;
         }
     }
     for (entity, gt) in &flares {
@@ -650,11 +666,12 @@ fn projectile_fx(
         let flick = plume::turbulence(t * 2.0, entity.index().index() as f32);
         particles.add(
             Particle {
-                life: 0.025,
+                life: particles::ONE_FRAME,
                 size: (7.0 * flick, 7.0 * flick),
                 glow: 3.5,
                 heat: 1.3,
-                ..Particle::glow(pos)
+                frame: Some(entity),
+                ..Particle::glow(Vec3::ZERO)
             },
             1.0,
         );
@@ -686,6 +703,39 @@ fn projectile_fx(
                 0.4,
             );
         }
+    }
+}
+
+/// `FLIGHT_SIM_LOG_MISSILES=1`: logs how much of each missile's smoke trail
+/// made it into the particle budget once the missile is gone.
+#[derive(Default)]
+struct TrailLog {
+    /// puffs added, puffs tried, live particles when it first emitted
+    missiles: HashMap<Entity, (u32, u32, usize)>,
+    count: u32,
+    bare: u32,
+}
+
+impl TrailLog {
+    fn report(&mut self, alive: impl Fn(Entity) -> bool) {
+        let log = std::env::var("FLIGHT_SIM_LOG_MISSILES").is_ok();
+        let (count, bare) = (&mut self.count, &mut self.bare);
+        self.missiles.retain(|&e, &mut (added, tried, at_launch)| {
+            if alive(e) {
+                return true;
+            }
+            if log {
+                *count += 1;
+                // most of its trail missing reads as no plume at all
+                let missing = added * 10 < tried;
+                *bare += missing as u32;
+                info!(
+                    "missile {count}: smoke {added}/{tried} puffs{} ({at_launch} particles at launch; {bare} of {count} bare so far)",
+                    if missing { " NO PLUME" } else { "" },
+                );
+            }
+            false
+        });
     }
 }
 

@@ -582,7 +582,9 @@ pub fn spawn_missile(commands: &mut Commands, assets: &ProjectileAssets, missile
             MissileFlame,
             Mesh3d(assets.flame_mesh.clone()),
             MeshMaterial3d(assets.flame_material.clone()),
-            Transform::from_xyz(0.0, -1.9, 0.0).with_scale(Vec3::new(1.0, 2.5, 1.0)),
+            // the mesh's local -Y points along the flight path (see `move_missiles`),
+            // so the motor is at +Y
+            Transform::from_xyz(0.0, 1.9, 0.0).with_scale(Vec3::new(1.0, 2.5, 1.0)),
         ))
         .id()
 }

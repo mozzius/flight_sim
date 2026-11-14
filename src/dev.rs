@@ -405,8 +405,13 @@ fn fx_test_explosion(
 
 /// `FLIGHT_SIM_CAM=<yaw°>,<pitch°>,<distance m>`: park the camera at a fixed
 /// spot relative to the player's jet (yaw 0 = straight behind), for close-ups.
+/// A fourth value `<x>,<y>,<z>` (three more numbers) moves the focus point
+/// (aircraft-local, default 0,0,6). `FLIGHT_SIM_CAM_MISSILE=1` orbits the
+/// newest missile instead (yaw 0 = behind it, along its flight path).
+#[allow(clippy::type_complexity)]
 fn orbit_camera(
     player: Query<&Transform, (With<crate::game::Player>, Without<crate::camera::MainCamera>)>,
+    missiles: Query<(&GlobalTransform, &crate::weapons::Missile), Without<crate::camera::MainCamera>>,
     mut camera: Query<(&mut Transform, &mut GlobalTransform), With<crate::camera::MainCamera>>,
 ) {
     let v: Vec<f32> = std::env::var("FLIGHT_SIM_CAM")
@@ -414,14 +419,27 @@ fn orbit_camera(
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
-    let [yaw, pitch, dist] = v[..] else { return };
-    let (Ok(plane), Ok((mut cam, mut global))) = (player.single(), camera.single_mut()) else {
-        return;
+    let (yaw, pitch, dist, offset) = match v[..] {
+        [yaw, pitch, dist] => (yaw, pitch, dist, Vec3::new(0.0, 0.0, 6.0)),
+        [yaw, pitch, dist, x, y, z] => (yaw, pitch, dist, Vec3::new(x, y, z)),
+        _ => return,
+    };
+    let Ok((mut cam, mut global)) = camera.single_mut() else { return };
+    let missile = std::env::var("FLIGHT_SIM_CAM_MISSILE").is_ok();
+    let frame = if missile {
+        // the youngest missile, framed like a jet: -Z along its flight path
+        let Some((gt, m)) = missiles.iter().min_by(|a, b| a.1.age.total_cmp(&b.1.age)) else {
+            return;
+        };
+        Transform::from_translation(gt.translation()).looking_to(m.velocity, Vec3::Y)
+    } else {
+        let Ok(plane) = player.single() else { return };
+        *plane
     };
     let dir = Quat::from_rotation_y(yaw.to_radians()) * Quat::from_rotation_x(-pitch.to_radians()) * Vec3::Z;
-    let focus = plane.transform_point(Vec3::new(0.0, 0.0, 6.0));
-    cam.translation = focus + plane.rotation * dir * dist;
-    cam.look_at(focus, plane.up());
+    let focus = frame.transform_point(if missile { Vec3::ZERO } else { offset });
+    cam.translation = focus + frame.rotation * dir * dist;
+    cam.look_at(focus, frame.up());
     // runs after propagation (so it wins over the chase camera): the camera
     // has no parent, so its global transform is just its transform
     *global = GlobalTransform::from(*cam);

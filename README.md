@@ -109,7 +109,7 @@ tablets get a lighter scene (fewer trees, half-res terrain textures; SETTINGS â†
 `FLIGHT_SIM_LOG=1` (FPS + flight state each second), `FLIGHT_SIM_AUTOPILOT=1`
 (the AI flies your jet), `FLIGHT_SIM_NO_HUD=1` (no HUD or player jet), `FLIGHT_SIM_FX_TEST=1` (afterburner + an explosion),
 `TERRAIN_DEBUG_CAM=1..4` (terrain viewpoints), `FLIGHT_SIM_FX_TEST=explosion|engines|missile|vapour|...`
-(staged effects), `CLOUDS_DEBUG_CAM=above|below|inside|band|sun|horizon` (`CLOUDS_DEBUG_CAM_SPEED=<m/s>` flies it, `CLOUDS_DEBUG_CAM_H=<0..1>` sets the band height), `CLOUDS_DEBUG=1|2` (opacity | march steps), `CLOUDS_DIV=2..4` (cloud
+(staged effects; `FLIGHT_SIM_CAM=<yaw>,<pitch>,<dist>` parks the camera by the jet, `FLIGHT_SIM_CAM_MISSILE=1` by the newest missile), `FLIGHT_SIM_LOG_MISSILES=1` (how much of each missile's smoke trail fit in the particle budget), `CLOUDS_DEBUG_CAM=above|below|inside|band|sun|horizon` (`CLOUDS_DEBUG_CAM_SPEED=<m/s>` flies it, `CLOUDS_DEBUG_CAM_H=<0..1>` sets the band height), `CLOUDS_DEBUG=1|2` (opacity | march steps), `CLOUDS_DIV=2..4` (cloud
 resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FLIGHT_SIM_PAUSE_TEST=1`, `FLIGHT_SIM_KILL_TEST=1`,
 `FLIGHT_SIM_NO_INTRO=1`, `FLIGHT_SIM_TEXTURE_DIV=2` (bake the terrain textures at the web's resolution), `FLIGHT_SIM_SEED=<n>` (fly that map; screenshot runs default to
 seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene, whatever GRAPHICS says),
