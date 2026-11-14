@@ -309,11 +309,20 @@ async fn connection(socket: WebSocket, shared: Shared) {
     let _open = metrics::OpenSocket::new();
     let m = &metrics::M;
     let (mut sink, mut stream) = socket.split();
-    let reply = |msg: ServerMsg| Message::Binary(Bytes::from(encode(&msg)));
+    let reply = |msg: ServerMsg| {
+        let bytes = Bytes::from(encode(&msg));
+        m.ws_messages_out.inc();
+        m.ws_bytes_out.add(bytes.len() as u64);
+        Message::Binary(bytes)
+    };
 
     // first frame: Hello with a service-auth token
     let hello = match tokio::time::timeout(HELLO_TIMEOUT, stream.next()).await {
-        Ok(Some(Ok(Message::Binary(b)))) => decode::<ClientMsg>(&b),
+        Ok(Some(Ok(Message::Binary(b)))) => {
+            m.ws_messages_in.inc();
+            m.ws_bytes_in.add(b.len() as u64);
+            decode::<ClientMsg>(&b)
+        }
         _ => None,
     };
     let Some(ClientMsg::Hello { version, token }) = hello else {
