@@ -332,13 +332,13 @@ fn update_indicator(
         .world_to_viewport(cam_gt, gate.pos)
         .ok()
         .filter(|s| in_front && s.x > 0.0 && s.y > 0.0 && s.x < viewport.x && s.y < viewport.y);
-    // off screen: an arrow on a ring around the centre (inside the target arrow's)
+    // off screen: an arrow on a ring around the centre (outside the side readouts)
     let (anchor, dir) = match on_screen {
         Some(s) => (s, Vec2::ZERO),
         None => {
             let rel = cam_gt.affine().inverse().transform_point3(gate.pos);
             let dir = Vec2::new(rel.x, -rel.y).normalize_or(Vec2::Y);
-            (viewport / 2.0 + dir * (viewport.min_element() * 0.32), dir)
+            (viewport / 2.0 + dir * (viewport.min_element() * 0.43), dir)
         }
     };
     let distance = format_distance(plane.translation.distance(gate.pos));
