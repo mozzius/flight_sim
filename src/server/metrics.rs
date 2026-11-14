@@ -7,6 +7,18 @@
 //! labelled events take a mutex. Gauges (who's online, the rooms, the queue)
 //! live in the game loop, which copies a [`Gauges`] snapshot into [`GAUGES`]
 //! once a second; a scrape just formats what's there.
+//!
+//! Across replicas (a scrape lands on any one of them), the numbers are the
+//! cluster's, so the dashboard's queries don't change: each replica adds
+//! its counters' increases to totals in the shared store every
+//! [`PUSH_EVERY`] ([`flat`] → `Backend::push_metrics`), and a scrape renders
+//! those totals (only what's been pushed, so every replica answers the same
+//! ever-growing numbers; a replica that restarts never makes a counter go
+//! backwards). The gauges are the sum of every live replica's (each
+//! publishes its own in its view), except `players_online` (every replica
+//! knows the cluster's distinct players) and `leaderboard_players` (one
+//! shared database). The build, uptime and start time are per replica, with
+//! a `replica` label, and `replicas` counts them.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -14,7 +26,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::protocol::{MAX_PLAYERS, PROTOCOL_VERSION};
+
+/// Counter increases go to the cluster's totals this often.
+pub const PUSH_EVERY: Duration = Duration::from_secs(5);
 
 /// A monotonic count.
 pub struct Counter(AtomicU64);
@@ -56,7 +73,7 @@ impl Family {
         let key: Vec<String> = values.iter().map(|v| v.to_string()).collect();
         *self.values.lock().unwrap().entry(key).or_default() += 1;
     }
-    fn snapshot(&self) -> Vec<(String, u64)> {
+    pub fn snapshot(&self) -> Vec<(String, u64)> {
         let values = self.values.lock().unwrap();
         values.iter().map(|(v, n)| (label_set(self.labels, v), *n)).collect()
     }
@@ -122,6 +139,8 @@ pub struct Metrics {
     pub appview_errors: Family,
     pub appview_latency: Histogram,
     pub tick: Histogram,
+    /// Envelopes between replicas, by direction (`sent` / `received`).
+    pub cluster_messages: Family,
     /// Open WebSockets, signed in or not (it's the sockets that keep it, so not a snapshot).
     pub ws_open: AtomicU64,
 }
@@ -149,6 +168,7 @@ pub static M: Metrics = Metrics {
     appview_errors: Family::new(&["method"]),
     appview_latency: Histogram::new(HTTP_BUCKETS),
     tick: Histogram::new(TICK_BUCKETS),
+    cluster_messages: Family::new(&["direction"]),
     ws_open: AtomicU64::new(0),
 };
 
@@ -169,7 +189,7 @@ impl Drop for OpenSocket {
 }
 
 /// The game loop's state, copied out once a second.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Gauges {
     /// Distinct signed-in players.
     pub players_online: u64,
@@ -184,9 +204,47 @@ pub struct Gauges {
     pub queue: u64,
     pub pending_requests: u64,
     pub leaderboard: u64,
+    /// Open WebSockets, signed in or not.
+    pub websockets: u64,
 }
 
-pub static GAUGES: LazyLock<Mutex<Gauges>> = LazyLock::new(Default::default);
+impl Gauges {
+    /// Adds another replica's (except the cluster-wide two, which are the same everywhere).
+    pub fn add(&mut self, o: &Gauges) {
+        self.signed_in += o.signed_in;
+        for k in 0..2 {
+            for s in 0..2 {
+                self.rooms[k][s] += o.rooms[k][s];
+            }
+            self.in_rooms[k] += o.in_rooms[k];
+        }
+        for (a, b) in self.sizes.iter_mut().zip(o.sizes) {
+            *a += b;
+        }
+        self.queue += o.queue;
+        self.pending_requests += o.pending_requests;
+        self.websockets += o.websockets;
+    }
+}
+
+/// A replica, for the per-replica series.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Replica {
+    pub id: String,
+    pub git: String,
+    pub version: String,
+    /// Unix seconds.
+    pub started: f64,
+}
+
+/// What a scrape shows besides the counters: the cluster's gauges, and the live replicas.
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    pub gauges: Gauges,
+    pub replicas: Vec<Replica>,
+}
+
+pub static GAUGES: LazyLock<Mutex<Snapshot>> = LazyLock::new(Default::default);
 static STARTED: LazyLock<(Instant, f64)> = LazyLock::new(|| {
     let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
     (Instant::now(), unix)
@@ -212,22 +270,86 @@ fn seed(m: &Metrics) {
     m.challenge_runs.seed(&["accepted", ""]);
     each(&m.appview_calls, &["getRelationships", "getProfiles"]);
     each(&m.appview_errors, &["getRelationships", "getProfiles"]);
+    each(&m.cluster_messages, &["sent", "received"]);
 }
 
-/// The build: the commit Railway deployed (`RAILWAY_GIT_COMMIT_SHA`, or
-/// `FLIGHT_SIM_GIT_HASH` at compile time), the crate version and the protocol.
-fn build_labels() -> String {
+/// This process: the commit Railway deployed (`RAILWAY_GIT_COMMIT_SHA`, or
+/// `FLIGHT_SIM_GIT_HASH` at compile time), the crate version, and when it started.
+pub fn this_replica(id: &str) -> Replica {
     let git = std::env::var("RAILWAY_GIT_COMMIT_SHA")
         .ok()
         .or(option_env!("FLIGHT_SIM_GIT_HASH").map(str::to_string))
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().take(12).collect())
         .unwrap_or_else(|| "unknown".to_string());
+    Replica { id: id.to_string(), git, version: env!("CARGO_PKG_VERSION").to_string(), started: STARTED.1 }
+}
+
+fn build_labels(r: &Replica) -> String {
     format!(
-        "git=\"{}\",version=\"{}\",protocol=\"{PROTOCOL_VERSION}\"",
-        escape(&git),
-        env!("CARGO_PKG_VERSION")
+        "replica=\"{}\",git=\"{}\",version=\"{}\",protocol=\"{PROTOCOL_VERSION}\"",
+        escape(&r.id),
+        escape(&r.git),
+        escape(&r.version)
     )
+}
+
+/// Every counter and histogram as flat series → value: `name` or
+/// `name{labels}` for counters; histograms as their raw (not cumulative)
+/// bucket counts, `name_bucket{le="…"}`, and `name_sum_nanos`. What's pushed
+/// to the cluster's totals, and what [`render`] reads.
+pub fn flat(m: &Metrics) -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    let mut counter = |name: &str, c: &Counter| {
+        out.insert(name.to_string(), c.get());
+    };
+    counter("ws_messages_in_total", &m.ws_messages_in);
+    counter("ws_messages_out_total", &m.ws_messages_out);
+    counter("ws_bytes_in_total", &m.ws_bytes_in);
+    counter("ws_bytes_out_total", &m.ws_bytes_out);
+    counter("ws_messages_dropped_total", &m.ws_dropped);
+    counter("queue_matches_total", &m.queue_matches);
+    counter("kills_total", &m.kills);
+    counter("challenge_starts_total", &m.challenge_starts);
+    for (name, f) in families(m) {
+        for (labels, n) in f.snapshot() {
+            out.insert(format!("{name}{{{labels}}}"), n);
+        }
+    }
+    for (name, h) in histograms(m) {
+        for (i, b) in h.bounds.iter().enumerate() {
+            out.insert(format!("{name}_bucket{{le=\"{b}\"}}"), h.counts[i].load(Ordering::Relaxed));
+        }
+        out.insert(format!("{name}_bucket{{le=\"+Inf\"}}"), h.over.load(Ordering::Relaxed));
+        out.insert(format!("{name}_sum_nanos"), h.sum_nanos.load(Ordering::Relaxed));
+    }
+    out
+}
+
+fn families(m: &Metrics) -> [(&'static str, &Family); 12] {
+    [
+        ("auth_attempts_total", &m.auth),
+        ("rooms_created_total", &m.rooms_created),
+        ("joins_total", &m.joins),
+        ("quickplay_total", &m.quickplay),
+        ("queue_exits_total", &m.queue_exits),
+        ("invites_total", &m.invites),
+        ("join_requests_total", &m.join_requests),
+        ("deaths_total", &m.deaths),
+        ("challenge_runs_total", &m.challenge_runs),
+        ("appview_calls_total", &m.appview_calls),
+        ("appview_errors_total", &m.appview_errors),
+        ("cluster_messages_total", &m.cluster_messages),
+    ]
+}
+
+fn histograms(m: &Metrics) -> [(&'static str, &Histogram); 3] {
+    [("queue_wait_seconds", &m.queue_wait), ("appview_latency_seconds", &m.appview_latency), ("tick_seconds", &m.tick)]
+}
+
+/// What's grown since `last` (and `last` becomes `now`'s).
+pub fn deltas(now: &BTreeMap<String, u64>, last: &BTreeMap<String, u64>) -> Vec<(String, u64)> {
+    now.iter().map(|(k, v)| (k.clone(), v.saturating_sub(last.get(k).copied().unwrap_or(0)))).filter(|(k, d)| *d > 0 || !last.contains_key(k)).collect()
 }
 
 /// `a="x",b="y"`
@@ -272,43 +394,57 @@ impl Writer {
         self.head(name, "gauge", help);
         self.sample(name, "", v);
     }
-    fn counter(&mut self, name: &str, help: &str, c: &Counter) {
+    fn counter(&mut self, name: &str, help: &str, t: &BTreeMap<String, u64>) {
         self.head(name, "counter", help);
-        self.sample(name, "", c.get());
+        self.sample(name, "", t.get(name).copied().unwrap_or(0));
     }
-    fn family(&mut self, name: &str, help: &str, f: &Family) {
+    fn family(&mut self, name: &str, help: &str, t: &BTreeMap<String, u64>) {
         self.head(name, "counter", help);
-        for (labels, n) in f.snapshot() {
-            self.sample(name, &labels, n);
+        let prefix = format!("{name}{{");
+        for (series, n) in t.range(prefix.clone()..).take_while(|(k, _)| k.starts_with(&prefix)) {
+            let labels = &series[prefix.len()..series.len() - 1];
+            self.sample(name, labels, n);
         }
     }
-    fn histogram(&mut self, name: &str, help: &str, h: &Histogram) {
+    fn histogram(&mut self, name: &str, help: &str, bounds: &[f64], t: &BTreeMap<String, u64>) {
         self.head(name, "histogram", help);
+        let get = |k: String| t.get(&k).copied().unwrap_or(0);
         let mut total = 0;
-        for (i, b) in h.bounds.iter().enumerate() {
-            total += h.counts[i].load(Ordering::Relaxed);
+        for b in bounds {
+            total += get(format!("{name}_bucket{{le=\"{b}\"}}"));
             self.sample(&format!("{name}_bucket"), &format!("le=\"{b}\""), total);
         }
-        total += h.over.load(Ordering::Relaxed);
+        total += get(format!("{name}_bucket{{le=\"+Inf\"}}"));
         self.sample(&format!("{name}_bucket"), "le=\"+Inf\"", total);
-        self.sample(&format!("{name}_sum"), "", h.sum_nanos.load(Ordering::Relaxed) as f64 / 1e9);
+        self.sample(&format!("{name}_sum"), "", get(format!("{name}_sum_nanos")) as f64 / 1e9);
         self.sample(&format!("{name}_count"), "", total);
     }
 }
 
-/// The whole exposition.
-pub fn render(g: &Gauges, m: &Metrics) -> String {
+/// The whole exposition: the cluster's gauges and replicas (`s`), and the
+/// counter totals (`t`: [`flat`]'s series, summed over the cluster).
+pub fn render(s: &Snapshot, t: &BTreeMap<String, u64>) -> String {
     let mut w = Writer(String::with_capacity(8 * 1024));
-    let (t0, unix0) = *STARTED;
+    let g = &s.gauges;
+    let unix_now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
 
-    w.head("build_info", "gauge", "The running build (labels), always 1.");
-    w.sample("build_info", &build_labels(), 1);
-    w.gauge("uptime_seconds", "Seconds since the server started.", format!("{:.0}", t0.elapsed().as_secs_f64()));
-    w.gauge("start_time_seconds", "When the server started (unix seconds).", format!("{unix0:.0}"));
+    w.head("build_info", "gauge", "The running build of each replica (labels), always 1.");
+    for r in &s.replicas {
+        w.sample("build_info", &build_labels(r), 1);
+    }
+    w.head("uptime_seconds", "gauge", "Seconds since each replica started.");
+    for r in &s.replicas {
+        w.sample("uptime_seconds", &format!("replica=\"{}\"", escape(&r.id)), format!("{:.0}", (unix_now - r.started).max(0.0)));
+    }
+    w.head("start_time_seconds", "gauge", "When each replica started (unix seconds).");
+    for r in &s.replicas {
+        w.sample("start_time_seconds", &format!("replica=\"{}\"", escape(&r.id)), format!("{:.0}", r.started));
+    }
+    w.gauge("replicas", "Live server replicas.", s.replicas.len());
 
     w.gauge("players_online", "Distinct signed-in players.", g.players_online);
     w.gauge("connections_signed_in", "Signed-in WebSocket connections.", g.signed_in);
-    w.gauge("websocket_connections", "Open WebSocket connections, signed in or not.", m.ws_open.load(Ordering::Relaxed));
+    w.gauge("websocket_connections", "Open WebSocket connections, signed in or not.", g.websockets);
 
     const KINDS: [&str; 2] = ["public", "hosted"];
     w.head("players_in_rooms", "gauge", "Players in rooms, by room kind.");
@@ -331,30 +467,31 @@ pub fn render(g: &Gauges, m: &Metrics) -> String {
     w.gauge("join_requests_pending", "Join requests waiting for the host.", g.pending_requests);
     w.gauge("leaderboard_players", "Players on the challenge leaderboard.", g.leaderboard);
 
-    w.family("auth_attempts_total", "WebSocket sign-ins by result.", &m.auth);
-    w.counter("ws_messages_in_total", "WebSocket frames received.", &m.ws_messages_in);
-    w.counter("ws_messages_out_total", "WebSocket frames sent.", &m.ws_messages_out);
-    w.counter("ws_bytes_in_total", "WebSocket payload bytes received.", &m.ws_bytes_in);
-    w.counter("ws_bytes_out_total", "WebSocket payload bytes sent.", &m.ws_bytes_out);
-    w.counter("ws_messages_dropped_total", "Frames dropped by the per-connection rate limit.", &m.ws_dropped);
+    w.family("auth_attempts_total", "WebSocket sign-ins by result.", t);
+    w.counter("ws_messages_in_total", "WebSocket frames received.", t);
+    w.counter("ws_messages_out_total", "WebSocket frames sent.", t);
+    w.counter("ws_bytes_in_total", "WebSocket payload bytes received.", t);
+    w.counter("ws_bytes_out_total", "WebSocket payload bytes sent.", t);
+    w.counter("ws_messages_dropped_total", "Frames dropped by the per-connection rate limit.", t);
 
-    w.family("rooms_created_total", "Rooms created, by kind.", &m.rooms_created);
-    w.family("joins_total", "Players into a room, by how they got there.", &m.joins);
-    w.family("quickplay_total", "QUICK PLAY presses: straight into a room, or queued.", &m.quickplay);
-    w.counter("queue_matches_total", "New public rooms made from the queue.", &m.queue_matches);
-    w.family("queue_exits_total", "Players out of the queue, by outcome.", &m.queue_exits);
-    w.histogram("queue_wait_seconds", "Time in the queue before a match.", &m.queue_wait);
-    w.family("invites_total", "Invites, by result.", &m.invites);
-    w.family("join_requests_total", "Join requests, by outcome.", &m.join_requests);
-    w.counter("kills_total", "Kills credited to a player.", &m.kills);
-    w.family("deaths_total", "Deaths, by cause (shot down, or a crash nobody gets credit for).", &m.deaths);
-    w.counter("challenge_starts_total", "Challenge rounds started.", &m.challenge_starts);
-    w.family("challenge_runs_total", "Challenge runs submitted, by result and reason.", &m.challenge_runs);
+    w.family("rooms_created_total", "Rooms created, by kind.", t);
+    w.family("joins_total", "Players into a room, by how they got there.", t);
+    w.family("quickplay_total", "QUICK PLAY presses: straight into a room, or queued.", t);
+    w.counter("queue_matches_total", "New public rooms made from the queue.", t);
+    w.family("queue_exits_total", "Players out of the queue, by outcome.", t);
+    w.histogram("queue_wait_seconds", "Time in the queue before a match.", WAIT_BUCKETS, t);
+    w.family("invites_total", "Invites, by result.", t);
+    w.family("join_requests_total", "Join requests, by outcome.", t);
+    w.counter("kills_total", "Kills credited to a player.", t);
+    w.family("deaths_total", "Deaths, by cause (shot down, or a crash nobody gets credit for).", t);
+    w.counter("challenge_starts_total", "Challenge rounds started.", t);
+    w.family("challenge_runs_total", "Challenge runs submitted, by result and reason.", t);
 
-    w.family("appview_calls_total", "AppView calls, by method.", &m.appview_calls);
-    w.family("appview_errors_total", "Failed AppView calls, by method.", &m.appview_errors);
-    w.histogram("appview_latency_seconds", "AppView call latency.", &m.appview_latency);
-    w.histogram("tick_seconds", "Time the game loop spends per tick.", &m.tick);
+    w.family("appview_calls_total", "AppView calls, by method.", t);
+    w.family("appview_errors_total", "Failed AppView calls, by method.", t);
+    w.histogram("appview_latency_seconds", "AppView call latency.", HTTP_BUCKETS, t);
+    w.histogram("tick_seconds", "Time the game loop spends per tick.", TICK_BUCKETS, t);
+    w.family("cluster_messages_total", "Envelopes between replicas, by direction.", t);
     w.0
 }
 
@@ -394,10 +531,12 @@ mod tests {
             appview_errors: Family::new(&["method"]),
             appview_latency: Histogram::new(HTTP_BUCKETS),
             tick: Histogram::new(TICK_BUCKETS),
+            cluster_messages: Family::new(&["direction"]),
             ws_open: AtomicU64::new(3),
         };
         seed(&m);
-        assert!(render(&Gauges::default(), &m).contains("flightsim_joins_total{method=\"invite\"} 0\n"), "seeded at 0");
+        let one = Snapshot { replicas: vec![this_replica("r1")], ..Default::default() };
+        assert!(render(&one, &flat(&m)).contains("flightsim_joins_total{method=\"invite\"} 0\n"), "seeded at 0");
         m.auth.inc(&["ok"]);
         m.auth.inc(&["ok"]);
         m.auth.inc(&["rejected"]);
@@ -406,10 +545,13 @@ mod tests {
         m.tick.observe(Duration::from_micros(80));
         m.tick.observe(Duration::from_micros(80));
         m.tick.observe(Duration::from_secs(1));
-        let mut g = Gauges { players_online: 5, ..Default::default() };
+        let mut g = Gauges { players_online: 5, websockets: 3, ..Default::default() };
         g.rooms[1][0] = 2;
         g.sizes[3] = 1;
-        let text = render(&g, &m);
+        let snap = Snapshot { gauges: g, replicas: vec![this_replica("r1"), Replica { id: "r2".into(), ..this_replica("r1") }] };
+        let text = render(&snap, &flat(&m));
+        assert!(text.contains("flightsim_replicas 2\n"));
+        assert!(text.contains("flightsim_uptime_seconds{replica=\"r2\"}"));
 
         for line in ["flightsim_players_online 5", "flightsim_websocket_connections 3", "flightsim_ws_bytes_in_total 1234"] {
             assert!(text.lines().any(|l| l == line), "{line} missing in\n{text}");
@@ -419,7 +561,7 @@ mod tests {
         assert!(text.contains("flightsim_challenge_runs_total{result=\"rejected\",reason=\"too_quick\"} 1\n"));
         assert!(text.contains("flightsim_rooms{kind=\"hosted\",state=\"lobby\"} 2\n"));
         assert!(text.contains("flightsim_room_size_max 3\n"));
-        let build = text.lines().find(|l| l.starts_with("flightsim_build_info{git=\"")).expect("build info");
+        let build = text.lines().find(|l| l.starts_with("flightsim_build_info{replica=\"r1\",git=\"")).expect("build info");
         assert!(build.ends_with(&format!(",version=\"{}\",protocol=\"{PROTOCOL_VERSION}\"}} 1", env!("CARGO_PKG_VERSION"))), "{build}");
         // cumulative buckets, +Inf = count
         assert!(text.contains("flightsim_tick_seconds_bucket{le=\"0.00005\"} 0\n"));
@@ -446,6 +588,23 @@ mod tests {
             let base = ["_bucket", "_sum", "_count"].iter().find_map(|s| name.strip_suffix(s)).filter(|b| typed.contains(*b));
             assert!(typed.contains(name) || base.is_some(), "{name} has no TYPE");
         }
+    }
+
+    #[test]
+    fn deltas_are_what_grew_and_sum_across_replicas() {
+        let mut last = BTreeMap::new();
+        let now: BTreeMap<String, u64> = [("kills_total".to_string(), 3), ("joins_total{method=\"code\"}".to_string(), 0)].into();
+        // the first push sends every series, zeros too (so they exist at 0)
+        assert_eq!(deltas(&now, &last).len(), 2);
+        last = now.clone();
+        let later: BTreeMap<String, u64> = [("kills_total".to_string(), 5), ("joins_total{method=\"code\"}".to_string(), 0)].into();
+        assert_eq!(deltas(&later, &last), vec![("kills_total".to_string(), 2)]);
+        // two replicas' gauges add up, but the cluster-wide ones don't
+        let mut a = Gauges { players_online: 4, signed_in: 3, queue: 1, leaderboard: 9, websockets: 3, ..Default::default() };
+        a.rooms[0][1] = 1;
+        let b = Gauges { players_online: 4, signed_in: 1, queue: 1, leaderboard: 9, websockets: 2, ..Default::default() };
+        a.add(&b);
+        assert_eq!((a.players_online, a.signed_in, a.queue, a.leaderboard, a.websockets, a.rooms[0][1]), (4, 4, 2, 9, 5, 1));
     }
 
     #[test]

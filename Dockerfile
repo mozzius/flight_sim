@@ -1,9 +1,11 @@
 # The multiplayer server (src/server). Build from the repo root:
 #   docker build -t flight-sim-server .
 #   docker run -p 8080:8080 -e FLIGHT_SIM_DEV_AUTH=1 -v flight-sim-data:/data flight-sim-server
-# The leaderboard is a SQLite file at FLIGHT_SIM_DB (/data/flight_sim.db): mount a
-# volume at /data so it survives redeploys. (rusqlite builds SQLite itself with the
-# image's C compiler, so the runtime needs no library.)
+# With DATABASE_URL the leaderboard is in Postgres (and a SQLite file at FLIGHT_SIM_DB,
+# /data/flight_sim.db, is imported once into an empty one); without it, that SQLite file
+# is the leaderboard (mount a volume at /data so it survives redeploys). REDIS_URL lets
+# several replicas share state (see README, "Scaling"). (rusqlite builds SQLite itself
+# with the image's C compiler, so the runtime needs no library.)
 FROM rust:1-slim-bookworm AS build
 WORKDIR /app
 # dependencies first (cached until Cargo.toml / Cargo.lock change)

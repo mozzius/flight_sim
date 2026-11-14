@@ -13,7 +13,7 @@
 //! Phase 2 (co-op against server-flown AI) would give each [`Room`] its own
 //! AI aircraft, with ids from `AI_ID_START` up, simulated by the Bevy app.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::protocol::*;
@@ -63,6 +63,8 @@ pub struct Server {
     conns: HashMap<ConnId, Conn>,
     /// Honour requested room codes (dev servers, for automated tests).
     dev_codes: bool,
+    /// Codes in use on other replicas (never handed out here).
+    pub reserved: HashSet<String>,
 }
 
 struct Conn {
@@ -113,7 +115,7 @@ struct TrackedMissile {
 
 impl Server {
     pub fn new(dev_codes: bool) -> Self {
-        Self { rooms: HashMap::new(), conns: HashMap::new(), dev_codes }
+        Self { rooms: HashMap::new(), conns: HashMap::new(), dev_codes, reserved: HashSet::new() }
     }
 
     pub fn room_count(&self) -> usize {
@@ -137,8 +139,53 @@ impl Server {
     /// A connection signed in.
     pub fn connect(&mut self, conn: ConnId, did: String, handle: String) -> Vec<Out> {
         let msg = ServerMsg::Welcome { handle: handle.clone() };
-        self.conns.insert(conn, Conn { did, handle, room: None });
+        self.add_conn(conn, did, handle);
         vec![Out { to: vec![conn], msg }]
+    }
+
+    /// A connection that can be put in rooms (another replica's player, a guest here), without a welcome.
+    pub fn add_conn(&mut self, conn: ConnId, did: String, handle: String) {
+        self.conns.insert(conn, Conn { did, handle, room: None });
+    }
+
+    pub fn handle_of(&self, conn: ConnId) -> Option<&str> {
+        self.conns.get(&conn).map(|c| c.handle.as_str())
+    }
+
+    pub fn exists(&self, code: &str) -> bool {
+        self.rooms.contains_key(code)
+    }
+
+    /// Every room, for the replica's view (by code).
+    pub fn entries(&self) -> Vec<crate::cluster::RoomEntry> {
+        let mut codes: Vec<&String> = self.rooms.keys().collect();
+        codes.sort();
+        codes.into_iter().filter_map(|c| self.entry(c)).collect()
+    }
+
+    pub fn entry(&self, code: &str) -> Option<crate::cluster::RoomEntry> {
+        let r = self.rooms.get(code)?;
+        Some(crate::cluster::RoomEntry {
+            code: r.code.clone(),
+            public: r.kind == RoomKind::Public,
+            started: r.started,
+            map: r.map,
+            players: r.players.values().map(|p| p.info.did.clone()).collect(),
+            host: (r.kind == RoomKind::Hosted).then(|| r.players.get(&r.host).map(|p| p.info.did.clone())).flatten(),
+        })
+    }
+
+    /// Every connection that's in a room.
+    pub fn conns_in_rooms(&self) -> Vec<ConnId> {
+        self.rooms.values().flat_map(|r| r.players.values().map(|p| p.conn)).collect()
+    }
+
+    /// Closes every room at once (shutting down: the players were told).
+    pub fn end_all(&mut self) {
+        self.rooms.clear();
+        for c in self.conns.values_mut() {
+            c.room = None;
+        }
     }
 
     pub fn disconnect(&mut self, conn: ConnId, now: Instant) -> Vec<Out> {
@@ -200,13 +247,22 @@ impl Server {
         out: &mut Vec<Out>,
     ) -> Option<String> {
         self.leave(conn, now, out);
-        if self.rooms.len() >= MAX_ROOMS {
+        let Some(code) = self.new_room(map, code, kind, now) else {
             out.push(Out { to: vec![conn], msg: ServerMsg::Error(ErrorCode::Full) });
+            return None;
+        };
+        self.join(conn, &code, now, out);
+        Some(code)
+    }
+
+    /// A new, empty room (None if the server is full).
+    pub fn new_room(&mut self, map: RoomMap, code: Option<String>, kind: RoomKind, now: Instant) -> Option<String> {
+        if self.rooms.len() >= MAX_ROOMS {
             return None;
         }
         let requested = code.map(|c| normalize_code(&c)).filter(|c| self.dev_codes && valid_code(c));
         let code = match requested {
-            Some(c) if !self.rooms.contains_key(&c) => c,
+            Some(c) if !self.rooms.contains_key(&c) && !self.reserved.contains(&c) => c,
             _ => self.fresh_code(),
         };
         self.rooms.insert(
@@ -226,7 +282,6 @@ impl Server {
             },
         );
         crate::metrics::M.rooms_created.inc(&[if kind == RoomKind::Public { "public" } else { "hosted" }]);
-        self.join(conn, &code, now, out);
         Some(code)
     }
 
@@ -248,6 +303,7 @@ impl Server {
         room.players.get(&room.host).map(|p| p.conn)
     }
 
+    #[cfg(test)]
     pub fn is_public(&self, code: &str) -> bool {
         self.rooms.get(code).is_some_and(|r| r.kind == RoomKind::Public)
     }
@@ -267,6 +323,7 @@ impl Server {
     }
 
     /// Whether `did` has a seat in room `code`.
+    #[allow(dead_code)]
     pub fn has_player(&self, code: &str, did: &str) -> bool {
         self.rooms.get(code).is_some_and(|r| r.players.values().any(|p| p.info.did == did))
     }
@@ -283,7 +340,7 @@ impl Server {
             let code: String = (0..CODE_LEN)
                 .map(|_| CODE_ALPHABET[rand::random_range(0..CODE_ALPHABET.len())] as char)
                 .collect();
-            if !self.rooms.contains_key(&code) {
+            if !self.rooms.contains_key(&code) && !self.reserved.contains(&code) {
                 return code;
             }
         }

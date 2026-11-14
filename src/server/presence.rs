@@ -15,8 +15,16 @@
 //! [`Presence::apply`]. Relationships are cached for [`PAIR_TTL`] and
 //! looked up again when someone comes online after that (or by the
 //! periodic sweep while both stay online).
+//!
+//! Across replicas: `users` is everyone online in the cluster. A user with
+//! connections here is *local*; the others are *remote*, added from the
+//! other replicas' views ([`Presence::online_remote`]) with the handle,
+//! profile and status their home publishes. Each replica only tells its
+//! own connections, so it only looks up pairs with a local user in them
+//! (the lookup worker shares results through the cluster's cache, so a
+//! pair is looked up once, not once per replica).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -41,10 +49,10 @@ pub const PROFILE_BATCH: usize = 25;
 /// One invite per target per this long.
 pub const INVITE_GAP: Duration = Duration::from_secs(10);
 /// And at most this many a minute from one player.
-const INVITES_PER_MINUTE: usize = 10;
+pub const INVITES_PER_MINUTE: usize = 10;
 /// Join requests: one per host per this long, and a few a minute.
 pub const REQUEST_GAP: Duration = Duration::from_secs(10);
-const REQUESTS_PER_MINUTE: usize = 6;
+pub const REQUESTS_PER_MINUTE: usize = 6;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Profile {
@@ -94,6 +102,7 @@ impl Job {
 }
 
 struct User {
+    /// Empty: a remote user (online on another replica).
     conns: Vec<ConnId>,
     /// The verified handle.
     handle: String,
@@ -116,43 +125,7 @@ pub struct Presence {
     profiles: HashMap<Did, (Profile, Instant)>,
     profiles_pending: HashSet<Did>,
     profile_queue: Vec<Did>,
-    invites: Limiter,
-    requests: Limiter,
     last_sweep: Option<Instant>,
-}
-
-/// Asks from one player to another: one per pair per `gap`, and at most
-/// `per_minute` from anyone.
-#[derive(Default)]
-struct Limiter {
-    /// (from, to) → when.
-    last: HashMap<(Did, Did), Instant>,
-    by: HashMap<Did, VecDeque<Instant>>,
-}
-
-impl Limiter {
-    /// Records the ask if it's allowed.
-    fn allow(&mut self, from: &str, to: &str, gap: Duration, per_minute: usize, now: Instant) -> bool {
-        let pair = (from.to_string(), to.to_string());
-        if self.last.get(&pair).is_some_and(|t| now.duration_since(*t) < gap) {
-            return false;
-        }
-        let recent = self.by.entry(from.to_string()).or_default();
-        while recent.front().is_some_and(|t| now.duration_since(*t) >= Duration::from_secs(60)) {
-            recent.pop_front();
-        }
-        if recent.len() >= per_minute {
-            return false;
-        }
-        recent.push_back(now);
-        self.last.insert(pair, now);
-        true
-    }
-
-    fn forget_old(&mut self, gap: Duration, now: Instant) {
-        self.last.retain(|_, t| now.duration_since(*t) < gap);
-        self.by.retain(|_, q| q.back().is_some_and(|t| now.duration_since(*t) < Duration::from_secs(60)));
-    }
 }
 
 fn key(a: &str, b: &str) -> (Did, Did) {
@@ -168,17 +141,31 @@ impl Presence {
         self.users.len()
     }
 
-    pub fn online_dids(&self) -> Vec<Did> {
-        self.users.keys().cloned().collect()
-    }
-
     pub fn conns(&self, did: &str) -> Vec<ConnId> {
         self.users.get(did).map(|u| u.conns.clone()).unwrap_or_default()
+    }
+
+    /// The users with connections here.
+    pub fn local_dids(&self) -> Vec<Did> {
+        self.users.iter().filter(|(_, u)| !u.conns.is_empty()).map(|(d, _)| d.clone()).collect()
+    }
+
+    pub fn is_local(&self, did: &str) -> bool {
+        self.users.get(did).is_some_and(|u| !u.conns.is_empty())
+    }
+
+    #[cfg(test)]
+    pub fn is_online(&self, did: &str) -> bool {
+        self.users.contains_key(did)
     }
 
     /// A connection signed in as `did`.
     pub fn online(&mut self, conn: ConnId, did: &str, handle: &str, now: Instant) -> (Vec<Out>, Vec<Job>) {
         let mut out = vec![];
+        // (online on another replica until now: ours now, looked at afresh)
+        if self.users.get(did).is_some_and(|u| u.conns.is_empty()) {
+            self.users.remove(did);
+        }
         if let Some(user) = self.users.get_mut(did) {
             // another tab: it gets the list the others already have
             user.conns.push(conn);
@@ -218,21 +205,84 @@ impl Presence {
         (out, jobs)
     }
 
-    /// A connection went away.
-    pub fn offline(&mut self, conn: ConnId, did: &str) -> Vec<Out> {
+    /// A connection went away. `elsewhere`: the user is still online on
+    /// another replica (as that replica tells it), so they stay, as a remote user.
+    pub fn offline(&mut self, conn: ConnId, did: &str, elsewhere: Option<&Friend>) -> Vec<Out> {
         let mut out = vec![];
         let Some(user) = self.users.get_mut(did) else { return out };
         user.conns.retain(|c| *c != conn);
         if !user.conns.is_empty() {
             return out;
         }
+        if let Some(f) = elsewhere {
+            user.known.clear();
+            return self.update_remote(f, Instant::now());
+        }
+        self.drop_user(did, &mut out);
+        out
+    }
+
+    fn drop_user(&mut self, did: &str, out: &mut Vec<Out>) {
         self.users.remove(did);
         for u in self.users.values_mut() {
             if u.known.remove(did) {
                 out.push(Out { to: u.conns.clone(), msg: ServerMsg::FriendGone(did.to_string()) });
             }
         }
+    }
+
+    /// Someone online on another replica (from its view): our users who are
+    /// their mutuals are told, and unknown pairs with our users looked up.
+    pub fn online_remote(&mut self, f: &Friend, now: Instant) -> (Vec<Out>, Vec<Job>) {
+        let mut out = vec![];
+        if self.users.contains_key(&f.did) {
+            return (self.update_remote(f, now), vec![]);
+        }
+        self.users.insert(
+            f.did.clone(),
+            User { conns: vec![], handle: f.handle.clone(), status: f.status, known: HashSet::new() },
+        );
+        let profile = Profile { did: f.did.clone(), display_name: f.display_name.clone(), avatar: f.avatar.clone() };
+        self.profiles.insert(f.did.clone(), (profile, now));
+        let locals = self.local_dids();
+        for l in &locals {
+            if self.pairs.get(&key(l, &f.did)).is_some_and(|p| p.mutual) {
+                self.link(l, &f.did, true, &mut out);
+            }
+        }
+        let jobs = self.lookups_among(&f.did, &locals, now);
+        (out, jobs)
+    }
+
+    /// A remote user's handle, profile or status changed (their friends here are told).
+    pub fn update_remote(&mut self, f: &Friend, now: Instant) -> Vec<Out> {
+        let mut out = vec![];
+        let Some(user) = self.users.get_mut(&f.did).filter(|u| u.conns.is_empty()) else { return out };
+        let profile = Profile { did: f.did.clone(), display_name: f.display_name.clone(), avatar: f.avatar.clone() };
+        let changed = user.handle != f.handle
+            || user.status != f.status
+            || self.profiles.get(&f.did).is_none_or(|(p, _)| *p != profile);
+        user.handle = f.handle.clone();
+        user.status = f.status;
+        self.profiles.insert(f.did.clone(), (profile, now));
+        if changed {
+            self.tell_friends(&f.did, &mut out);
+        }
         out
+    }
+
+    /// A remote user went offline (or their replica did).
+    pub fn offline_remote(&mut self, did: &str) -> Vec<Out> {
+        let mut out = vec![];
+        if self.users.get(did).is_some_and(|u| u.conns.is_empty()) {
+            self.drop_user(did, &mut out);
+        }
+        out
+    }
+
+    /// The remote users.
+    pub fn remote_dids(&self) -> Vec<Did> {
+        self.users.iter().filter(|(_, u)| u.conns.is_empty()).map(|(d, _)| d.clone()).collect()
     }
 
     /// In a room, out of one, or the room filled up.
@@ -245,18 +295,6 @@ impl Presence {
         user.status = status;
         self.tell_friends(did, &mut out);
         out
-    }
-
-    /// Whether `from` may invite `to` now (an online mutual, within the
-    /// rate limits); records the invite if so.
-    pub fn may_invite(&mut self, from: &str, to: &str, now: Instant) -> bool {
-        self.online_mutuals(from, to) && self.invites.allow(from, to, INVITE_GAP, INVITES_PER_MINUTE, now)
-    }
-
-    /// Whether `from` may ask `host` to let them into their room now (an
-    /// online mutual, within the limits); records the request if so.
-    pub fn may_request(&mut self, from: &str, host: &str, now: Instant) -> bool {
-        self.online_mutuals(from, host) && self.requests.allow(from, host, REQUEST_GAP, REQUESTS_PER_MINUTE, now)
     }
 
     /// Both online, and `from` has been told `to` is their mutual.
@@ -355,8 +393,6 @@ impl Presence {
                 now.duration_since(p.at) < PAIR_TTL * 2 || (users.contains_key(a) && users.contains_key(b))
             });
             self.profiles.retain(|d, (_, at)| now.duration_since(*at) < PROFILE_TTL || users.contains_key(d));
-            self.invites.forget_old(INVITE_GAP, now);
-            self.requests.forget_old(REQUEST_GAP, now);
             let mut dids: Vec<Did> = self.users.keys().cloned().collect();
             dids.sort();
             for did in dids {
@@ -367,9 +403,10 @@ impl Presence {
     }
 
     /// Lookups for every online player whose relationship with `did` is
-    /// unknown or stale (and not already being looked up).
+    /// unknown or stale (and not already being looked up). A remote user's
+    /// only matter here with our own users.
     fn lookups_for(&mut self, did: &str, now: Instant) -> Vec<Job> {
-        let online: Vec<Did> = self.users.keys().cloned().collect();
+        let online: Vec<Did> = if self.is_local(did) { self.users.keys().cloned().collect() } else { self.local_dids() };
         self.lookups_among(did, &online, now)
     }
 
@@ -407,6 +444,9 @@ impl Presence {
     }
 
     fn profile_fresh(&self, did: &str, now: Instant) -> bool {
+        if !self.is_local(did) && self.users.contains_key(did) {
+            return true;
+        }
         self.profiles.get(did).is_some_and(|(_, at)| now.duration_since(*at) < PROFILE_TTL)
     }
 
@@ -685,7 +725,7 @@ pub mod tests {
         assert!(p.friend(&did("bob")).unwrap().display_name.is_some());
 
         // bob goes: alice is told, carol isn't
-        let out = p.offline(2, &did("bob"));
+        let out = p.offline(2, &did("bob"), None);
         assert_eq!(out, vec![Out { to: vec![1], msg: ServerMsg::FriendGone(did("bob")) }]);
     }
 
@@ -716,14 +756,14 @@ pub mod tests {
         assert_eq!(friends_of(&out, 1).len(), 40);
 
         // back within the TTL: no new lookups, the cached list at once
-        p.offline(1, &did("me"));
+        p.offline(1, &did("me"), None);
         graph.calls.lock().unwrap().clear();
         let (out, jobs) = p.online(2, &did("me"), "me", now + Duration::from_secs(60));
         assert!(jobs.iter().all(|j| matches!(j, Job::Profiles(_))), "{jobs:?}");
         assert!(matches!(&out[0].msg, ServerMsg::Friends(l) if l.len() == 40));
 
         // after it: looked up again
-        p.offline(2, &did("me"));
+        p.offline(2, &did("me"), None);
         let (_, jobs) = p.online(3, &did("me"), "me", now + PAIR_TTL + Duration::from_secs(1));
         assert_eq!(jobs.iter().filter(|j| matches!(j, Job::Mutuals { .. })).count(), 2);
 
@@ -747,7 +787,7 @@ pub mod tests {
     }
 
     #[test]
-    fn invites_need_an_online_mutual_and_are_rate_limited() {
+    fn invites_need_an_online_mutual() {
         let now = Instant::now();
         let mut graph = MockAppView::default();
         graph.mutual(&did("a"), &did("b"));
@@ -756,13 +796,42 @@ pub mod tests {
             let (_, jobs) = p.online(conn, &did(h), h, now);
             settle(&mut p, &graph, jobs, now);
         }
-        assert!(!p.may_invite(&did("a"), &did("c"), now), "not a mutual");
-        assert!(!p.may_invite(&did("a"), &did("zed"), now), "not online");
-        assert!(p.may_invite(&did("a"), &did("b"), now));
-        assert!(!p.may_invite(&did("a"), &did("b"), now + Duration::from_secs(5)));
-        assert!(p.may_invite(&did("a"), &did("b"), now + INVITE_GAP));
-        p.offline(2, &did("b"));
-        assert!(!p.may_invite(&did("a"), &did("b"), now + INVITE_GAP * 3));
+        assert!(!p.online_mutuals(&did("a"), &did("c")), "not a mutual");
+        assert!(!p.online_mutuals(&did("a"), &did("zed")), "not online");
+        assert!(p.online_mutuals(&did("a"), &did("b")));
+        p.offline(2, &did("b"), None);
+        assert!(!p.online_mutuals(&did("a"), &did("b")));
+    }
+
+    #[test]
+    fn remote_users_reach_local_friends_only() {
+        let now = Instant::now();
+        let mut graph = MockAppView::default();
+        graph.mutual(&did("a"), &did("r"));
+        let mut p = Presence::new();
+        let (_, jobs) = p.online(1, &did("a"), "a", now);
+        settle(&mut p, &graph, jobs, now);
+        let r = Friend { did: did("r"), handle: "r".into(), display_name: Some("Arr".into()), avatar: None, status: FriendStatus::InRoom };
+        let (mut out, jobs) = p.online_remote(&r, now);
+        // one lookup, r against our only local user (never a profile lookup: it came with the view)
+        assert_eq!(jobs, vec![Job::Mutuals { actor: did("r"), others: vec![did("a")] }]);
+        out.extend(settle(&mut p, &graph, jobs, now));
+        assert!(out.iter().any(|o| o.to == vec![1] && matches!(&o.msg, ServerMsg::FriendUpdate(f) if f.handle == "r" && f.status == FriendStatus::InRoom)));
+        assert_eq!(p.online_count(), 2);
+        assert_eq!(p.friend(&did("r")).unwrap().display_name.as_deref(), Some("Arr"));
+        // a status change from the view
+        let out = p.update_remote(&Friend { status: FriendStatus::Online, ..r.clone() }, now);
+        assert!(matches!(&out[..], [Out { msg: ServerMsg::FriendUpdate(f), .. }] if f.status == FriendStatus::Online));
+        // they connect here too, then leave here while still online there: no FriendGone
+        p.online(2, &did("r"), "r", now);
+        assert!(p.is_local(&did("r")));
+        let out = p.offline(2, &did("r"), Some(&r));
+        assert!(!out.iter().any(|o| matches!(o.msg, ServerMsg::FriendGone(_))), "{out:?}");
+        assert!(!p.is_local(&did("r")) && p.is_online(&did("r")));
+        // their replica drops them: gone
+        let out = p.offline_remote(&did("r"));
+        assert_eq!(out, vec![Out { to: vec![1], msg: ServerMsg::FriendGone(did("r")) }]);
+        assert_eq!(p.online_count(), 1);
     }
 
     #[test]
