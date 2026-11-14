@@ -2,6 +2,8 @@
 //!
 //! `FLIGHT_SIM_SCREENSHOT=out.png cargo run` saves a screenshot after a few
 //! seconds and exits. `FLIGHT_SIM_SCREENSHOT_AFTER=<secs>` changes the delay.
+//! `FLIGHT_SIM_SCREENSHOT_SIZE=<w>x<h>` and `FLIGHT_SIM_SCREENSHOT_DPR=<n>`
+//! set the image size and scale factor (a landscape phone: `2556x1179`, 3).
 //! `FLIGHT_SIM_SCREENSHOT_BURST=<count>,<secs>` saves `count` frames `secs`
 //! apart instead (`out_00.png`, `out_01.png`, ...), for catching flicker.
 //! `FLIGHT_SIM_DIE_AT=<secs>` shoots the player down that many (real) seconds in.
@@ -23,11 +25,35 @@ use bevy::{
 
 pub struct DevPlugin;
 
-/// Screenshot runs render headless (no window), into this image.
-pub const HEADLESS_SIZE: UVec2 = UVec2::new(2560, 1440);
+/// Screenshot runs render headless (no window), into an image this size:
+/// `FLIGHT_SIM_SCREENSHOT_SIZE=<w>x<h>` (physical pixels), default 2560x1440.
+pub fn headless_size() -> UVec2 {
+    std::env::var("FLIGHT_SIM_SCREENSHOT_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some(UVec2::new(w.trim().parse().ok()?, h.trim().parse().ok()?))
+        })
+        .unwrap_or(UVec2::new(2560, 1440))
+}
+
+/// The headless image's scale factor (a phone's DPR):
+/// `FLIGHT_SIM_SCREENSHOT_DPR=<n>`, default 1.
+pub fn headless_dpr() -> f32 {
+    std::env::var("FLIGHT_SIM_SCREENSHOT_DPR").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0)
+}
 
 pub fn headless() -> bool {
     std::env::var("FLIGHT_SIM_SCREENSHOT").is_ok()
+}
+
+/// A screenshot of the headless image (the target must match the camera's,
+/// scale factor included, or the capture comes back black).
+fn headless_shot(image: &Handle<Image>) -> Screenshot {
+    Screenshot(bevy::camera::RenderTarget::Image(bevy::camera::ImageRenderTarget {
+        handle: image.clone(),
+        scale_factor: headless_dpr(),
+    }))
 }
 
 /// The offscreen image the camera renders to in headless runs.
@@ -132,7 +158,7 @@ fn auto_screenshot(
     match state.taken_at {
         None if now >= state.after => {
             let screenshot = match &target {
-                Some(t) => Screenshot::image(t.0.clone()),
+                Some(t) => headless_shot(&t.0),
                 None => Screenshot::primary_window(),
             };
             let path = state.current_path();
@@ -250,7 +276,7 @@ fn extra_screenshots(
             shot.done = true;
             info!("dev: screenshot {} ({e})", shot.path);
             let screenshot = match &target {
-                Some(t) => Screenshot::image(t.0.clone()),
+                Some(t) => headless_shot(&t.0),
                 None => Screenshot::primary_window(),
             };
             commands.spawn(screenshot).observe(save_to_disk(shot.path.clone()));

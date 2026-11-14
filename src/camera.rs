@@ -97,12 +97,15 @@ fn spawn_camera(
     }
     if crate::dev::headless() {
         use bevy::render::render_resource::{TextureFormat, TextureUsages};
-        let size = crate::dev::HEADLESS_SIZE;
+        let size = crate::dev::headless_size();
         let mut image =
             Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8UnormSrgb, None);
         image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
         let handle = images.add(image);
-        camera.insert(bevy::camera::RenderTarget::Image(handle.clone().into()));
+        camera.insert(bevy::camera::RenderTarget::Image(bevy::camera::ImageRenderTarget {
+            handle: handle.clone(),
+            scale_factor: crate::dev::headless_dpr(),
+        }));
         commands.insert_resource(crate::dev::HeadlessTarget(handle));
     }
 }
