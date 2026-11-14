@@ -1,0 +1,22 @@
+# Redis and Postgres for multiplayer server dev (see README, "Scaling"):
+#   docker compose -f docker-compose.dev.yml up -d
+#   REDIS_URL=redis://127.0.0.1:6380 DATABASE_URL=postgres://flight:flight@127.0.0.1:5433/flight
+# Ports are bound to localhost only (and off the defaults, so they don't clash
+# with anything else running). `down` keeps the data; `down -v` wipes it.
+name: flight-sim-dev
+services:
+  redis:
+    image: redis:8.2.3
+    ports: ["127.0.0.1:6380:6379"]
+    volumes: [redis-data:/data]
+  postgres:
+    image: postgres:18.1-alpine
+    environment:
+      POSTGRES_USER: flight
+      POSTGRES_PASSWORD: flight
+      POSTGRES_DB: flight
+    ports: ["127.0.0.1:5433:5432"]
+    volumes: [postgres-data:/var/lib/postgresql]
+volumes:
+  redis-data:
+  postgres-data:

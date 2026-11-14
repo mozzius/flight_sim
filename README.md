@@ -290,17 +290,23 @@ never used. The leaderboard needs no volume (Postgres), so nothing pins the serv
 Redis layout (prefix `FLIGHT_SIM_REDIS_PREFIX`, default `fs:`): `v<N>:view:*`, `v<N>:views`,
 `v<N>:queue` / `v<N>:queue:info`, channels `v<N>:all` and `v<N>:r:*`; `rl:*` (rate limits),
 `run:<did>` (challenge starts), `pair:*` / `pairlock:*`, `appview:<second>`, `metrics` (counter
-totals). Tests against a real Redis or Postgres use a throwaway prefix or schema:
+totals).
+
+A local Redis and Postgres for server dev (`docker-compose.dev.yml`; localhost-only ports, named
+volumes, dev credentials). Tests against them use a throwaway prefix or schema and clean up:
 
 ```bash
-FLIGHT_SIM_TEST_REDIS_URL=redis://… FLIGHT_SIM_TEST_DATABASE_URL=postgres://… \
+docker compose -f docker-compose.dev.yml up -d
+export REDIS_URL=redis://127.0.0.1:6380 DATABASE_URL=postgres://flight:flight@127.0.0.1:5433/flight
+FLIGHT_SIM_TEST_REDIS_URL=$REDIS_URL FLIGHT_SIM_TEST_DATABASE_URL=$DATABASE_URL \
   cargo test --no-default-features --features server --bin flight_sim_server
+docker compose -f docker-compose.dev.yml down   # (-v wipes the data)
 ```
 
 Two local replicas (alice on one, bob on the other; quick play matches them across):
 
 ```bash
-export REDIS_URL=redis://… FLIGHT_SIM_REDIS_PREFIX=test_$RANDOM: FLIGHT_SIM_DEV_AUTH=1 FLIGHT_SIM_DEV_MUTUALS=1
+export REDIS_URL=redis://127.0.0.1:6380 FLIGHT_SIM_REDIS_PREFIX=test_$RANDOM: FLIGHT_SIM_DEV_AUTH=1 FLIGHT_SIM_DEV_MUTUALS=1
 PORT=8787 target/release/flight_sim_server &
 PORT=8788 target/release/flight_sim_server &
 FLIGHT_SIM_DEV_USER=alice FLIGHT_SIM_SERVER=ws://127.0.0.1:8787 FLIGHT_SIM_MP=quick FLIGHT_SIM_AUTOPILOT=1 cargo run
