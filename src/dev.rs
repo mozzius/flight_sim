@@ -132,7 +132,8 @@ impl Plugin for DevPlugin {
                 },
             );
         }
-        if std::env::var("FLIGHT_SIM_NO_HUD").is_ok() {
+        // (`FLIGHT_SIM_NO_HUD=jet` keeps the jet in shot)
+        if std::env::var("FLIGHT_SIM_NO_HUD").is_ok_and(|v| v != "jet") {
             app.add_systems(Update, hide_player_model);
         }
         if std::env::var("FLIGHT_SIM_AUTOPILOT").is_ok() {
@@ -334,7 +335,7 @@ pub fn log_state(
 }
 
 /// `FLIGHT_SIM_NO_HUD=1`: hide the player's own jet (the HUD itself is
-/// skipped in `hud.rs`), for clean landscape screenshots.
+/// skipped in `hud.rs`), for clean landscape screenshots (`=jet` keeps it).
 fn hide_player_model(mut player: Query<&mut Visibility, With<crate::game::Player>>) {
     for mut vis in &mut player {
         *vis = Visibility::Hidden;
