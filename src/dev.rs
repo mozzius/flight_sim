@@ -19,6 +19,8 @@
 //! quick-play queue), `online<n>` (the server says n or more are online),
 //! `tut-<step>` (in that tutorial step, e.g. `tut-flares`, `tut-complete`;
 //! `tut-rings+20` waits 20 s into it).
+//! `FLIGHT_SIM_ALT=<m>` starts (and respawns) the player's jet at that
+//! altitude, e.g. inside the cloud layer (~1900-4300 m).
 
 use bevy::{
     prelude::*,
@@ -43,6 +45,11 @@ pub fn headless_size() -> UVec2 {
 /// `FLIGHT_SIM_SCREENSHOT_DPR=<n>`, default 1.
 pub fn headless_dpr() -> f32 {
     std::env::var("FLIGHT_SIM_SCREENSHOT_DPR").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0)
+}
+
+/// `FLIGHT_SIM_ALT=<m>`: the player's jet starts at this altitude.
+pub fn start_altitude() -> Option<f32> {
+    std::env::var("FLIGHT_SIM_ALT").ok().and_then(|s| s.parse().ok())
 }
 
 pub fn headless() -> bool {

@@ -9,7 +9,7 @@
 //    premultiplied radiance + opacity, plus the scene distance it clipped
 //    against and the mean cloud distance.
 //  * `fs_composite` upsamples that to full resolution with a depth-aware
-//    (nearest-depth) filter and blends it over the scene, drawn as the first
+//    (bilinear, or depth-weighted at edges) filter and blends it over the scene, drawn as the first
 //    item of the transparent pass so nearer effects still draw over it.
 
 struct Clouds {
@@ -364,8 +364,15 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
     var dist_sum = 0.0;
     var weight_sum = 0.0;
 
+    // A short span (the ray ends on something close, typically our own jet
+    // ~20 m in front of the chase camera) gets a few fine steps right away:
+    // a coarse probe would mostly land past its end and record no cloud at
+    // all, and one jittered sample would leave the cloud over the jet noisy.
+    let span_len = span.y - span.x;
+    let short_span = span_len < u.step_min * 4.0;
+
     var t = span.x;
-    var in_cloud = false;
+    var in_cloud = short_span;
     var empty_run = 0;
     var i = 0u;
     loop {
@@ -386,14 +393,19 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
         let t_eff = max(t, u.step_min);
         let n_left = max(f32(u.max_steps - i) - 8.0, 1.0);
         let floor = t_eff * (pow(max(span.y / t_eff, 1.0), 1.0 / n_left) - 1.0);
-        let ds = max(clamp(t * u.step_scale, u.step_min, u.step_min * 24.0), floor);
+        var ds = max(clamp(t * u.step_scale, u.step_min, u.step_min * 24.0), floor);
+        if short_span {
+            ds = span_len * 0.25;
+        }
 
         if !in_cloud {
             // coarse probe: skip empty air in big strides
             let stride = max(ds * 4.0, floor);
             // sample somewhere in the stride, differently every frame, so
             // the strides don't slice far clouds into stripes
-            let ts = t + stride * jitter;
+            // (within what's left of the span, so cloud just in front of
+            // near geometry isn't missed by a probe landing beyond it)
+            let ts = t + min(stride, span.y - t) * jitter;
             let p = u.camera_pos + rd * ts;
             if ts < span.y && density(p, saturate(height_frac(p)), sample_weather(p), 0.0) > 0.0 {
                 // march this stride again in fine steps from its start, so
@@ -573,6 +585,30 @@ fn fs_resolve(in: VsOut) -> ResolveOut {
 // ---------------------------------------------------------------------------
 // composite pass (full resolution, premultiplied blend)
 
+struct Tap {
+    color: vec4<f32>,
+    weight: f32,
+}
+
+/// One neighbour of the depth-aware upsample: low-res cloud `k` marched to
+/// scene distance `z` (km) with its cloud at mean distance `m` (km), for a
+/// full-res pixel at scene distance `d` (km). The weight is how well the
+/// scene depths match.
+fn upsample_tap(k: vec4<f32>, z: f32, m: f32, d: f32, tol: f32) -> Tap {
+    var c = k;
+    if d < z - tol && k.a > 0.0 {
+        // The pixel is nearer than where this neighbour's ray stopped (our
+        // jet in front of a cloud): keep only the share of its cloud that
+        // plausibly lies in front of the pixel, judged by the cloud's mean
+        // distance. ~0 for a jet in front of distant cloud (a clean
+        // silhouette), some fog over it when the camera is inside cloud,
+        // and all of it for a ridge well behind the cloud.
+        c = k * smoothstep(0.0, 1.25, d / max(m, 1e-3));
+    }
+    let r = abs(z - d) / tol;
+    return Tap(c, 1.0 / (0.01 + r * r));
+}
+
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     let full_px = vec2<i32>(in.position.xy);
@@ -613,12 +649,29 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     if e_max < tol {
         color = k00 * w00 + k10 * w10 + k01 * w01 + k11 * w11;
     } else {
-        // depth discontinuity: take the neighbour whose scene depth matches
-        color = k00;
-        var best = e00;
-        if e10 < best { best = e10; color = k10; }
-        if e01 < best { best = e01; color = k01; }
-        if e11 < best { best = e11; color = k11; }
+        // depth discontinuity (an edge of the jet, a ridge against the sky):
+        // weight the 4x4 neighbours around the pixel by how well their scene
+        // depth matches as well as by distance, so edges come out smooth
+        // rather than in whole low-res blocks, and a pixel none of the four
+        // nearest neighbours marched to (sky just past the jet's wingtip)
+        // still finds one a little further out. A neighbour that marched
+        // past this pixel only counts the cloud in front of it.
+        var sum = vec4(0.0);
+        var wsum = 0.0;
+        for (var y = -1; y <= 2; y++) {
+            for (var x = -1; x <= 2; x++) {
+                let c = clamp(vec2<i32>(base) + vec2(x, y), vec2(0), lo_max);
+                let k = textureLoad(cloud_color, c, 0);
+                let zm = textureLoad(cloud_data, c, 0).xy;
+                // tent of radius 2 low-res texels
+                let o = abs(vec2(f32(x), f32(y)) - f);
+                let ws = max(2.0 - o.x, 0.0) * max(2.0 - o.y, 0.0);
+                let tap = upsample_tap(k, zm.x, zm.y, d_full, tol);
+                sum += tap.color * ws * tap.weight;
+                wsum += ws * tap.weight;
+            }
+        }
+        color = sum / max(wsum, 1e-6);
     }
 
     // the bilinear and temporal blends leave a sliver of transmittance on

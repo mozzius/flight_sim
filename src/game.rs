@@ -187,6 +187,11 @@ pub fn spawn_aircraft(
     heading: Vec3,
     player: bool,
 ) -> Entity {
+    // `FLIGHT_SIM_ALT=<m>` (dev): start the player's jet at that altitude
+    let position = match crate::dev::start_altitude() {
+        Some(alt) if player => Vec3::new(position.x, alt, position.z),
+        _ => position,
+    };
     // never spawn inside (or skimming) a mountain: clear the ground ahead by 500 m
     let ahead = position + heading.normalize_or(Vec3::NEG_Z) * 4_000.0;
     let ground = terrain.max_height_along(position, ahead);
