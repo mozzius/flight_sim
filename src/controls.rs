@@ -150,6 +150,10 @@ pub struct PlayerActions {
     pub target_under_crosshair: bool,
 }
 
+/// How fast Shift/Ctrl move the throttle lever (per second). The engine
+/// still spools up at its own pace (`flight.rs`).
+const THROTTLE_RATE: f32 = 1.6;
+
 /// Persistent throttle setting (0..1).
 #[derive(Resource)]
 pub struct ThrottleLever(pub f32);
@@ -485,10 +489,10 @@ fn player_flight_input(
     let up = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let down = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     if up {
-        lever.0 = (lever.0 + dt * 0.6).min(1.0);
+        lever.0 = (lever.0 + dt * THROTTLE_RATE).min(1.0);
     }
     if down {
-        lever.0 = (lever.0 - dt * 0.6).max(0.0);
+        lever.0 = (lever.0 - dt * THROTTLE_RATE).max(0.0);
     }
     if let Some(t) = touch.throttle {
         lever.0 = t;
