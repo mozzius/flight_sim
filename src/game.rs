@@ -24,6 +24,7 @@ impl Plugin for GamePlugin {
             .add_message::<AircraftDestroyed>()
             .add_message::<PlayerKill>()
             .add_systems(Startup, load_models)
+            .add_systems(Update, warm_jet_shaders)
             .add_systems(OnEnter(crate::loading::GameState::Playing), initial_spawn)
             .add_systems(OnExit(crate::loading::GameState::Playing), (end_round, crate::terrain_gen::clear_map))
             .add_systems(
@@ -127,6 +128,49 @@ fn load_models(mut commands: Commands, asset_server: Res<AssetServer>) {
         fighter: asset_server
             .load(GltfAssetLabel::Scene(0).from_asset("models/f22-raptor/scene.gltf")),
     });
+}
+
+/// A speck of a jet held in front of the camera for a few frames once the
+/// model has loaded, so its shaders compile then rather than when the first
+/// jet flies into view (a visible freeze on macOS and the web).
+#[derive(Component)]
+struct ShaderWarmer(u32);
+
+fn warm_jet_shaders(
+    mut commands: Commands,
+    models: Option<Res<Models>>,
+    asset_server: Res<AssetServer>,
+    camera: Query<Entity, With<crate::camera::MainCamera>>,
+    mut warmer: Query<(Entity, &mut ShaderWarmer)>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let Some(models) = models else { return };
+    if let Ok((e, mut w)) = warmer.single_mut() {
+        if asset_server.is_loaded_with_dependencies(&models.fighter) {
+            w.0 += 1;
+            if w.0 > 8 {
+                commands.entity(e).despawn();
+                *done = true;
+                // the page's loading overlay waits for this (web/index.html)
+                #[cfg(target_arch = "wasm32")]
+                let _ = js_sys::Reflect::set(&js_sys::global(), &"FLIGHT_SIM_WARM".into(), &true.into());
+            }
+        }
+        return;
+    }
+    let Ok(cam) = camera.single() else { return };
+    let warm = commands
+        .spawn((
+            ShaderWarmer(0),
+            WorldAssetRoot(models.fighter.clone()),
+            // far too small to see, but in view, so it's drawn
+            Transform::from_xyz(0.0, 0.0, -30.0).with_scale(Vec3::splat(0.0004)),
+        ))
+        .id();
+    commands.entity(cam).add_child(warm);
 }
 
 /// Marker for the visual model child of an aircraft (effects attach here).

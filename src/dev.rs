@@ -85,6 +85,13 @@ impl AutoScreenshot {
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, log_state);
+        if std::env::var("FLIGHT_SIM_LOG_HITCHES").is_ok() {
+            std::sync::LazyLock::force(&START);
+            app.add_systems(Last, log_hitches);
+            if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+                render.add_systems(bevy::render::Render, log_new_pipelines.in_set(bevy::render::RenderSystems::Cleanup));
+            }
+        }
         if std::env::var("FLIGHT_SIM_FX_TEST").is_ok() {
             app.add_systems(
                 FixedUpdate,
@@ -521,5 +528,37 @@ fn kill_test(
     }
     if t > shot.after - 0.1 {
         hits.write(crate::weapons::HitConfirmed { attacker: me });
+    }
+}
+
+static START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+
+/// `FLIGHT_SIM_LOG_HITCHES=1`: log frames over 40 ms (with the game state)...
+fn log_hitches(time: Res<Time<Real>>, state: Res<State<crate::loading::GameState>>) {
+    let dt = time.delta_secs();
+    if dt > 0.04 {
+        info!("hitch {:.0} ms at t={:.2} ({:?})", dt * 1000.0, START.elapsed().as_secs_f32(), state.get());
+    }
+}
+
+/// ...and each render pipeline as it's first queued (on macOS and the web they compile
+/// synchronously, so a burst of these is a hitch).
+fn log_new_pipelines(cache: Res<bevy::render::render_resource::PipelineCache>, mut seen: Local<usize>) {
+    // (the render world has no Time<Real>; the process start is close enough)
+    let t = START.elapsed().as_secs_f32();
+    use bevy::render::render_resource::PipelineDescriptor;
+    for p in cache.pipelines().skip(*seen) {
+        let (label, shader) = match &p.descriptor {
+            PipelineDescriptor::RenderPipelineDescriptor(d) => (
+                d.label.clone().unwrap_or_default(),
+                d.fragment.as_ref().and_then(|f| f.shader.path().map(|p| p.to_string())).unwrap_or_default(),
+            ),
+            PipelineDescriptor::ComputePipelineDescriptor(d) => {
+                (d.label.clone().unwrap_or_default(), d.shader.path().map(|p| p.to_string()).unwrap_or_default())
+            }
+            PipelineDescriptor::MeshPipelineDescriptor(d) => (d.label.clone().unwrap_or_default(), String::new()),
+        };
+        info!("pipeline #{} at t={t:.2}: {label} {shader}", *seen);
+        *seen += 1;
     }
 }

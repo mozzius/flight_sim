@@ -50,7 +50,11 @@ impl Plugin for LoadingPlugin {
         }
         app.init_resource::<Prebake>()
             .add_systems(OnEnter(GameState::Loading), spawn_loading)
-            .add_systems(OnExit(GameState::Loading), despawn_loading)
+            // the loading screen stays up over the round's first frames, while the GPU
+            // compiles the map's and jets' shaders (a freeze on macOS and the web)
+            .add_systems(Update, reveal_round.run_if(in_state(GameState::Playing)))
+            .add_systems(OnExit(GameState::Playing), despawn_loading)
+            .add_systems(OnEnter(GameState::Menu), despawn_loading)
             .add_systems(Update, load_map.run_if(in_state(GameState::Loading)))
             .add_systems(Update, prebake.run_if(in_state(GameState::Menu)));
     }
@@ -185,6 +189,31 @@ fn spawn_loading(mut commands: Commands, asset_server: Res<AssetServer>) {
             ),
         ],
     ));
+}
+
+/// Lifts the loading screen once the round's frames run smoothly (the first
+/// ones compile shaders), or after 3 s whatever happens.
+fn reveal_round(
+    mut commands: Commands,
+    roots: Query<Entity, With<LoadingRoot>>,
+    time: Res<Time<Real>>,
+    mut smooth: Local<u32>,
+    mut waited: Local<f32>,
+) {
+    if roots.is_empty() {
+        *smooth = 0;
+        *waited = 0.0;
+        return;
+    }
+    let dt = time.delta_secs();
+    *waited += dt;
+    *smooth = if dt < 0.045 { *smooth + 1 } else { 0 };
+    if *smooth >= 6 || *waited > 3.0 {
+        info!("loading: round shown after {:.2} s", *waited);
+        for e in &roots {
+            commands.entity(e).despawn();
+        }
+    }
 }
 
 fn despawn_loading(mut commands: Commands, roots: Query<Entity, With<LoadingRoot>>) {

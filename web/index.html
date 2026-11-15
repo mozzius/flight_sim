@@ -336,10 +336,11 @@
       }
     }
     // init returns before the first frame, and the first frames bake the cloud
-    // noise (a short freeze): hide the overlay once frames are flowing after that.
+    // noise (a short freeze): hide the overlay once frames are flowing after that,
+    // and the jet's shaders have compiled (FLIGHT_SIM_WARM, src/game.rs; ~10 s at most)
     let frames = 0;
     const watch = () => {
-      if (++frames >= 20) {
+      if (++frames >= 20 && (window.FLIGHT_SIM_WARM || frames >= 600)) {
         overlay.classList.add("hidden");
         canvas.focus();
       } else requestAnimationFrame(watch);
