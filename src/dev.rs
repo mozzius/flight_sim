@@ -371,6 +371,8 @@ fn autopilot_player(
 /// - `gun`: holds the trigger
 /// - `stress`: big explosions every 0.8 s ahead of the jet
 /// - `contrail`: the player starts 5 km higher, where contrails form
+/// - `clouds`: a still smoke trail from the camera out to 40 km, laid two
+///   seconds in (see `cloud_test_trail` in effects)
 fn fx_mode() -> String {
     std::env::var("FLIGHT_SIM_FX_TEST").unwrap_or_default()
 }

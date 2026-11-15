@@ -636,3 +636,30 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     }
     return color;
 }
+
+// ---------------------------------------------------------------------------
+// occlusion pass: a small screen-space map the transparent effects (smoke,
+// fire, plumes, haze) read to hide behind the clouds, which they'd otherwise
+// draw over (the clouds composite first in the transparent pass). x: cloud
+// opacity, y: opacity * mean cloud distance (km), premultiplied so filtering
+// across a cloud's edge gives an opacity-weighted mean distance.
+
+fn occlusion_tap(px: vec2<i32>) -> vec2<f32> {
+    let a = textureLoad(cloud_color, px, 0).a;
+    let d = min(textureLoad(cloud_data, px, 0).y, 200.0);
+    return vec2(a, a * d);
+}
+
+@fragment
+fn fs_occlusion(in: VsOut) -> @location(0) vec2<f32> {
+    // bilinear footprint in the low-res cloud textures
+    let lp = in.uv * u.low_size - 0.5;
+    let base = floor(lp);
+    let f = fract(lp);
+    let lo_max = vec2<i32>(u.low_size) - 1;
+    let c00 = clamp(vec2<i32>(base), vec2(0), lo_max);
+    let c11 = clamp(vec2<i32>(base) + 1, vec2(0), lo_max);
+    let top = mix(occlusion_tap(c00), occlusion_tap(vec2(c11.x, c00.y)), f.x);
+    let bottom = mix(occlusion_tap(vec2(c00.x, c11.y)), occlusion_tap(c11), f.x);
+    return mix(top, bottom, f.y);
+}

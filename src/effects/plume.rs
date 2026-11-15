@@ -62,6 +62,10 @@ pub struct PlumeMaterial {
     #[texture(1)]
     #[sampler(2)]
     pub noise: Handle<Image>,
+    /// [`crate::clouds::OCCLUSION_MAP`]: hides the effect behind cloud.
+    #[texture(3)]
+    #[sampler(4)]
+    pub cloud_occlusion: Handle<Image>,
 }
 
 impl Material for PlumeMaterial {
@@ -106,6 +110,10 @@ pub struct HazeMaterial {
     #[texture(1)]
     #[sampler(2)]
     pub noise: Handle<Image>,
+    /// [`crate::clouds::OCCLUSION_MAP`]: hides the effect behind cloud.
+    #[texture(3)]
+    #[sampler(4)]
+    pub cloud_occlusion: Handle<Image>,
 }
 
 impl Material for HazeMaterial {

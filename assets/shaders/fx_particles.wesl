@@ -16,6 +16,8 @@ struct FxGlobals {
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var atlas_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(3) var noise_tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(4) var noise_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(5) var cloud_occlusion_map: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(6) var cloud_occlusion_sampler: sampler;
 
 const PI: f32 = 3.14159265;
 const TILES: f32 = 4.0;
@@ -111,6 +113,17 @@ fn light_smoke(albedo: vec3<f32>, n: vec3<f32>, to_cam: vec3<f32>, thick: f32, d
     return albedo / PI * (sun * (diffuse * self_shadow + forward) + sky);
 }
 
+/// How much of this fragment the clouds in front of the opaque scene hide
+/// (they composite before the effects, which would otherwise draw over them).
+/// Sampled in uniform control flow: call it before any branch.
+fn cloud_occlusion(frag: vec4<f32>, world_pos: vec3<f32>) -> f32 {
+    let o = textureSampleLevel(cloud_occlusion_map, cloud_occlusion_sampler, (frag.xy - view.viewport.xy) / view.viewport.zw, 0.0).xy;
+    let mean = o.y / max(o.x, 1e-4);
+    let d = distance(view.world_position, world_pos) / 1000.0;
+    let spread = 0.15 + 0.05 * mean;
+    return clamp(o.x, 0.0, 1.0) * smoothstep(mean - spread, mean + spread, d);
+}
+
 @fragment
 fn fragment(in: VOut) -> @location(0) vec4<f32> {
     // UV derivatives up front, while control flow is still uniform: the samples
@@ -118,6 +131,7 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
     // textureSample, so they use textureSampleGrad with these.
     let ddx = dpdx(in.uv);
     let ddy = dpdy(in.uv);
+    let clear = 1.0 - cloud_occlusion(in.position, in.world);
     let kind = i32(in.b.x + 0.5);
     let size = in.b.y;
     let glow = in.b.z;
@@ -138,14 +152,14 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
         let v = in.uv.y;
         let core = exp(-u * u * 9.0) * smoothstep(1.0, 0.75, v) * smoothstep(0.0, 0.25, v) * (0.35 + 0.65 * v);
         let e = fire_color(0.7 + heat * 0.4) * glow * core * opacity;
-        return vec4(e, 0.0);
+        return vec4(e * clear, 0.0);
     }
     if kind == 2 {
         // glow: hot core with a wide soft halo
         let r = length(in.uv * 2.0 - 1.0);
         let g = exp(-r * r * 9.0) * 0.8 + exp(-r * r * 40.0) * 1.5;
         let e = fire_color(0.75 + heat * 0.35) * glow * g * opacity;
-        return vec4(e, 0.0);
+        return vec4(e * clear, 0.0);
     }
 
     let rot = in.b.w;
@@ -201,5 +215,5 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
     let soot = clamp(1.0 - heat * 0.9, 0.0, 1.0);
     let rgb = (lit * soot + emission) * alpha;
     let a = alpha * mix(0.55, 1.0, soot);
-    return vec4(rgb, a);
+    return vec4(rgb, a) * clear;
 }

@@ -5,8 +5,9 @@
 //! noise and Worley erosion noise, all baked on the CPU at startup. The GPU
 //! side (`assets/shaders/clouds.wgsl`) marches it at reduced resolution right
 //! after the opaque pass, then a depth-aware upsample composites it as the
-//! first item of the transparent pass, so it sits behind plumes and trails but
-//! in front of the sky and distant terrain.
+//! first item of the transparent pass, in front of the sky and distant
+//! terrain. The effects drawn after it (plumes, trails, explosions) hide
+//! behind it themselves by reading [`OCCLUSION_MAP`].
 //!
 //! * `FLIGHT_SIM_NO_CLOUDS=1` disables the plugin.
 //! * `CLOUDS_DIV=<n>` renders the clouds at 1/n resolution per axis.
@@ -21,6 +22,9 @@
 //! * `CLOUDS_NOVSYNC=1` disables vsync in windowed runs, for timing.
 //! * `CLOUDS_NO_SHADOW=1` stops the terrain, water and scenery reading the
 //!   cloud shadow map (for before/after shots).
+//! * `CLOUDS_NO_OCCLUSION=1` skips the occlusion pass (the map stays clear),
+//!   so smoke, fire and plumes draw over the clouds again (for before/after
+//!   shots).
 //!
 //! The CPU-side [`CloudField`] mirrors the coverage map and height profile so
 //! gameplay can ask how much cloud is at a point.
@@ -84,6 +88,24 @@ const SHADOW_EXTENT: f32 = 32_000.0;
 /// Texels across the shadow map: coarser on phones.
 fn shadow_size() -> u32 {
     if crate::platform::low_memory() { 128 } else { 256 }
+}
+
+/// Screen-space map of the clouds in front of the opaque scene, drawn every
+/// frame after the temporal resolve and sampled by the transparent effects
+/// (smoke, fire, plumes, haze) at `frag.xy / viewport`, so cloud between them
+/// and the camera covers them: the clouds composite before them in the
+/// transparent pass. x: cloud opacity, y: opacity * mean cloud distance (km).
+pub const OCCLUSION_MAP: Handle<Image> = bevy::asset::uuid_handle!("2f8e7a61-4b3d-4c9a-8e15-7d0b6a3c9f52");
+
+/// Texels across the occlusion map: coarser on phones.
+fn occlusion_size() -> UVec2 {
+    if crate::platform::low_memory() { UVec2::new(320, 180) } else { UVec2::new(640, 360) }
+}
+
+fn occlusion_enabled() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("CLOUDS_NO_OCCLUSION").is_err());
+    *ON
 }
 
 /// Cloud shadow parameters for the materials: x, y: the layer's bottom and
@@ -162,10 +184,31 @@ fn insert_shadow_map(mut images: ResMut<Assets<Image>>) {
     let _ = images.insert(&SHADOW_MAP, image);
 }
 
+/// No cloud in front of anything until the clouds draw into it.
+fn insert_occlusion_map(mut images: ResMut<Assets<Image>>) {
+    let n = occlusion_size();
+    let mut image = Image::new_fill(
+        Extent3d { width: n.x, height: n.y, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        &[0; 4],
+        TextureFormat::Rg16Float,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage |= TextureUsages::RENDER_ATTACHMENT;
+    image.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
+        address_mode_u: bevy::image::ImageAddressMode::ClampToEdge,
+        address_mode_v: bevy::image::ImageAddressMode::ClampToEdge,
+        mag_filter: bevy::image::ImageFilterMode::Linear,
+        min_filter: bevy::image::ImageFilterMode::Linear,
+        ..default()
+    });
+    let _ = images.insert(&OCCLUSION_MAP, image);
+}
+
 impl Plugin for CloudsPlugin {
     fn build(&self, app: &mut App) {
         let disabled = std::env::var("FLIGHT_SIM_NO_CLOUDS").is_ok();
-        app.add_systems(Startup, insert_shadow_map)
+        app.add_systems(Startup, (insert_shadow_map, insert_occlusion_map))
             .add_systems(PostUpdate, shade_aircraft);
         let mut settings = CloudSettings::default();
         if let Some(div) = std::env::var("CLOUDS_DIV")
@@ -767,6 +810,7 @@ enum CloudsPipelineKey {
     Raymarch,
     Resolve,
     Shadow,
+    Occlusion,
     Composite {
         msaa_samples: u32,
         target_format: TextureFormat,
@@ -951,7 +995,10 @@ impl SpecializedRenderPipeline for CloudsPipelines {
         let msaa_samples = match key {
             CloudsPipelineKey::Linearize { msaa_samples }
             | CloudsPipelineKey::Composite { msaa_samples, .. } => msaa_samples,
-            CloudsPipelineKey::Raymarch | CloudsPipelineKey::Resolve | CloudsPipelineKey::Shadow => 1,
+            CloudsPipelineKey::Raymarch
+            | CloudsPipelineKey::Resolve
+            | CloudsPipelineKey::Shadow
+            | CloudsPipelineKey::Occlusion => 1,
         };
         let low_res_targets = vec![
             Some(ColorTargetState {
@@ -1010,6 +1057,22 @@ impl SpecializedRenderPipeline for CloudsPipelines {
                     entry_point: Some("fs_shadow".into()),
                     targets: vec![Some(ColorTargetState {
                         format: TextureFormat::R8Unorm,
+                        blend: None,
+                        write_mask: ColorWrites::ALL,
+                    })],
+                    ..default()
+                }),
+                ..default()
+            },
+            CloudsPipelineKey::Occlusion => RenderPipelineDescriptor {
+                label: Some("clouds_occlusion_pipeline".into()),
+                layout: vec![self.composite_layout.clone()],
+                vertex,
+                fragment: Some(FragmentState {
+                    shader: shader.clone(),
+                    entry_point: Some("fs_occlusion".into()),
+                    targets: vec![Some(ColorTargetState {
+                        format: TextureFormat::Rg16Float,
                         blend: None,
                         write_mask: ColorWrites::ALL,
                     })],
@@ -1078,6 +1141,7 @@ struct CloudsViewPipelines {
     raymarch: CachedRenderPipelineId,
     resolve: CachedRenderPipelineId,
     shadow: CachedRenderPipelineId,
+    occlusion: CachedRenderPipelineId,
 }
 
 #[derive(Component)]
@@ -1165,11 +1229,14 @@ fn queue_clouds(
             },
         );
         let shadow = specialized.specialize(&pipeline_cache, &pipelines, CloudsPipelineKey::Shadow);
+        let occlusion =
+            specialized.specialize(&pipeline_cache, &pipelines, CloudsPipelineKey::Occlusion);
         commands.entity(entity).insert(CloudsViewPipelines {
             linearize,
             raymarch,
             resolve,
             shadow,
+            occlusion,
         });
         phase.add_transient(Transparent3d {
             sorting_info: TransparentSortingInfo3d::Sorted {
@@ -1461,6 +1528,7 @@ fn clouds_raymarch_pass(
         With<CloudsView>,
     >,
     pipeline_cache: Res<PipelineCache>,
+    images: Res<RenderAssets<GpuImage>>,
     mut ctx: RenderContext,
 ) {
     let (textures, history, bind_groups, pipelines) = view.into_inner();
@@ -1513,20 +1581,41 @@ fn clouds_raymarch_pass(
         pass.draw(0..3, 0..1);
     }
     let write = history.write_index();
+    {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("clouds_temporal_resolve"),
+            color_attachments: &[
+                attachment(&textures.resolved_color[write].default_view),
+                attachment(&textures.resolved_data[write].default_view),
+            ],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(resolve);
+        pass.set_bind_group(0, &bind_groups.resolve, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    // the effects' view of the clouds (`CLOUDS_NO_OCCLUSION` leaves it clear)
+    let Some(target) = images.get(&OCCLUSION_MAP) else {
+        return;
+    };
     let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-        label: Some("clouds_temporal_resolve"),
-        color_attachments: &[
-            attachment(&textures.resolved_color[write].default_view),
-            attachment(&textures.resolved_data[write].default_view),
-        ],
+        label: Some("clouds_occlusion"),
+        color_attachments: &[attachment(&target.texture_view)],
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    pass.set_pipeline(resolve);
-    pass.set_bind_group(0, &bind_groups.resolve, &[]);
-    pass.draw(0..3, 0..1);
+    if occlusion_enabled()
+        && let Some(occlusion) = pipeline_cache.get_render_pipeline(pipelines.occlusion)
+    {
+        pass.set_pipeline(occlusion);
+        pass.set_bind_group(0, &bind_groups.composite, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }
 
 /// Draws the top-down cloud shadow map, before the opaque pass that samples it.

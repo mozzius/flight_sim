@@ -223,6 +223,10 @@ pub struct ParticleMaterial {
     #[texture(3)]
     #[sampler(4)]
     pub noise: Handle<Image>,
+    /// [`crate::clouds::OCCLUSION_MAP`]: hides the effects behind cloud.
+    #[texture(5)]
+    #[sampler(6)]
+    pub cloud_occlusion: Handle<Image>,
 }
 
 impl Material for ParticleMaterial {
@@ -281,6 +285,7 @@ pub fn setup(
         globals: FxGlobals::default(),
         atlas,
         noise: noise.clone(),
+        cloud_occlusion: crate::clouds::OCCLUSION_MAP,
     });
     commands.spawn((
         Name::new("particles"),

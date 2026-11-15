@@ -13,6 +13,8 @@ struct PlumeParams {
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> plume: PlumeParams;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var noise_tex: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var noise_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(3) var cloud_occlusion_map: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(4) var cloud_occlusion_sampler: sampler;
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -143,8 +145,21 @@ fn emission(p: vec3<f32>, t: f32) -> vec3<f32> {
     return e;
 }
 
+/// How much of this fragment the clouds in front of the opaque scene hide
+/// (they composite before the effects, which would otherwise draw over them).
+/// Sampled in uniform control flow: call it before any branch.
+fn cloud_occlusion(frag: vec4<f32>, world_pos: vec3<f32>) -> f32 {
+    let o = textureSampleLevel(cloud_occlusion_map, cloud_occlusion_sampler, (frag.xy - view.viewport.xy) / view.viewport.zw, 0.0).xy;
+    let mean = o.y / max(o.x, 1e-4);
+    let d = distance(view.world_position, world_pos) / 1000.0;
+    let spread = 0.15 + 0.05 * mean;
+    return clamp(o.x, 0.0, 1.0) * smoothstep(mean - spread, mean + spread, d);
+}
+
 @fragment
 fn fragment(in: VOut) -> @location(0) vec4<f32> {
+    // the hull's far side is close enough to the jet for this
+    let clear = 1.0 - cloud_occlusion(in.position, in.world);
     let half_len = plume.shape.x;
     let radius = plume.shape.y;
     let ro = in.local_cam;
@@ -191,5 +206,5 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
         let p = ro + rd * (t0 + (f32(i) + jitter) * dt);
         sum += emission(p, globals.time);
     }
-    return vec4(sum * dt * 0.32, 0.0);
+    return vec4(sum * dt * 0.32 * clear, 0.0);
 }

@@ -80,6 +80,46 @@ impl Plugin for EffectsPlugin {
                 // last frame's particles (a missile's glow trailed ~10 m behind it)
                 .before(bevy::asset::AssetEventSystems),
         );
+        if std::env::var("FLIGHT_SIM_FX_TEST").is_ok_and(|m| m == "clouds") {
+            app.add_systems(Update, cloud_test_trail);
+        }
+    }
+}
+
+/// `FLIGHT_SIM_FX_TEST=clouds`: two seconds in, lays a still smoke trail from
+/// just ahead of the camera out to 40 km, for checking the clouds hide it
+/// (pair with `CLOUDS_DEBUG_CAM=band` and `CLOUDS_NO_OCCLUSION=1`).
+fn cloud_test_trail(
+    time: Res<Time<Real>>,
+    camera: Query<&GlobalTransform, With<crate::camera::MainCamera>>,
+    mut particles: ResMut<Particles>,
+    mut done: Local<bool>,
+) {
+    if *done || time.elapsed_secs() < 2.0 {
+        return;
+    }
+    let Ok(cam) = camera.single() else { return };
+    *done = true;
+    let (pos, fwd, right) = (cam.translation(), cam.forward().as_vec3(), cam.right().as_vec3());
+    let mut d = 300.0;
+    while d < 40_000.0 {
+        let size = 10.0 + d * 0.012;
+        let p = pos + fwd * d + right * (200.0 - d * 0.12) + Vec3::Y * (d * 0.015 - 40.0);
+        particles.add(
+            Particle {
+                life: 1e5,
+                size: (size, size),
+                wind: 0.0,
+                drag: 0.0,
+                spin: 0.0,
+                dissolve: 0.999,
+                albedo: Vec3::splat(0.75),
+                opacity: 0.9,
+                ..Particle::puff(p)
+            },
+            1.0,
+        );
+        d += size * 0.35;
     }
 }
 
@@ -231,6 +271,7 @@ fn attach_aircraft_effects(
                         shape: Vec4::new(plume::HAZE_HALF_LENGTH, plume::HAZE_RADIUS, 0.0, 0.0),
                     },
                     noise: assets.noise.clone(),
+                    cloud_occlusion: crate::clouds::OCCLUSION_MAP,
                 })),
                 Transform::from_translation(Vec3::new(0.0, NOZZLES[0].y, 6.8 + plume::HAZE_HALF_LENGTH))
                     .with_rotation(along),
@@ -253,6 +294,7 @@ fn attach_aircraft_effects(
                             shape,
                         },
                         noise: assets.noise.clone(),
+                        cloud_occlusion: crate::clouds::OCCLUSION_MAP,
                     })),
                     Transform::from_translation(nozzle + Vec3::Z * plume::HALF_LENGTH)
                         .with_rotation(along),
