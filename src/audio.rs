@@ -141,8 +141,9 @@ fn finish(mut s: Vec<f32>, peak: f32, loop_fade: Option<f32>) -> Vec<f32> {
         let n = samples(fade).min(s.len() / 2);
         let len = s.len() - n;
         for i in 0..n {
+            // equal power: the loops are noise, so a linear fade would dip at the seam
             let w = i as f32 / n as f32;
-            s[i] = s[i] * w + s[len + i] * (1.0 - w);
+            s[i] = s[i] * w.sqrt() + s[len + i] * (1.0 - w).sqrt();
         }
         s.truncate(len);
     }
@@ -172,22 +173,44 @@ fn wav(samples: &[f32]) -> AudioSource {
     AudioSource { bytes: Arc::from(b) }
 }
 
-/// Jet engine: broadband roar plus a turbine whine with a little wobble.
+/// Slow random drift in -1..1 (smoothed noise, normalised to the clip).
+fn drift(seed: u32, len: usize, hz: f32) -> Vec<f32> {
+    let mut rng = Rng(seed);
+    let (mut a, mut b) = (LowPass::new(hz), LowPass::new(hz));
+    // (run in first, so it doesn't start from rest)
+    for _ in 0..samples(2.0 / hz) {
+        b.run(a.run(rng.next()));
+    }
+    let mut d: Vec<f32> = (0..len).map(|_| b.run(a.run(rng.next()))).collect();
+    let mean = d.iter().sum::<f32>() / len as f32;
+    let max = d.iter().fold(1e-9f32, |m, x| m.max((x - mean).abs()));
+    d.iter_mut().for_each(|x| *x = (*x - mean) / max);
+    d
+}
+
+/// Jet engine, heard from the cockpit: a muffled roar whose level and colour
+/// wander (so the loop doesn't repeat audibly), a soft hiss, and a faint
+/// turbine tone that drifts in pitch.
 fn synth_engine() -> Vec<f32> {
+    let len = samples(9.0);
     let mut rng = Rng(0x1234_5678);
-    let (mut rumble, mut mid, mut hiss) = (LowPass::new(180.0), BandPass::new(900.0, 0.8), BandPass::new(3_500.0, 1.5));
-    let s = (0..samples(3.2))
+    let (swell, colour, pitch) = (drift(11, len, 0.6), drift(23, len, 0.35), drift(37, len, 0.25));
+    let (mut rumble, mut rumble2, mut mid, mut hiss) =
+        (LowPass::new(160.0), LowPass::new(160.0), BandPass::new(600.0, 0.7), BandPass::new(2_400.0, 1.0));
+    let mut phase = 0.0f32;
+    let s = (0..len)
         .map(|i| {
-            let t = t_of(i);
             let n = rng.next();
-            let wobble = 1.0 + 0.004 * (t * TAU * 0.7).sin();
-            let whine = (t * TAU * 2_350.0 * wobble).sin() * 0.05
-                + (t * TAU * 4_700.0 * wobble).sin() * 0.025
-                + (t * TAU * 1_175.0 * wobble).sin() * 0.02;
-            rumble.run(n) * 2.6 + mid.run(n) * 0.35 + hiss.run(n) * 0.12 + whine
+            mid.set(600.0 * (1.0 + 0.25 * colour[i]));
+            hiss.set(2_400.0 * (1.0 + 0.15 * colour[i]));
+            // (integrated, so the pitch drift stays a drift)
+            phase = (phase + 1_480.0 * (1.0 + 0.006 * pitch[i]) / SAMPLE_RATE as f32).fract();
+            let tone = (phase * TAU).sin() * 0.012 + (phase * TAU * 0.5).sin() * 0.008;
+            let roar = rumble2.run(rumble.run(n)) * 4.5 * (1.0 + 0.18 * swell[i]);
+            roar + mid.run(n) * 0.22 * (1.0 - 0.12 * swell[i]) + hiss.run(n) * 0.045 + tone
         })
         .collect();
-    finish(s, 0.9, Some(0.4))
+    finish(s, 0.9, Some(1.2))
 }
 
 /// Afterburner: deep rumble with random crackle.
@@ -525,7 +548,7 @@ fn player_loops(
                 let alive = if disabled { 0.0 } else { 1.0 };
                 match kind {
                     PlayerLoop::Engine => (
-                        (0.25 + 0.35 * state.spool) * alive,
+                        (0.12 + 0.2 * state.spool) * alive,
                         0.75 + 0.45 * state.spool,
                     ),
                     PlayerLoop::Afterburner => (
@@ -648,7 +671,7 @@ fn remote_loops(
                 let d = doppler(listener_pos, listener_vel, gt.translation(), state.velocity);
                 match kind {
                     RemoteLoop::Engine => (
-                        if disabled { 0.0 } else { 0.5 + 0.5 * state.spool + if state.afterburner_on { 0.5 } else { 0.0 } },
+                        if disabled { 0.0 } else { 0.35 + 0.4 * state.spool + if state.afterburner_on { 0.4 } else { 0.0 } },
                         d * (0.75 + 0.45 * state.spool),
                     ),
                     _ => (
@@ -800,5 +823,23 @@ fn feedback_sounds(
     }
     if killed {
         play(&sounds.kill_chime, 0.45);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes the synthesised loops to $SOUND_DIR as WAVs, for listening to.
+    #[test]
+    fn write_clips() {
+        let Ok(dir) = std::env::var("SOUND_DIR") else {
+            return;
+        };
+        for (name, s) in [("engine", synth_engine()), ("afterburner", synth_afterburner()), ("wind", synth_wind())] {
+            // three times round, so the loop seam and repetition are audible
+            let looped: Vec<f32> = s.iter().chain(&s).chain(&s).copied().collect();
+            std::fs::write(format!("{dir}/{name}.wav"), &*wav(&looped).bytes).unwrap();
+        }
     }
 }
