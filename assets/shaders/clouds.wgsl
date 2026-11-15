@@ -354,8 +354,6 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
         return out;
     }
 
-    // rotate the jitter every frame; the temporal resolve averages it out
-    let jitter = ign(in.position.xy + f32(u.frame % 64u) * 5.588238);
     let cos_theta = dot(rd, u.sun_dir);
     let sun = u.sun_color * u.sun_mult;
 
@@ -370,6 +368,14 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
     // all, and one jittered sample would leave the cloud over the jet noisy.
     let span_len = span.y - span.x;
     let short_span = span_len < u.step_min * 4.0;
+    // rotate the jitter every frame; the temporal resolve averages it out.
+    // Not over a short span: its fine steps don't need it, and a texel there
+    // often can't use history (the jet moves on screen as the camera swings
+    // round it), which would leave the dither showing on the jet.
+    var jitter = ign(in.position.xy + f32(u.frame % 64u) * 5.588238);
+    if short_span {
+        jitter = 0.5;
+    }
 
     var t = span.x;
     var in_cloud = short_span;
@@ -522,13 +528,32 @@ fn fs_shadow(in: VsOut) -> @location(0) f32 {
 // ---------------------------------------------------------------------------
 // temporal resolve pass (reduced resolution)
 //
-// Reprojects last frame's result through the cloud's mean distance, clamps it
+// Reprojects last frame's result through the cloud's mean distance (the
+// scene's where there's no cloud), clamps it
 // to the current frame's 3x3 neighbourhood (so moving planes don't ghost) and
 // blends it with the new, differently jittered sample.
+//
+// Every texel's cloud was marched to its own scene distance, so history only
+// counts where it was marched to the same one: across a silhouette (the jet
+// turning over a cloud deck) a texel would otherwise keep cloud marched for
+// the background, and the depth-aware upsample, trusting the texel's current
+// depth, would paint it over the jet in low-res blocks until the camera
+// settled. History texels are fetched one by one (a filtered fetch would mix
+// a 20 m jet with a 1000 km sky into a depth matching neither) and weighted
+// by how well their depth matches; the clamp only looks at neighbours at this
+// texel's depth.
 
 struct ResolveOut {
     @location(0) color: vec4<f32>,
     @location(1) data: vec2<f32>,
+}
+
+/// How well scene distance `z` matches the texel's `d` (km): by their ratio,
+/// so a jet 20 m away needs a match within a few metres and distant terrain
+/// within a few km (sloping terrain spans that much across a texel). 1 within
+/// ~20%, 0 past ~50%.
+fn depth_match(z: f32, d: f32) -> f32 {
+    return 1.0 - smoothstep(0.18, 0.4, abs(log(max(z, 1e-3) / max(d, 1e-3))));
 }
 
 @fragment
@@ -545,9 +570,44 @@ fn fs_resolve(in: VsOut) -> ResolveOut {
         return out;
     }
 
-    // where was this bit of cloud last frame?
+    // Past nearly opaque cloud the depth makes no difference (a ridge
+    // hidden in the overcast): compare depths only out to a few times the
+    // cloud's mean distance there, so such texels keep their history.
+    var cap = 1e9;
+    if cur.a > 0.9 {
+        cap = 4.0 * cur_data.y;
+    }
+    let d = min(cur_data.x, cap);
+
+    // The 3x3 neighbours at this texel's depth (the other side of a
+    // silhouette has unrelated cloud): their range clamps the history, and
+    // their mean stands in for it where there is none, so a texel the jet
+    // has just uncovered doesn't show the raw dither for a frame.
+    var mn = cur;
+    var mx = cur;
+    var sum = vec4(0.0);
+    var wsum = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let c = clamp(px + vec2(x, y), vec2(0), lo_max);
+            let w = depth_match(min(textureLoad(cloud_data, c, 0).x, cap), d);
+            if w > 0.0 {
+                let k = textureLoad(cloud_color, c, 0);
+                mn = min(mn, k);
+                mx = max(mx, k);
+                sum += k * w;
+                wsum += w;
+            }
+        }
+    }
+    // (the centre always matches itself, so wsum >= 1)
+    let fresh = sum / wsum;
+    out.color = fresh;
+
+    // where was this bit of cloud last frame? (through the scene where
+    // there's no cloud: no cloud has a mean distance of FAR_KM)
     let rd = ray_dir(in.uv);
-    let world = u.camera_pos + rd * (cur_data.y * 1000.0);
+    let world = u.camera_pos + rd * (min(cur_data.y, cur_data.x) * 1000.0);
     let prev_clip = u.prev_clip_from_world * vec4(world, 1.0);
     if prev_clip.w <= 0.0 {
         return out;
@@ -557,28 +617,30 @@ fn fs_resolve(in: VsOut) -> ResolveOut {
     if any(prev_uv < vec2(0.0)) || any(prev_uv > vec2(1.0)) {
         return out;
     }
-    let hist = textureSampleLevel(history_color, clamp_sampler, prev_uv, 0.0);
-    let hist_data = textureSampleLevel(history_data, clamp_sampler, prev_uv, 0.0).xy;
 
-    // neighbourhood clamp
-    var mn = cur;
-    var mx = cur;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let c = textureLoad(cloud_color, clamp(px + vec2(x, y), vec2(0), lo_max), 0);
-            mn = min(mn, c);
-            mx = max(mx, c);
+    // depth-aware bilinear fetch of the history
+    let hp = prev_uv * u.low_size - 0.5;
+    let hb = vec2<i32>(floor(hp));
+    let hf = fract(hp);
+    var hist = vec4(0.0);
+    var hw = 0.0;
+    for (var y = 0; y <= 1; y++) {
+        for (var x = 0; x <= 1; x++) {
+            let c = clamp(hb + vec2(x, y), vec2(0), lo_max);
+            let bw = select(1.0 - hf.x, hf.x, x == 1) * select(1.0 - hf.y, hf.y, y == 1);
+            let w = bw * depth_match(min(textureLoad(history_data, c, 0).x, cap), d);
+            hist += textureLoad(history_color, c, 0) * w;
+            hw += w;
         }
     }
-    let clamped = clamp(hist, mn, mx);
-
-    // geometry moved in front of / away from this cloud: trust the new sample
-    var blend = u.temporal_blend;
-    let tol = max(cur_data.x * 0.1, 0.05);
-    if abs(hist_data.x - cur_data.x) > tol {
-        blend = max(blend, 0.5);
+    if hw < 0.02 {
+        // nothing last frame was marched to this depth: a silhouette moved
+        // over this texel
+        return out;
     }
-    out.color = mix(clamped, cur, blend);
+    let accumulated = mix(clamp(hist / hw, mn, mx), cur, u.temporal_blend);
+    // (a partial match, at an edge: partly the neighbours instead)
+    out.color = mix(fresh, accumulated, saturate(hw * 2.0));
     return out;
 }
 

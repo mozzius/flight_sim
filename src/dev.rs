@@ -21,6 +21,9 @@
 //! `tut-rings+20` waits 20 s into it).
 //! `FLIGHT_SIM_ALT=<m>` starts (and respawns) the player's jet at that
 //! altitude, e.g. inside the cloud layer (~1900-4300 m).
+//! `FLIGHT_SIM_STICK=<pitch>,<roll>[,<lead secs>]` holds the player's stick
+//! there (+1 = full pull / roll right), from `lead` seconds before the
+//! screenshot (default: all along), e.g. to swing the jet across the screen.
 
 use bevy::{
     prelude::*,
@@ -107,6 +110,14 @@ impl Plugin for DevPlugin {
                     .before(crate::flight::FlightSystems::Physics),
             )
             .add_systems(Update, fx_test_explosion);
+        }
+        if std::env::var("FLIGHT_SIM_STICK").is_ok() {
+            app.add_systems(
+                FixedUpdate,
+                force_stick
+                    .after(crate::flight::FlightSystems::Pilots)
+                    .before(crate::flight::FlightSystems::Physics),
+            );
         }
         if std::env::var("FLIGHT_SIM_CAM").is_ok() {
             app.add_systems(
@@ -412,6 +423,29 @@ fn force_afterburner(
         if mode == "vapour" && staged {
             input.pitch = 1.0;
         }
+    }
+}
+
+/// `FLIGHT_SIM_STICK`: see the header.
+fn force_stick(
+    time: Res<Time<Real>>,
+    shot: Option<Res<AutoScreenshot>>,
+    mut player: Query<&mut crate::flight::ControlInput, With<crate::game::Player>>,
+) {
+    let v: Vec<f32> = std::env::var("FLIGHT_SIM_STICK")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    let (pitch, roll) = (v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(0.0));
+    if let (Some(lead), Some(shot)) = (v.get(2), shot.as_ref())
+        && time.elapsed_secs() < shot.after - lead
+    {
+        return;
+    }
+    for mut input in &mut player {
+        input.pitch = pitch;
+        input.roll = roll;
     }
 }
 
