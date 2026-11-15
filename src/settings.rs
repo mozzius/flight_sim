@@ -1,5 +1,5 @@
-//! Player settings: GRAPHICS (the main menu's SETTINGS) and the endless
-//! DIFFICULTY, plus whether the tutorial's been finished. Kept in `localStorage` on the web and in
+//! Player settings: SOUND and GRAPHICS (the main menu's SETTINGS), the
+//! scenario's DIFFICULTY, ENEMIES and ALLIES, plus whether the tutorial's been finished. Kept in `localStorage` on the web and in
 //! `<data dir>/flight_sim/settings` (`key=value` lines) natively; screenshot
 //! runs keep none. `FLIGHT_SIM_GRAPHICS=auto|low|high` and
 //! `FLIGHT_SIM_DIFFICULTY=easy|normal|hard` pin them for a run without saving.
@@ -68,12 +68,51 @@ impl Graphics {
     }
 }
 
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Settings {
     pub graphics: Graphics,
     pub difficulty: Difficulty,
+    /// Sound level, 0 (off) ..= `SOUND_STEPS` (full).
+    pub sound: u8,
+    /// Hostiles per scenario wave: 0 = by the difficulty (growing waves), else that many.
+    pub enemies: u8,
+    /// Wingmen in a scenario.
+    pub allies: u8,
     /// The tutorial has been finished once (the menu stops highlighting it).
     pub tutorial_done: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            graphics: Graphics::default(),
+            difficulty: Difficulty::default(),
+            sound: SOUND_STEPS,
+            enemies: 0,
+            allies: DEFAULT_ALLIES,
+            tutorial_done: false,
+        }
+    }
+}
+
+pub const SOUND_STEPS: u8 = 4;
+pub const MAX_ENEMIES: u8 = 16;
+pub const MAX_ALLIES: u8 = 7;
+const DEFAULT_ALLIES: u8 = 3;
+
+impl Settings {
+    /// 0..1, for the audio.
+    pub fn volume(&self) -> f32 {
+        self.sound.min(SOUND_STEPS) as f32 / SOUND_STEPS as f32
+    }
+
+    pub fn sound_name(&self) -> String {
+        if self.sound == 0 { "off".into() } else { format!("{}%", self.sound as u32 * 100 / SOUND_STEPS as u32) }
+    }
+
+    pub fn enemies_name(&self) -> String {
+        if self.enemies == 0 { "auto".into() } else { self.enemies.to_string() }
+    }
 }
 
 /// The graphics setting the running game uses (on the web, the one the page
@@ -84,11 +123,19 @@ pub struct Applied(pub Graphics);
 const GRAPHICS_KEY: &str = "flight_sim_graphics";
 const DIFFICULTY_KEY: &str = "flight_sim_difficulty";
 const TUTORIAL_KEY: &str = "flight_sim_tutorial";
+const SOUND_KEY: &str = "flight_sim_sound";
+const ENEMIES_KEY: &str = "flight_sim_enemies";
+const ALLIES_KEY: &str = "flight_sim_allies";
 
 impl Settings {
     pub fn load() -> Self {
         let pick = |env: &str, key: &str| crate::environment::setting(env).or_else(|| store::get(key));
+        let number = |env: &str, key: &str, max: u8| pick(env, key).and_then(|s| s.trim().parse::<u8>().ok()).map(|n| n.min(max));
+        let d = Self::default();
         Self {
+            sound: number("FLIGHT_SIM_SOUND", SOUND_KEY, SOUND_STEPS).unwrap_or(d.sound),
+            enemies: number("FLIGHT_SIM_ENEMIES", ENEMIES_KEY, MAX_ENEMIES).unwrap_or(d.enemies),
+            allies: number("FLIGHT_SIM_ALLIES", ALLIES_KEY, MAX_ALLIES).unwrap_or(d.allies),
             graphics: pick("FLIGHT_SIM_GRAPHICS", GRAPHICS_KEY).and_then(|s| Graphics::parse(&s)).unwrap_or_default(),
             difficulty: pick("FLIGHT_SIM_DIFFICULTY", DIFFICULTY_KEY).and_then(|s| Difficulty::parse(&s)).unwrap_or_default(),
             tutorial_done: store::get(TUTORIAL_KEY).is_some_and(|v| v == "done"),
@@ -115,6 +162,18 @@ pub fn apply_graphics(settings: &Settings, applied: &mut Applied) {
 
 pub fn save_difficulty(difficulty: Difficulty) {
     store::set(DIFFICULTY_KEY, difficulty.name());
+}
+
+pub fn save_sound(level: u8) {
+    store::set(SOUND_KEY, &level.to_string());
+}
+
+pub fn save_enemies(n: u8) {
+    store::set(ENEMIES_KEY, &n.to_string());
+}
+
+pub fn save_allies(n: u8) {
+    store::set(ALLIES_KEY, &n.to_string());
 }
 
 /// Remembers that the tutorial was finished.

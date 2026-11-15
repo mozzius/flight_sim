@@ -277,20 +277,17 @@ fn initial_spawn(
     if *mode == GameMode::Tutorial {
         return;
     }
-    // wingmen in a loose finger-four (a pair in a challenge, and they don't come back)
-    let wingmen = if *mode == GameMode::Challenge { 2 } else { 3 };
-    for offset in [
-        Vec3::new(-150.0, 20.0, 120.0),
-        Vec3::new(150.0, -20.0, 120.0),
-        Vec3::new(300.0, 0.0, 240.0),
-    ]
-    .into_iter()
-    .take(wingmen)
-    {
+    // wingmen in loose echelons either side (a pair in a challenge, and they don't come back;
+    // a scenario takes the ALLIES pick)
+    let wingmen = if *mode == GameMode::Challenge { 2 } else { settings.allies as usize };
+    for k in 1..=wingmen {
+        let side = if k % 2 == 1 { -1.0 } else { 1.0 };
+        let rank = k.div_ceil(2) as f32;
+        let offset = Vec3::new(side * 150.0 * rank, if k % 2 == 1 { 20.0 } else { -20.0 }, 120.0 * rank);
         spawn_aircraft(&mut commands, &models, &terrain, Team::Blue, Vec3::new(0.0, 1500.0, 6000.0) + offset, north, false);
     }
     let difficulty = crate::difficulty::active(*mode, settings.difficulty);
-    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, difficulty, &mut score, Vec3::new(0.0, 1500.0, 6000.0), north);
+    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, difficulty, settings.enemies, &mut score, Vec3::new(0.0, 1500.0, 6000.0), north);
 }
 
 /// Resets the round's state when it ends (back to the menu, or a retry).
@@ -326,14 +323,22 @@ fn spawn_enemy_wave(
     terrain: &Terrain,
     mode: GameMode,
     difficulty: &crate::difficulty::DifficultyParams,
+    // the ENEMIES pick (0: by the difficulty)
+    enemies: u8,
     score: &mut Score,
     player_pos: Vec3,
     player_heading: Vec3,
 ) {
     score.wave += 1;
     let challenge = mode == GameMode::Challenge;
-    // challenge: 3, 5, 7... hostiles, sharper each wave; endless: by difficulty
-    let count = if challenge { (1 + score.wave * 2).min(25) } else { difficulty.wave_size(score.wave) };
+    // challenge: 3, 5, 7... hostiles, sharper each wave; a scenario: the ENEMIES pick, or by difficulty
+    let count = if challenge {
+        (1 + score.wave * 2).min(25)
+    } else if enemies > 0 {
+        enemies as u32
+    } else {
+        difficulty.wave_size(score.wave)
+    };
     let mut skills = 0.0;
     let mut rng = rand::rng();
     let ahead = Vec3::new(player_heading.x, 0.0, player_heading.z).normalize_or(Vec3::NEG_Z);
@@ -546,6 +551,6 @@ pub fn wave_system(
         return;
     };
     let difficulty = crate::difficulty::active(*mode, settings.difficulty);
-    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, difficulty, &mut score, t.translation, t.forward().as_vec3());
+    spawn_enemy_wave(&mut commands, &models, &terrain, *mode, difficulty, settings.enemies, &mut score, t.translation, t.forward().as_vec3());
     *cooldown = 5.0;
 }

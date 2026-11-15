@@ -1257,7 +1257,7 @@ fn spawn_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
             .with_children(|panel| {
                 panel.spawn((Text::new("TUTORIAL COMPLETE"), text(34.0, GREEN)));
                 panel.spawn(Node { column_gap: px(14), ..default() }).with_children(|row| {
-                    button(row, &font, "ENDLESS", Screen::Score, 0, 0, UiAction::TutorialEndless);
+                    button(row, &font, "SCENARIOS", Screen::Score, 0, 0, UiAction::TutorialEndless);
                     button(row, &font, "MENU", Screen::Score, 1, 0, UiAction::Menu);
                 });
             });

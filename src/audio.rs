@@ -512,6 +512,7 @@ fn approach(current: f32, target: f32, dt: f32, rate: f32) -> f32 {
 fn player_loops(
     time: Res<Time>,
     muted: Res<Muted>,
+    settings: Res<crate::settings::Settings>,
     player: Query<(Entity, &FlightState, &Aircraft, &Weapons, &Targeting, Has<Disabled>), With<Player>>,
     missiles: Query<&Missile>,
     mut loops: Query<(&PlayerLoop, &mut AudioSink)>,
@@ -565,7 +566,7 @@ fn player_loops(
             PlayerLoop::Gun | PlayerLoop::Lock | PlayerLoop::Growl | PlayerLoop::Warning => 40.0,
             _ => 4.0,
         };
-        let target = if muted.0 { 0.0 } else { target };
+        let target = if muted.0 { 0.0 } else { target * settings.volume() };
         sink.set_volume(Volume::Linear(approach(current, target, dt, rate)));
         let current_speed = sink.speed();
         sink.set_speed(approach(current_speed, speed, dt, 3.0));
@@ -624,10 +625,11 @@ fn doppler(listener_pos: Vec3, listener_vel: Vec3, source_pos: Vec3, source_vel:
     ((SPEED_OF_SOUND + toward_source) / (SPEED_OF_SOUND + away_from_listener).max(40.0)).clamp(0.4, 2.5)
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn remote_loops(
     time: Res<Time>,
     muted: Res<Muted>,
+    settings: Res<crate::settings::Settings>,
     state: Res<State<crate::loading::GameState>>,
     camera: Query<&GlobalTransform, With<MainCamera>>,
     player: Query<&FlightState, With<Player>>,
@@ -670,7 +672,7 @@ fn remote_loops(
             }
         };
         // (the menu's backdrop dogfight is silent)
-        let target = if muted.0 || *state.get() == crate::loading::GameState::Menu { 0.0 } else { target };
+        let target = if muted.0 || *state.get() == crate::loading::GameState::Menu { 0.0 } else { target * settings.volume() };
         let current = sink.volume().to_linear();
         let rate = if *kind == RemoteLoop::Gun { 40.0 } else { 5.0 };
         sink.set_volume(Volume::Linear(approach(current, target, dt, rate)));
@@ -741,6 +743,7 @@ fn play_delayed(
     mut commands: Commands,
     time: Res<Time>,
     muted: Res<Muted>,
+    settings: Res<crate::settings::Settings>,
     mut delayed: ResMut<DelayedSounds>,
 ) {
     let dt = time.delta_secs();
@@ -749,14 +752,15 @@ fn play_delayed(
         if *t > 0.0 {
             return true;
         }
-        if muted.0 {
+        let level = settings.volume();
+        if muted.0 || level <= 0.0 {
             return false;
         }
         commands.spawn((
             AudioPlayer(handle.clone()),
             PlaybackSettings {
                 mode: PlaybackMode::Despawn,
-                volume: Volume::Linear(*volume),
+                volume: Volume::Linear(*volume * level),
                 spatial: true,
                 spatial_scale: Some(SpatialScale::new(*scale)),
                 ..default()
@@ -772,6 +776,7 @@ fn feedback_sounds(
     mut commands: Commands,
     sounds: Res<Sounds>,
     muted: Res<Muted>,
+    settings: Res<crate::settings::Settings>,
     mut hits: MessageReader<crate::weapons::HitConfirmed>,
     mut kills: MessageReader<crate::game::PlayerKill>,
     player: Query<Entity, With<Player>>,
@@ -782,7 +787,8 @@ fn feedback_sounds(
     let me = player.single().ok();
     let hit = hits.read().any(|h| Some(h.attacker) == me);
     let killed = kills.read().count() > 0;
-    if muted.0 {
+    let level = settings.volume();
+    if muted.0 || level <= 0.0 {
         return;
     }
     let mut play = |handle: &Handle<AudioSource>, volume: f32| {
@@ -790,7 +796,7 @@ fn feedback_sounds(
             AudioPlayer(handle.clone()),
             PlaybackSettings {
                 mode: PlaybackMode::Despawn,
-                volume: Volume::Linear(volume),
+                volume: Volume::Linear(volume * level),
                 ..default()
             },
         ));

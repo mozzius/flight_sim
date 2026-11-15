@@ -54,7 +54,7 @@ impl Plugin for MenuPlugin {
             .add_systems(OnExit(GameState::Menu), despawn_menu)
             .add_systems(
                 Update,
-                (lobby_focus, navigate, crate::leaderboard::handle_pressed, crate::tutorial::handle_pressed, handle_pressed, style_buttons, layout_menu, layout_lobby, layout_queue, layout_account)
+                (lobby_focus, navigate, crate::leaderboard::handle_pressed, crate::tutorial::handle_pressed, handle_pressed, style_buttons, layout_menu, compact_pickers, layout_lobby, layout_queue, layout_account)
                     .chain()
                     .in_set(MenuSystems),
             )
@@ -85,6 +85,9 @@ pub enum Pick {
     Weather,
     Time,
     Difficulty,
+    Enemies,
+    Allies,
+    Sound,
     Graphics,
 }
 
@@ -197,8 +200,8 @@ struct JoinCode(String);
 // then the account corner, then the friends list.
 const ORDER_PICKERS: u8 = 12;
 const ROW_PICKERS: u8 = 12;
-const ORDER_START: u8 = 16;
-const ROW_START: u8 = 16;
+const ORDER_START: u8 = 18;
+const ROW_START: u8 = 18;
 const ORDER_BACK: u8 = 89;
 const ROW_BACK: u8 = 28;
 const ORDER_CORNER: u8 = 90;
@@ -330,6 +333,35 @@ struct AccountLabel;
 #[derive(Component)]
 struct PickValue(Pick);
 
+/// A picker row, and the column of the scenario's pickers: tighter on short
+/// screens (landscape phones), where six of them don't fit otherwise.
+#[derive(Component)]
+struct PickerRow;
+
+#[derive(Component)]
+struct PickerColumn;
+
+fn compact_pickers(
+    root: Query<&ComputedNode, With<MenuRoot>>,
+    mut rows: Query<&mut Node, (With<PickerRow>, Without<PickerColumn>)>,
+    mut columns: Query<&mut Node, (With<PickerColumn>, Without<PickerRow>)>,
+) {
+    let Ok(computed) = root.single() else { return };
+    let short = computed.size().y * computed.inverse_scale_factor() < 520.0;
+    let (height, pad, gap) = if short { (32.0, 2.0, 4.0) } else { (42.0, 6.0, 8.0) };
+    for mut node in &mut rows {
+        if node.min_height != px(height) {
+            node.min_height = px(height);
+            node.padding = UiRect::axes(px(16), px(pad));
+        }
+    }
+    for mut node in &mut columns {
+        if node.row_gap != px(gap) {
+            node.row_gap = px(gap);
+        }
+    }
+}
+
 
 
 
@@ -341,6 +373,7 @@ fn picker(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, p
         .spawn((
             UiButton { screen: Screen::Modes, order, row, action },
             Hovered::default(),
+            PickerRow,
             Node {
                 min_height: px(42),
                 padding: UiRect::axes(px(16), px(6)),
@@ -529,7 +562,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     Node { margin: UiRect::bottom(px(2)), align_self: AlignSelf::Center, ..default() },
                 ));
                 main.spawn((Sec::HomePrimary, column(10.0))).with_children(|col| {
-                    button(col, &font, "ENDLESS", Screen::Modes, 0, 0, UiAction::Endless);
+                    button(col, &font, "SCENARIOS", Screen::Modes, 0, 0, UiAction::Endless);
                     button(col, &font, "CHALLENGE", Screen::Modes, 1, 1, UiAction::Challenge);
                     if net {
                         button(col, &font, "MULTIPLAYER", Screen::Modes, 2, 2, UiAction::Multiplayer);
@@ -577,18 +610,20 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         Node { display: Display::None, align_self: AlignSelf::Center, ..default() },
                     ));
                 }
-                main.spawn((Sec::Endless, column(8.0))).with_children(|panel| {
+                main.spawn((Sec::Endless, PickerColumn, column(8.0))).with_children(|panel| {
                     for (i, (pick, label)) in [
                         (Pick::Location, "LOCATION"),
                         (Pick::Weather, "WEATHER"),
                         (Pick::Time, "TIME"),
                         (Pick::Difficulty, "DIFFICULTY"),
+                        (Pick::Enemies, "ENEMIES"),
+                        (Pick::Allies, "ALLIES"),
                     ]
                     .into_iter()
                     .enumerate()
                     {
                         let e = picker(panel, &font, label, pick, ORDER_PICKERS + i as u8, ROW_PICKERS + i as u8);
-                        if pick == Pick::Difficulty {
+                        if matches!(pick, Pick::Difficulty | Pick::Enemies | Pick::Allies) {
                             panel.commands().entity(e).insert(Sec::EndlessOnly);
                         }
                     }
@@ -615,12 +650,13 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     }
                 });
                 main.spawn((Sec::Settings, column(8.0))).with_children(|panel| {
-                    picker(panel, &font, "GRAPHICS", Pick::Graphics, ORDER_SETTINGS + 1, ROW_SETTINGS + 1);
+                    picker(panel, &font, "SOUND", Pick::Sound, ORDER_SETTINGS + 1, ROW_SETTINGS + 1);
+                    picker(panel, &font, "GRAPHICS", Pick::Graphics, ORDER_SETTINGS + 2, ROW_SETTINGS + 2);
                     panel.spawn((Sec::Apply, column(0.0))).with_children(|w| {
-                        button(w, &font, "APPLY", Screen::Modes, ORDER_SETTINGS + 2, ROW_SETTINGS + 2, UiAction::Apply);
+                        button(w, &font, "APPLY", Screen::Modes, ORDER_SETTINGS + 3, ROW_SETTINGS + 3, UiAction::Apply);
                     });
                     panel.spawn((Sec::SignOut, column(0.0))).with_children(|w| {
-                        quiet_button(w, &font, "SIGN OUT", Screen::Modes, ORDER_SETTINGS + 3, ROW_SETTINGS + 3, UiAction::Account);
+                        quiet_button(w, &font, "SIGN OUT", Screen::Modes, ORDER_SETTINGS + 4, ROW_SETTINGS + 4, UiAction::Account);
                     });
                 });
                 main.spawn((
@@ -901,6 +937,21 @@ fn handle_pressed(
                 settings.difficulty = step(&crate::difficulty::Difficulty::ALL, settings.difficulty, step_by);
                 crate::settings::save_difficulty(settings.difficulty);
             }
+            UiAction::Pick(Pick::Enemies) => {
+                let n = crate::settings::MAX_ENEMIES as i32 + 1;
+                settings.enemies = (settings.enemies as i32 + step_by).rem_euclid(n) as u8;
+                crate::settings::save_enemies(settings.enemies);
+            }
+            UiAction::Pick(Pick::Allies) => {
+                let n = crate::settings::MAX_ALLIES as i32 + 1;
+                settings.allies = (settings.allies as i32 + step_by).rem_euclid(n) as u8;
+                crate::settings::save_allies(settings.allies);
+            }
+            UiAction::Pick(Pick::Sound) => {
+                let n = crate::settings::SOUND_STEPS as i32 + 1;
+                settings.sound = (settings.sound as i32 + step_by).rem_euclid(n) as u8;
+                crate::settings::save_sound(settings.sound);
+            }
             UiAction::Pick(Pick::Graphics) => {
                 settings.graphics = step(&crate::settings::Graphics::ALL, settings.graphics, step_by);
                 // natively it applies at once; the web waits for APPLY (it reloads)
@@ -1123,7 +1174,7 @@ fn layout_menu(
         let h = match *panel {
             _ if away => "",
             Panel::Closed => "",
-            Panel::Endless => "ENDLESS",
+            Panel::Endless => "SCENARIOS",
             Panel::Multi => "MULTIPLAYER",
             Panel::Create => "HOST GAME",
             Panel::Join => "JOIN GAME",
@@ -1183,13 +1234,16 @@ fn layout_menu(
     }
     for (value, mut text) in &mut values {
         let name = match value.0 {
-            Pick::Location => picks.0.biome.map(Biome::name),
-            Pick::Weather => picks.0.weather.map(Weather::name),
-            Pick::Time => picks.0.time.map(TimeOfDay::name),
-            Pick::Difficulty => Some(settings.difficulty.name()),
-            Pick::Graphics => Some(settings.graphics.name()),
+            Pick::Location => picks.0.biome.map(|b| b.name().to_string()),
+            Pick::Weather => picks.0.weather.map(|w| w.name().to_string()),
+            Pick::Time => picks.0.time.map(|t| t.name().to_string()),
+            Pick::Difficulty => Some(settings.difficulty.name().to_string()),
+            Pick::Enemies => Some(settings.enemies_name()),
+            Pick::Allies => Some(settings.allies.to_string()),
+            Pick::Sound => Some(settings.sound_name()),
+            Pick::Graphics => Some(settings.graphics.name().to_string()),
         };
-        let s = format!("< {} >", name.unwrap_or("random").to_ascii_uppercase());
+        let s = format!("< {} >", name.as_deref().unwrap_or("random").to_ascii_uppercase());
         if text.0 != s {
             text.0 = s;
         }
