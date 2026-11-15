@@ -31,6 +31,8 @@ const SHOULDER: f32 = 2.5;
 /// then blended back to the natural ground by `BLEND_OUTER`.
 const BLEND_INNER: f32 = 20.0;
 const BLEND_OUTER: f32 = 75.0;
+/// A road's end is tied into a road within this distance (m).
+const JOIN_REACH: f32 = 100.0;
 
 /// A road centreline: points ~8 m apart, y = road surface height.
 pub(super) type Road = Vec<Vec3>;
@@ -43,7 +45,10 @@ pub(super) fn build_roads(grid: &mut HeightGrid) -> Vec<Road> {
         let mut road = profile(grid, &smooth(&path));
         // tie the end into the road it joins
         if let Some(&end) = road.last() {
-            if let Some(join_y) = nearest_on_roads(&roads, end.xz()).map(|(p, _)| p.y) {
+            // (only if it ends on one: a road out to a site on another island ends
+            // at that site, and the nearest road could be kilometres away)
+            if let Some((join, _)) = nearest_on_roads(&roads, end.xz()).filter(|&(_, d)| d < JOIN_REACH) {
+                let join_y = join.y;
                 let n = road.len().min(25);
                 let len = road.len();
                 for k in 0..n {
