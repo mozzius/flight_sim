@@ -55,10 +55,14 @@ pub enum Biome {
     Farmland,
     /// Islands in a warm sea: beaches, cliffs, green hills, a few peaks.
     Archipelago,
+    /// Mountains rising out of long, deep sea inlets.
+    Fjords,
+    /// Low forested hills and lakes everywhere (rural Finland).
+    Lakeland,
 }
 
 impl Biome {
-    pub const ALL: [Self; 4] = [Self::Alpine, Self::Tundra, Self::Farmland, Self::Archipelago];
+    pub const ALL: [Self; 6] = [Self::Alpine, Self::Tundra, Self::Farmland, Self::Archipelago, Self::Fjords, Self::Lakeland];
 
     fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
@@ -66,6 +70,8 @@ impl Biome {
             "tundra" | "winter" | "snow" => Self::Tundra,
             "farmland" | "farm" | "fields" => Self::Farmland,
             "archipelago" | "islands" | "island" | "sea" => Self::Archipelago,
+            "fjords" | "fjord" | "norway" => Self::Fjords,
+            "lakeland" | "lakes" | "lake" | "finland" => Self::Lakeland,
             _ => return None,
         })
     }
@@ -76,6 +82,8 @@ impl Biome {
             Self::Tundra => "tundra",
             Self::Farmland => "farmland",
             Self::Archipelago => "archipelago",
+            Self::Fjords => "fjords",
+            Self::Lakeland => "lakes",
         }
     }
 }
@@ -233,8 +241,8 @@ impl Environment {
                 })
                 .unwrap_or(weights.len() - 1)
         };
-        // alpine, tundra, farmland, archipelago
-        let rolled_biome = Biome::ALL[pick(next(), &[3.5, 3.0, 3.0, 3.0])];
+        // alpine, tundra, farmland, archipelago, fjords, lakeland
+        let rolled_biome = Biome::ALL[pick(next(), &[3.5, 3.0, 3.0, 3.0, 3.0, 3.0])];
         let biome = biome.unwrap_or(rolled_biome);
         let (times, weathers): ([f32; 5], [f32; 4]) = match biome {
             // (dawn, morning, midday, afternoon, golden), (clear, broken, overcast, hazy)
@@ -245,6 +253,10 @@ impl Environment {
             Biome::Farmland => ([1.0, 2.0, 2.5, 2.5, 2.5], [3.0, 3.0, 1.0, 2.5]),
             // trade-wind cumulus, sea haze and sunsets over the water
             Biome::Archipelago => ([1.0, 2.0, 2.5, 2.5, 3.5], [3.5, 3.5, 0.7, 2.3]),
+            // moody, often grey
+            Biome::Fjords => ([1.5, 2.0, 2.0, 2.0, 2.0], [2.5, 3.0, 3.0, 0.7]),
+            // northern summer: long golden evenings, misty mornings over the lakes
+            Biome::Lakeland => ([2.0, 2.0, 2.0, 2.0, 3.5], [3.5, 3.0, 1.5, 1.2]),
         };
         let time = TimeOfDay::ALL[pick(next(), &times)];
         let weather = Weather::ALL[pick(next(), &weathers)];
@@ -342,6 +354,10 @@ impl Environment {
             Biome::Farmland => 0.55,
             // the sea is right at the bottom of it: a light sea haze
             Biome::Archipelago => 0.12,
+            // mist lying in the inlets
+            Biome::Fjords => 0.35,
+            // low ground: lots of it is in the mist layer
+            Biome::Lakeland => 0.5,
             _ => 1.0,
         } * match w {
             Weather::Clear => 1.0,
@@ -576,10 +592,10 @@ mod tests {
 
     #[test]
     fn rolls_cover_every_preset() {
-        let rolls: Vec<_> = (0..400).map(|s| Environment::roll(s, None)).collect();
+        let rolls: Vec<_> = (0..1000).map(|s| Environment::roll(s, None)).collect();
         for b in Biome::ALL {
             let n = rolls.iter().filter(|e| e.biome == b).count();
-            assert!(n > 80, "{b:?} rolled only {n} times in 400");
+            assert!(n > 120, "{b:?} rolled only {n} times in 1000");
         }
         assert!(!rolls.iter().any(|e| e.biome == Biome::Tundra && e.weather == Weather::Hazy));
         for t in TimeOfDay::ALL {

@@ -44,8 +44,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped whenever the messages change shape.
-pub const PROTOCOL_VERSION: u16 = 6;
+/// Bumped whenever the messages change shape (or their meaning: v7 added
+/// biomes to `Biome::ALL`, which older clients would read as "random").
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// Service-auth audience and method the server checks tokens against.
 pub const AUTH_AUDIENCE: &str = "did:web:flight.mozzius.dev";

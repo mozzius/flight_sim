@@ -41,6 +41,17 @@ pub(super) struct BiomeParams {
     /// map is under the sea, with the relief varying region to region and gentle
     /// shelves at the waterline. 0 = off.
     pub sea_shift: f32,
+    /// With `sea_shift`: the relief varies region to region down to this share (1 = even),
+    pub sea_regions: f32,
+    /// and how beachy the coast can get (0 = cliffs all round, as in fjords; 1 = wide
+    /// beaches and lagoons in places).
+    pub sea_beaches: f32,
+    /// (centre, range) m: the height is squashed to within about ±range of the centre
+    /// (lakeland: the big hills and valleys are flattened so the small ones count).
+    pub squash: Option<(f32, f32)>,
+    /// Smooth glacial hummocks (m, ± about half): with a water level near their
+    /// hollows, lakes all over the map.
+    pub hummocks: f32,
 
     // ---- water (`water`)
     pub water: Option<Water>,
@@ -119,7 +130,8 @@ pub(super) struct Water {
     pub reflect: f32,
 }
 
-static PARAMS: LazyLock<[BiomeParams; 4]> = LazyLock::new(|| [alpine(), tundra(), farmland(), archipelago()]);
+static PARAMS: LazyLock<[BiomeParams; 6]> =
+    LazyLock::new(|| [alpine(), tundra(), farmland(), archipelago(), fjords(), lakeland()]);
 
 /// Mountain lakes: a level just above the soft floor's flats, so the deepest basins fill.
 fn lakes(level: f32) -> Water {
@@ -144,6 +156,10 @@ fn alpine() -> BiomeParams {
         soft_floor: 120.0,
         soft_floor_range: 180.0,
         sea_shift: 0.0,
+        sea_regions: 1.0,
+        sea_beaches: 1.0,
+        squash: None,
+        hummocks: 0.0,
         water: Some(lakes(LAKE_LEVEL)),
         meadow: srgb(0.42, 0.47, 0.22),
         dry_meadow: srgb(0.52, 0.50, 0.30),
@@ -182,6 +198,10 @@ fn tundra() -> BiomeParams {
         soft_floor: 120.0,
         soft_floor_range: 180.0,
         sea_shift: 0.0,
+        sea_regions: 1.0,
+        sea_beaches: 1.0,
+        squash: None,
+        hummocks: 0.0,
         water: Some(Water {
             frozen: true,
             shallow: srgb(0.80, 0.86, 0.90),
@@ -230,6 +250,10 @@ fn farmland() -> BiomeParams {
         soft_floor: 260.0,
         soft_floor_range: 380.0,
         sea_shift: 0.0,
+        sea_regions: 1.0,
+        sea_beaches: 1.0,
+        squash: None,
+        hummocks: 0.0,
         // (the plains bottom out lower)
         water: Some(Water { shallow: srgb(0.20, 0.30, 0.22), ..lakes(FARM_LAKE_LEVEL) }),
         meadow: srgb(0.38, 0.48, 0.20),
@@ -276,6 +300,10 @@ fn archipelago() -> BiomeParams {
         soft_floor: -260.0,
         soft_floor_range: 240.0,
         sea_shift: 1350.0,
+        sea_regions: 0.3,
+        sea_beaches: 1.0,
+        squash: None,
+        hummocks: 0.0,
         water: Some(Water {
             level: 0.0,
             sea: true,
@@ -319,6 +347,129 @@ fn archipelago() -> BiomeParams {
         shader_snow: Vec3::new(0.55, 0.75, 0.0),
     }
 }
+
+/// Mountains standing in the sea: the alpine valleys drowned into long, deep
+/// inlets with cliffs straight down to the water, dark firs and birch on the
+/// lower slopes, bare rock and snow above.
+fn fjords() -> BiomeParams {
+    BiomeParams {
+        relief: 1.15,
+        // the drowned valleys bottom out deep
+        soft_floor: -180.0,
+        soft_floor_range: 200.0,
+        sea_shift: 430.0,
+        sea_regions: 1.0,
+        sea_beaches: 0.2,
+        squash: None,
+        hummocks: 0.0,
+        water: Some(Water {
+            level: 0.0,
+            sea: true,
+            frozen: false,
+            beach: 1.5,
+            sand: srgb(0.46, 0.45, 0.42),
+            shallow: srgb(0.10, 0.30, 0.29),
+            deep: srgb(0.01, 0.05, 0.09),
+            depth_scale: 30.0,
+            foam: 0.4,
+            // (walled in by mountains)
+            reflect: 0.7,
+        }),
+        meadow: srgb(0.34, 0.44, 0.20),
+        dry_meadow: srgb(0.44, 0.45, 0.27),
+        forest: srgb(0.11, 0.19, 0.10),
+        // heath and lichen above the birches
+        alpine: srgb(0.42, 0.41, 0.32),
+        rock: srgb(0.37, 0.37, 0.36),
+        dark_rock: srgb(0.20, 0.20, 0.20),
+        snow: srgb(0.94, 0.95, 0.98),
+        tree_line: 750.0,
+        snow_line: 1450.0,
+        snow_flatness: (0.6, 0.75),
+        rock_bias: 0.04,
+        low_snow: 0.0,
+        snow_in_forest: 1.0,
+        valley_woods: 0.8,
+        slope_woods: (0.99, 0.93),
+        hilltop_woods: 0.2,
+        field_line: None,
+        tree_density: 1.0,
+        tree_scale: 0.95,
+        conifers: (0.55, 0.85),
+        conifer: srgb(0.10, 0.17, 0.10),
+        broadleaf: srgb(0.24, 0.32, 0.13),
+        autumn: srgb(0.50, 0.42, 0.14),
+        autumn_share: 0.06,
+        tree_snow: 0.0,
+        shader_rock: Vec3::new(0.66, 0.68, 0.72),
+        veg_patches: 0.7,
+        shader_snow: Vec3::new(0.5, 0.7, 0.0),
+    }
+}
+
+/// Lakeland (rural Finland): low, rounded hills under dense pine and spruce,
+/// with dark lakes in every hollow, full of islands.
+fn lakeland() -> BiomeParams {
+    BiomeParams {
+        relief: 0.12,
+        // (lake beds)
+        soft_floor: 105.0,
+        soft_floor_range: 35.0,
+        sea_shift: 0.0,
+        sea_regions: 1.0,
+        sea_beaches: 1.0,
+        squash: Some((150.0, 25.0)),
+        hummocks: 150.0,
+        water: Some(Water {
+            level: LAKELAND_LEVEL,
+            sea: false,
+            frozen: false,
+            beach: 1.0,
+            // granite and pine needles at the water's edge
+            sand: srgb(0.44, 0.41, 0.36),
+            // tea-dark lake water
+            shallow: srgb(0.20, 0.22, 0.15),
+            deep: srgb(0.02, 0.04, 0.05),
+            depth_scale: 8.0,
+            foam: 0.0,
+            // (dark water under low shores)
+            reflect: 0.7,
+        }),
+        // clearings and bog
+        meadow: srgb(0.40, 0.45, 0.22),
+        dry_meadow: srgb(0.50, 0.47, 0.30),
+        forest: srgb(0.10, 0.17, 0.09),
+        alpine: srgb(0.40, 0.40, 0.28),
+        rock: srgb(0.50, 0.47, 0.43),
+        dark_rock: srgb(0.30, 0.28, 0.26),
+        snow: srgb(0.94, 0.95, 0.98),
+        tree_line: 5000.0,
+        snow_line: 9000.0,
+        snow_flatness: (0.55, 0.72),
+        rock_bias: -0.05,
+        low_snow: 0.0,
+        snow_in_forest: 1.0,
+        // forest nearly everywhere, the odd clearing
+        valley_woods: 1.0,
+        slope_woods: (1.01, 1.0),
+        hilltop_woods: 1.0,
+        field_line: None,
+        tree_density: 1.1,
+        tree_scale: 1.0,
+        conifers: (0.8, 0.8),
+        conifer: srgb(0.10, 0.16, 0.09),
+        broadleaf: srgb(0.24, 0.33, 0.13),
+        autumn: srgb(0.52, 0.45, 0.14),
+        autumn_share: 0.05,
+        tree_snow: 0.0,
+        shader_rock: Vec3::new(0.95, 0.92, 0.9),
+        veg_patches: 0.6,
+        shader_snow: Vec3::new(0.55, 0.75, 0.0),
+    }
+}
+
+/// Lakeland: the level of every lake (the hollows between the hummocks).
+const LAKELAND_LEVEL: f32 = 127.0;
 
 /// How the ground is covered at a point (each 0..1), shared by the colour
 /// bake and the tree planter so the trees grow where the ground looks wooded.

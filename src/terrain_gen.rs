@@ -698,10 +698,18 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
     // coast (`coast_profile`).
     if b.sea_shift > 0.0 {
         let region = noised(p * 1.4, terrain_seed() ^ 0x05EA).x;
-        let relief = lerp(0.3, 1.0, smoothstep(-0.4, 0.4, region));
+        let relief = lerp(b.sea_regions, 1.0, smoothstep(-0.4, 0.4, region));
         height = (height - b.sea_shift) * relief;
         let kind = noised(p * 5.0, terrain_seed() ^ 0xC0A5).x;
-        height = coast_profile(height, smoothstep(-0.42, -0.2, kind));
+        height = coast_profile(height, smoothstep(-0.42, -0.2, kind) * b.sea_beaches);
+    }
+
+    // Lakeland: the big hills flattened, then hummocks everywhere for the lakes to fill
+    if let Some((centre, range)) = b.squash {
+        height = centre + range * ((height - centre) / range).tanh();
+    }
+    if b.hummocks > 0.0 {
+        height += fractal_noise(p, 14.0, 3, 2.1, 0.45, terrain_seed() ^ 0x1A4E).x * b.hummocks;
     }
 
     // Squash the deepest basins into broad, nearly flat floors that bottom out just below 0
@@ -1738,14 +1746,14 @@ mod tests {
     #[test]
     fn stats() {
         // (biomes are a global: only this test switches them, and it puts alpine back)
-        for b in [biome::Biome::Archipelago, biome::Biome::Farmland, biome::Biome::Tundra, biome::Biome::Alpine] {
+        for b in biome::Biome::ALL.into_iter().rev() {
             biome::set(b);
             println!("{}:", b.name());
-            stats_for_biome();
+            stats_for_biome(b);
         }
     }
 
-    fn stats_for_biome() {
+    fn stats_for_biome(biome: biome::Biome) {
         let axis: Vec<String> = (-12..=14)
             .map(|k| format!("{:.0}", sample_terrain(0.0, k as f32 * 1000.0, 5.0).height))
             .collect();
@@ -1773,7 +1781,12 @@ mod tests {
         if let Some(w) = &biome::params().water {
             let wet = hs.iter().filter(|h| **h < w.level).count() as f32 / hs.len() as f32;
             println!("under water: {:.1}%", wet * 100.0);
-            let range = if w.sea { 0.4..0.65 } else { 0.005..0.06 };
+            let range = match biome {
+                biome::Biome::Archipelago => 0.4..0.65,
+                biome::Biome::Fjords => 0.08..0.3,
+                biome::Biome::Lakeland => 0.15..0.4,
+                _ => 0.005..0.06,
+            };
             assert!(range.contains(&wet), "{:.1}% under water", wet * 100.0);
         }
     }
