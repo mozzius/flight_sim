@@ -1007,7 +1007,8 @@ fn sun_light(grids: &[HeightGrid], top: f32, p: Vec2, sun: Vec3) -> f32 {
     let dir = flat / len;
     let rise = sun.y / len;
     let Some(h0) = height(p) else { return 1.0 };
-    let h0 = h0 + 1.0;
+    // (under water, the light at the surface: the bed doesn't show, and the water samples this)
+    let h0 = h0.max(biome::params().water.as_ref().map_or(f32::MIN, |w| w.level)) + 1.0;
     let mut margin = f32::MAX;
     let mut d = 16.0;
     while d < MAX_DIST {
@@ -1038,6 +1039,20 @@ pub struct TextureBake {
 }
 
 impl TextureBake {
+    /// The baked sunlight at world point `p` of the texture over `grid` (bilinear).
+    fn sun_at(&self, grid: &HeightGrid, p: Vec2) -> f32 {
+        let res = self.res;
+        let step = grid.spacing * (grid.n - 1) as f32 / res as f32;
+        let u = ((p - grid.origin) / step - 0.5).clamp(Vec2::ZERO, Vec2::splat((res - 1) as f32));
+        let (i, j) = (u.x as usize, u.y as usize);
+        let (i1, j1) = ((i + 1).min(res - 1), (j + 1).min(res - 1));
+        let f = u - Vec2::new(i as f32, j as f32);
+        let s = |i: usize, j: usize| self.sun[j * res + i] as f32 / 255.0;
+        let top = s(i, j) + (s(i1, j) - s(i, j)) * f.x;
+        let bottom = s(i, j1) + (s(i1, j1) - s(i, j1)) * f.x;
+        top + (bottom - top) * f.y
+    }
+
     /// The colour and normal images with full mip chains. Level 0 goes straight
     /// from the stored bytes; only the (quarter-size) levels below are worked
     /// in floats, to keep the peak memory down (wasm memory never shrinks).
@@ -1624,7 +1639,8 @@ pub fn spawn_map(
     // ---- lakes / the sea
     if let Some(w) = &b.water {
         let grids = [&near, &fine, &coarse];
-        let water = water::spawn(w, look, grids, low, commands, meshes, water_materials, images);
+        let suns = [textures[0].as_ref(), textures[1].as_ref(), textures[2].as_ref()];
+        let water = water::spawn(w, look, grids, suns, low, commands, meshes, water_materials, images);
         commands.entity(root).add_child(water);
     }
 

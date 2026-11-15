@@ -8,7 +8,7 @@
 //    turns into a soft glitter path rather than a mirror;
 //  - a Fresnel reflection of the sky (the environment's horizon / zenith
 //    colours) and the sun glint, both added after lighting (post-exposure),
-//    shadowed by the terrain's shadow map;
+//    shadowed by the terrain's shadow map, and past it by the baked shadows;
 //  - the valley mist and distance fog, as the terrain (and the atmosphere's
 //    aerial perspective, as it's opaque);
 //  - frozen (tundra): pale, cracked ice with drifted snow, no ripples or glint.
@@ -178,12 +178,14 @@ fn fragment(
     let uv_near = (pos.xz - water.near_frame.xy) * water.near_frame.z;
     let uv_fine = (pos.xz - water.fine_frame.xy) * water.fine_frame.z;
     let uv_coarse = (pos.xz - water.coarse_frame.xy) * water.coarse_frame.z;
-    let e_near = textureSampleLevel(near_depth, depth_sampler, uv_near, 0.0).r;
-    let e_fine = textureSampleLevel(fine_depth, depth_sampler, uv_fine, 0.0).r;
-    let e_coarse = textureSampleLevel(coarse_depth, depth_sampler, uv_coarse, 0.0).r;
-    var e = select(1.0, e_coarse, in_frame(uv_coarse));
-    e = select(e, e_fine, in_frame(uv_fine));
-    e = select(e, e_near, in_frame(uv_near));
+    let s_near = textureSampleLevel(near_depth, depth_sampler, uv_near, 0.0).rg;
+    let s_fine = textureSampleLevel(fine_depth, depth_sampler, uv_fine, 0.0).rg;
+    let s_coarse = textureSampleLevel(coarse_depth, depth_sampler, uv_coarse, 0.0).rg;
+    // r: depth, g: the terrain bake's sunlight (past the map: deep and lit)
+    var sg = select(vec2<f32>(1.0, 1.0), s_coarse, in_frame(uv_coarse));
+    sg = select(sg, s_fine, in_frame(uv_fine));
+    sg = select(sg, s_near, in_frame(uv_near));
+    let e = sg.x;
     let e2 = e * 2.0 - 1.0;
     let depth = max(sign(e2) * e2 * e2 * DEPTH_RANGE, 0.0);
 
@@ -199,6 +201,8 @@ fn fragment(
     let to_cam = cam - pos;
     let dist = length(to_cam);
     let v = to_cam / max(dist, 1e-3);
+    // the mountains' baked shadows, faded in where the shadow cascades run out (as the terrain)
+    let baked_sun = mix(1.0, sg.y, smoothstep1(1600.0, 2800.0, dist));
 
     // ---- body colour, foam and ice (lit by the PBR path)
     let ds = water.shallow.a;
@@ -239,6 +243,8 @@ fn fragment(
     // the body is lit by a gentler normal than the reflections
     pbr_input.N = normalize(mix(vec3<f32>(0.0, 1.0, 0.0), n, 0.3));
 
+    pbr_input.directional_shadow_factor = baked_sun;
+
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
 
@@ -256,7 +262,7 @@ fn fragment(
         view.view_from_world[2].z,
         view.view_from_world[3].z
     ), vec4<f32>(pos, 1.0));
-    let shadow = fetch_directional_shadow(0u, vec4<f32>(pos, 1.0), vec3<f32>(0.0, 1.0, 0.0), view_z, in.position.xy);
+    let shadow = fetch_directional_shadow(0u, vec4<f32>(pos, 1.0), vec3<f32>(0.0, 1.0, 0.0), view_z, in.position.xy) * baked_sun;
 
     let sun_dir = water.sun.xyz;
     let rl = max(dot(refl, sun_dir), 0.0);

@@ -6,8 +6,10 @@
 //! from shallow turquoise to deep blue, adds a Fresnel reflection of the sky
 //! (the `Look`'s horizon and zenith colours), a sun glint, animated ripple
 //! normals at a few scales (faded out once smaller than a pixel) and foam at the
-//! shore. The depth comes from three small R8 textures baked from the height
-//! grids (one texel per grid vertex), so it lines up with the terrain mesh.
+//! shore. The depth comes from three small RG8 textures baked from the height
+//! grids (one texel per grid vertex), so it lines up with the terrain mesh; G is
+//! the terrain bake's sunlight (`sun_light`), so the mountains' shadows fall on
+//! the water beyond the shadow cascades too.
 //! Tundra lakes are frozen: pale, cracked ice with snow patches and no glint.
 //!
 //! The sea (archipelago) follows the camera out to the horizon; lakes cover the map.
@@ -20,7 +22,7 @@ use bevy::{
     render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
 };
 
-use super::{HeightGrid, biome};
+use super::{HeightGrid, TextureBake, biome};
 
 pub type WaterMaterial = ExtendedMaterial<StandardMaterial, WaterExt>;
 
@@ -29,7 +31,7 @@ pub struct WaterExt {
     #[uniform(100)]
     pub params: WaterParams,
     /// Depth below the water at each vertex of the near / fine / coarse height grid
-    /// (signed, square-root encoded: see `DEPTH_RANGE`).
+    /// (R: signed, square-root encoded: see `DEPTH_RANGE`; G: baked sunlight).
     #[texture(101)]
     #[sampler(104)]
     pub near: Handle<Image>,
@@ -89,23 +91,23 @@ const DEPTH_RANGE: f32 = 128.0;
 const SEA_RADIUS: f32 = 2_000_000.0;
 
 /// One texel per grid vertex: the signed depth below `level`, square-root encoded
-/// (fine steps in the shallows, where the colour changes fastest).
-fn depth_image(grid: &HeightGrid, level: f32) -> (Image, Vec4) {
+/// (fine steps in the shallows, where the colour changes fastest), and the
+/// sunlight the terrain bake found there (lit without one).
+fn depth_image(grid: &HeightGrid, level: f32, sun: Option<&TextureBake>) -> (Image, Vec4) {
     let n = grid.n;
-    let data: Vec<u8> = grid
-        .heights
-        .iter()
-        .map(|&h| {
-            let d = ((level - h) / DEPTH_RANGE).clamp(-1.0, 1.0);
-            let e = d.signum() * d.abs().sqrt();
-            ((e * 0.5 + 0.5) * 255.0 + 0.5) as u8
-        })
-        .collect();
+    let mut data = Vec::with_capacity(n * n * 2);
+    for (k, &h) in grid.heights.iter().enumerate() {
+        let d = ((level - h) / DEPTH_RANGE).clamp(-1.0, 1.0);
+        let e = d.signum() * d.abs().sqrt();
+        let lit = sun.map_or(1.0, |s| s.sun_at(grid, grid.world_pos(k % n, k / n)));
+        data.push(((e * 0.5 + 0.5) * 255.0 + 0.5) as u8);
+        data.push((lit * 255.0 + 0.5) as u8);
+    }
     let mut image = Image::new(
         Extent3d { width: n as u32, height: n as u32, depth_or_array_layers: 1 },
         TextureDimension::D2,
         data,
-        TextureFormat::R8Unorm,
+        TextureFormat::Rg8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
@@ -132,22 +134,23 @@ pub(super) fn spawn(
     w: &biome::Water,
     look: &crate::environment::Look,
     [near, fine, coarse]: [&HeightGrid; 3],
+    [near_sun, fine_sun, coarse_sun]: [Option<&TextureBake>; 3],
     low_memory: bool,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<WaterMaterial>,
     images: &mut Assets<Image>,
 ) -> Entity {
-    let (fine_image, fine_frame) = depth_image(fine, w.level);
+    let (fine_image, fine_frame) = depth_image(fine, w.level, fine_sun);
     let fine_handle = images.add(fine_image);
     // low-memory devices draw the 64 m terrain mesh in the middle: match it
     let (near_handle, near_frame) = if low_memory {
         (fine_handle.clone(), fine_frame)
     } else {
-        let (image, frame) = depth_image(near, w.level);
+        let (image, frame) = depth_image(near, w.level, near_sun);
         (images.add(image), frame)
     };
-    let (coarse_image, coarse_frame) = depth_image(coarse, w.level);
+    let (coarse_image, coarse_frame) = depth_image(coarse, w.level, coarse_sun);
 
     // the sky's colours, as the fallback dome draws them (unlit, linear)
     let horizon = lin(look.sky_horizon);
