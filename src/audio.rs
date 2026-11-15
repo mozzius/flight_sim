@@ -173,44 +173,23 @@ fn wav(samples: &[f32]) -> AudioSource {
     AudioSource { bytes: Arc::from(b) }
 }
 
-/// Slow random drift in -1..1 (smoothed noise, normalised to the clip).
-fn drift(seed: u32, len: usize, hz: f32) -> Vec<f32> {
-    let mut rng = Rng(seed);
-    let (mut a, mut b) = (LowPass::new(hz), LowPass::new(hz));
-    // (run in first, so it doesn't start from rest)
-    for _ in 0..samples(2.0 / hz) {
-        b.run(a.run(rng.next()));
-    }
-    let mut d: Vec<f32> = (0..len).map(|_| b.run(a.run(rng.next()))).collect();
-    let mean = d.iter().sum::<f32>() / len as f32;
-    let max = d.iter().fold(1e-9f32, |m, x| m.max((x - mean).abs()));
-    d.iter_mut().for_each(|x| *x = (*x - mean) / max);
-    d
-}
-
-/// Jet engine, heard from the cockpit: a muffled roar whose level and colour
-/// wander (so the loop doesn't repeat audibly), a soft hiss, and a faint
-/// turbine tone that drifts in pitch.
+/// Jet engine: broadband roar plus a turbine whine with a little wobble.
 fn synth_engine() -> Vec<f32> {
-    let len = samples(9.0);
     let mut rng = Rng(0x1234_5678);
-    let (swell, colour, pitch) = (drift(11, len, 0.6), drift(23, len, 0.35), drift(37, len, 0.25));
-    let (mut rumble, mut rumble2, mut mid, mut hiss) =
-        (LowPass::new(160.0), LowPass::new(160.0), BandPass::new(600.0, 0.7), BandPass::new(2_400.0, 1.0));
+    let (mut rumble, mut mid, mut hiss) = (LowPass::new(180.0), BandPass::new(900.0, 0.8), BandPass::new(3_500.0, 1.5));
     let mut phase = 0.0f32;
-    let s = (0..len)
+    let s = (0..samples(9.4))
         .map(|i| {
+            let t = t_of(i);
             let n = rng.next();
-            mid.set(600.0 * (1.0 + 0.25 * colour[i]));
-            hiss.set(2_400.0 * (1.0 + 0.15 * colour[i]));
-            // (integrated, so the pitch drift stays a drift)
-            phase = (phase + 1_480.0 * (1.0 + 0.006 * pitch[i]) / SAMPLE_RATE as f32).fract();
-            let tone = (phase * TAU).sin() * 0.012 + (phase * TAU * 0.5).sin() * 0.008;
-            let roar = rumble2.run(rumble.run(n)) * 4.5 * (1.0 + 0.18 * swell[i]);
-            roar + mid.run(n) * 0.22 * (1.0 - 0.12 * swell[i]) + hiss.run(n) * 0.045 + tone
+            // (the phase is integrated, so the wobble stays the same depth all the way round the loop)
+            let wobble = 1.0 + 0.012 * (t * TAU * 0.7).sin() + 0.004 * (t * TAU * 0.23).sin();
+            phase = (phase + 1_175.0 * wobble / SAMPLE_RATE as f32).fract();
+            let whine = (phase * TAU * 2.0).sin() * 0.05 + (phase * TAU * 4.0).sin() * 0.025 + (phase * TAU).sin() * 0.02;
+            rumble.run(n) * 2.6 + mid.run(n) * 0.35 + hiss.run(n) * 0.12 + whine
         })
         .collect();
-    finish(s, 0.9, Some(1.2))
+    finish(s, 0.9, Some(0.9))
 }
 
 /// Afterburner: deep rumble with random crackle.
