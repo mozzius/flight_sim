@@ -362,12 +362,14 @@ pub fn steer_towards(
     let pitch_err = local.y.atan2(-local.z);
     let yaw_err = local.x.atan2(-local.z);
 
-    // For targets slightly below the nose, put them *under* the canopy and
-    // push a little, rather than rolling inverted to pull (which overshoots
-    // and makes the plane flip back and forth).
+    // For targets slightly below the nose, push a little rather than rolling
+    // inverted to pull (which overshoots and makes the plane flip back and
+    // forth). Bank gently *toward* the target's side while doing it: rolling
+    // the other way to put it under the belly works, but feels backwards
+    // (down-and-left would bank right), and the pull branch beyond rolls left.
     let push = local.y < 0.0 && off_angle < 0.35;
     let roll_to_target = if push {
-        (-local.x).atan2(-local.y)
+        local.x.atan2(-local.y) * 0.6
     } else {
         local.x.atan2(local.y)
     };
@@ -521,6 +523,34 @@ mod tests {
         assert!(err < 3.0, "err {err}");
         assert!(bank < 30.0, "should not roll inverted: {bank}");
         assert!(sign_flips <= 2, "roll oscillation: {sign_flips}");
+    }
+
+    #[test]
+    fn steer_towards_low_side_target_banks_toward_it() {
+        // down-and-left / down-and-right: bank toward the target's side, never away
+        for side in [-1.0f32, 1.0] {
+            let mut app = app();
+            let e = spawn(&mut app, 250.0, ControlInput { throttle: 0.8, ..default() });
+            let desired = Vec3::new(0.2 * side, -0.15, -1.0).normalize();
+            let mut worst_away: f32 = 0.0;
+            for _ in 0..(5.0 * PHYSICS_HZ) as usize {
+                let (t, s) = state(&app, e);
+                let (pitch, roll, yaw) = steer_towards(&t, &s, desired, 1.4);
+                // bank right = up vector leaning +x
+                let bank = t.up().x;
+                worst_away = worst_away.max(-bank * side);
+                let mut input = app.world_mut().get_mut::<ControlInput>(e).unwrap();
+                input.pitch = pitch;
+                input.roll = roll;
+                input.yaw = yaw;
+                app.update();
+            }
+            let (t, _) = state(&app, e);
+            let err = t.forward().as_vec3().angle_between(desired).to_degrees();
+            println!("side {side}: err {err:.1} worst bank away {worst_away:.2}");
+            assert!(worst_away < 0.1, "banked away from the target: {worst_away}");
+            assert!(err < 4.0, "err {err}");
+        }
     }
 
     #[test]
