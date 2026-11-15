@@ -14,7 +14,7 @@
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
-    mesh_view_bindings::view,
+    mesh_view_bindings::{view, lights},
     pbr_bindings,
 };
 
@@ -51,6 +51,8 @@ struct TerrainDetail {
     crops: array<vec4<f32>, 10>,
     // x: stripe contrast, y: stripe period (m)
     crop_stripes: array<vec4<f32>, 10>,
+    // x, y: cloud layer bottom / top (m), z: cloud shadow map extent (m), w: 1 = clouds
+    clouds: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
@@ -58,6 +60,31 @@ var<uniform> terrain: TerrainDetail;
 // two texels per farm cell: (centre, row direction), (row width, field length, woodland)
 @group(constants::MATERIAL_BIND_GROUP) @binding(101)
 var farms: texture_2d<f32>;
+
+@group(constants::MATERIAL_BIND_GROUP) @binding(110)
+var cloud_shadow_map: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(111)
+var cloud_shadow_sampler: sampler;
+
+// Sunlight let through the clouds at `p` (1 = clear): a lookup in the clouds'
+// top-down shadow map (fs_shadow in clouds.wgsl; keep the two in sync).
+// Texels sit where the sun rays cross a reference altitude, so slide `p` along
+// its sun ray to that altitude first. Only the part of the layer above `p`
+// shades it; past the edge of the map (which follows the camera) there's none.
+const CLOUD_SHADOW_REF: f32 = 3000.0;
+fn cloud_shadow(p: vec3<f32>) -> f32 {
+    let c = terrain.clouds;
+    let sun = lights.directional_lights[0].direction_to_light;
+    let slide = sun.xz / max(sun.y, 0.08);
+    let texel = c.z / f32(textureDimensions(cloud_shadow_map).x);
+    let origin = floor(view.world_position.xz / texel) * texel + slide * CLOUD_SHADOW_REF - 0.5 * c.z;
+    let uv = (p.xz + slide * (CLOUD_SHADOW_REF - p.y) - origin) / c.z;
+    let t = textureSampleLevel(cloud_shadow_map, cloud_shadow_sampler, uv, 0.0).r;
+    let above = clamp((c.y - p.y) / max(c.y - c.x, 1.0), 0.0, 1.0);
+    let edge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
+    let s = exp(log(max(t, 0.002)) * above * (1.0 - smoothstep(0.4, 0.5, edge)));
+    return mix(1.0, s, c.w);
+}
 
 fn hash2(p: vec2<f32>) -> f32 {
     var q = fract(p * vec2<f32>(0.1031, 0.1030));
@@ -313,7 +340,8 @@ fn fragment(
         pbr_bindings::normal_map_texture, pbr_bindings::normal_map_sampler, in.uv, view.mip_bias
     ).a;
     let cam_dist = distance(pos, view.world_position);
-    pbr_input.directional_shadow_factor = mix(1.0, baked_sun, smoothstep1(1600.0, 2800.0, cam_dist));
+    pbr_input.directional_shadow_factor = mix(1.0, baked_sun, smoothstep1(1600.0, 2800.0, cam_dist))
+        * cloud_shadow(pos);
     out.color = apply_pbr_lighting(pbr_input);
     // mist settles in the valleys; lit a soft blue-white, brighter toward the sun
     let cam = view.world_position;

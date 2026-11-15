@@ -39,6 +39,10 @@ pub struct WaterExt {
     pub fine: Handle<Image>,
     #[texture(103)]
     pub coarse: Handle<Image>,
+    /// The clouds' top-down shadow map (`clouds::SHADOW_MAP`).
+    #[texture(110)]
+    #[sampler(111)]
+    pub cloud_shadow: Handle<Image>,
 }
 
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
@@ -64,6 +68,8 @@ pub struct WaterParams {
     pub near_frame: Vec4,
     pub fine_frame: Vec4,
     pub coarse_frame: Vec4,
+    /// x, y: cloud layer bottom / top (m), z: shadow map extent (m), w: 1 = clouds on
+    pub clouds: Vec4,
 }
 
 impl MaterialExtension for WaterExt {
@@ -182,7 +188,9 @@ pub(super) fn spawn(
                 near_frame,
                 fine_frame,
                 coarse_frame,
+                clouds: crate::clouds::shadow_params(look),
             },
+            cloud_shadow: crate::clouds::SHADOW_MAP,
             near: near_handle,
             fine: fine_handle,
             coarse: images.add(coarse_image),

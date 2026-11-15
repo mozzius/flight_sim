@@ -19,6 +19,8 @@
 //!   flies it level along its heading; `CLOUDS_DEBUG_CAM_H=<0..1>` sets the
 //!   `band` preset's height in the layer.
 //! * `CLOUDS_NOVSYNC=1` disables vsync in windowed runs, for timing.
+//! * `CLOUDS_NO_SHADOW=1` stops the terrain, water and scenery reading the
+//!   cloud shadow map (for before/after shots).
 //!
 //! The CPU-side [`CloudField`] mirrors the coverage map and height profile so
 //! gameplay can ask how much cloud is at a point.
@@ -56,7 +58,8 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         sync_world::{MainEntity, RenderEntity},
-        texture::{CachedTexture, TextureCache},
+        render_asset::RenderAssets,
+        texture::{CachedTexture, GpuImage, TextureCache},
         view::{ExtractedView, Msaa, ViewDepthStencilTexture},
     },
 };
@@ -71,9 +74,99 @@ const BASE_NOISE_SIZE: u32 = 128;
 const DETAIL_NOISE_SIZE: u32 = 32;
 const WEATHER_SIZE: u32 = 512;
 
+/// Top-down map of the sunlight the clouds let through (1 = clear), drawn
+/// every frame by the shadow pass and sampled by the terrain, water and
+/// scenery shaders (`cloud_shadow` in `terrain.wesl`).
+pub const SHADOW_MAP: Handle<Image> = bevy::asset::uuid_handle!("6c1d3b52-5a3e-4f0c-9f0e-1c0a2f5d7e41");
+/// Metres across the shadow map (it follows the camera).
+const SHADOW_EXTENT: f32 = 32_000.0;
+
+/// Texels across the shadow map: coarser on phones.
+fn shadow_size() -> u32 {
+    if crate::platform::low_memory() { 128 } else { 256 }
+}
+
+/// Cloud shadow parameters for the materials: x, y: the layer's bottom and
+/// top (m), z: the shadow map's extent (m), w: 1 = clouds on.
+pub fn shadow_params(look: &crate::environment::Look) -> Vec4 {
+    let d = CloudSettings::default();
+    let (bottom, top) = look.cloud.layer.unwrap_or((d.layer_bottom, d.layer_top));
+    let on = std::env::var("FLIGHT_SIM_NO_CLOUDS").is_err() && std::env::var("CLOUDS_NO_SHADOW").is_err();
+    Vec4::new(bottom, top, SHADOW_EXTENT, if on { 1.0 } else { 0.0 })
+}
+
+/// Swaps the jets' glTF materials for scenery materials (the same PBR, minus
+/// the mist) so the cloud shadows fall on them too. One copy per source
+/// material, shared by every jet; rebuilt when the round's look changes.
+#[allow(clippy::type_complexity)]
+fn shade_aircraft(
+    mut commands: Commands,
+    meshes: Query<(Entity, &MeshMaterial3d<StandardMaterial>), Added<MeshMaterial3d<StandardMaterial>>>,
+    parents: Query<&ChildOf>,
+    aircraft: Query<(), With<crate::flight::Aircraft>>,
+    standard: Res<Assets<StandardMaterial>>,
+    mut scenery: ResMut<Assets<crate::terrain_gen::SceneryMaterial>>,
+    env: Res<crate::environment::Environment>,
+    mut cache: Local<std::collections::HashMap<AssetId<StandardMaterial>, Handle<crate::terrain_gen::SceneryMaterial>>>,
+) {
+    if env.is_changed() {
+        cache.clear();
+    }
+    let mut look = None;
+    for (entity, material) in &meshes {
+        if !parents.iter_ancestors(entity).any(|a| aircraft.contains(a)) {
+            continue;
+        }
+        let Some(base) = standard.get(&material.0) else { continue };
+        let handle = cache.entry(material.0.id()).or_insert_with(|| {
+            debug!("cloud shadows: jet material {:?}", material.0.id());
+            let look = look.get_or_insert_with(|| env.look());
+            scenery.add(crate::terrain_gen::SceneryMaterial {
+                base: base.clone(),
+                extension: crate::terrain_gen::SceneryExt {
+                    params: crate::terrain_gen::SceneryParams {
+                        // no mist
+                        mist: Vec4::ZERO,
+                        clouds: shadow_params(look),
+                        ..default()
+                    },
+                    cloud_shadow: SHADOW_MAP,
+                },
+            })
+        });
+        commands
+            .entity(entity)
+            .remove::<MeshMaterial3d<StandardMaterial>>()
+            .insert(MeshMaterial3d(handle.clone()));
+    }
+}
+
+/// A clear shadow map until the clouds draw into it (and for good, without them).
+fn insert_shadow_map(mut images: ResMut<Assets<Image>>) {
+    let n = shadow_size();
+    let mut image = Image::new_fill(
+        Extent3d { width: n, height: n, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        &[255],
+        TextureFormat::R8Unorm,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage |= TextureUsages::RENDER_ATTACHMENT;
+    image.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
+        address_mode_u: bevy::image::ImageAddressMode::ClampToEdge,
+        address_mode_v: bevy::image::ImageAddressMode::ClampToEdge,
+        mag_filter: bevy::image::ImageFilterMode::Linear,
+        min_filter: bevy::image::ImageFilterMode::Linear,
+        ..default()
+    });
+    let _ = images.insert(&SHADOW_MAP, image);
+}
+
 impl Plugin for CloudsPlugin {
     fn build(&self, app: &mut App) {
         let disabled = std::env::var("FLIGHT_SIM_NO_CLOUDS").is_ok();
+        app.add_systems(Startup, insert_shadow_map)
+            .add_systems(PostUpdate, shade_aircraft);
         let mut settings = CloudSettings::default();
         if let Some(div) = std::env::var("CLOUDS_DIV")
             .ok()
@@ -165,9 +258,12 @@ impl Plugin for CloudsPlugin {
             )
             .add_systems(
                 Core3d,
-                clouds_raymarch_pass
-                    .after(main_opaque_pass_3d)
-                    .before(main_transparent_pass_3d),
+                (
+                    clouds_shadow_pass.before(main_opaque_pass_3d),
+                    clouds_raymarch_pass
+                        .after(main_opaque_pass_3d)
+                        .before(main_transparent_pass_3d),
+                ),
             );
     }
 }
@@ -639,6 +735,8 @@ struct CloudsUniform {
     history_valid: u32,
     temporal_blend: f32,
     fade_start: f32,
+    shadow_extent: f32,
+    shadow_size: f32,
 }
 
 /// The shader is embedded so the two depth-texture variants can be stamped
@@ -668,6 +766,7 @@ enum CloudsPipelineKey {
     },
     Raymarch,
     Resolve,
+    Shadow,
     Composite {
         msaa_samples: u32,
         target_format: TextureFormat,
@@ -852,7 +951,7 @@ impl SpecializedRenderPipeline for CloudsPipelines {
         let msaa_samples = match key {
             CloudsPipelineKey::Linearize { msaa_samples }
             | CloudsPipelineKey::Composite { msaa_samples, .. } => msaa_samples,
-            CloudsPipelineKey::Raymarch | CloudsPipelineKey::Resolve => 1,
+            CloudsPipelineKey::Raymarch | CloudsPipelineKey::Resolve | CloudsPipelineKey::Shadow => 1,
         };
         let low_res_targets = vec![
             Some(ColorTargetState {
@@ -898,6 +997,22 @@ impl SpecializedRenderPipeline for CloudsPipelines {
                     shader: shader.clone(),
                     entry_point: Some("fs_raymarch".into()),
                     targets: low_res_targets,
+                    ..default()
+                }),
+                ..default()
+            },
+            CloudsPipelineKey::Shadow => RenderPipelineDescriptor {
+                label: Some("clouds_shadow_pipeline".into()),
+                layout: vec![self.raymarch_layout.clone()],
+                vertex,
+                fragment: Some(FragmentState {
+                    shader: shader.clone(),
+                    entry_point: Some("fs_shadow".into()),
+                    targets: vec![Some(ColorTargetState {
+                        format: TextureFormat::R8Unorm,
+                        blend: None,
+                        write_mask: ColorWrites::ALL,
+                    })],
                     ..default()
                 }),
                 ..default()
@@ -962,6 +1077,7 @@ struct CloudsViewPipelines {
     linearize: CachedRenderPipelineId,
     raymarch: CachedRenderPipelineId,
     resolve: CachedRenderPipelineId,
+    shadow: CachedRenderPipelineId,
 }
 
 #[derive(Component)]
@@ -1048,10 +1164,12 @@ fn queue_clouds(
                 target_format: view.target_format,
             },
         );
+        let shadow = specialized.specialize(&pipeline_cache, &pipelines, CloudsPipelineKey::Shadow);
         commands.entity(entity).insert(CloudsViewPipelines {
             linearize,
             raymarch,
             resolve,
+            shadow,
         });
         phase.add_transient(Transparent3d {
             sorting_info: TransparentSortingInfo3d::Sorted {
@@ -1232,6 +1350,8 @@ fn prepare_clouds_uniforms(
             history_valid: u32::from(history.valid),
             temporal_blend: s.temporal_blend,
             fade_start: s.fade_start,
+            shadow_extent: SHADOW_EXTENT,
+            shadow_size: shadow_size() as f32,
         };
         match existing {
             Some(mut uniform) => {
@@ -1406,6 +1526,41 @@ fn clouds_raymarch_pass(
     });
     pass.set_pipeline(resolve);
     pass.set_bind_group(0, &bind_groups.resolve, &[]);
+    pass.draw(0..3, 0..1);
+}
+
+/// Draws the top-down cloud shadow map, before the opaque pass that samples it.
+fn clouds_shadow_pass(
+    view: ViewQuery<(&CloudsViewBindGroups, &CloudsViewPipelines), With<CloudsView>>,
+    pipeline_cache: Res<PipelineCache>,
+    images: Res<RenderAssets<GpuImage>>,
+    mut ctx: RenderContext,
+) {
+    let (bind_groups, pipelines) = view.into_inner();
+    let (Some(pipeline), Some(target)) = (
+        pipeline_cache.get_render_pipeline(pipelines.shadow),
+        images.get(&SHADOW_MAP),
+    ) else {
+        return;
+    };
+    let mut pass = ctx.command_encoder().begin_render_pass(&RenderPassDescriptor {
+        label: Some("clouds_shadow"),
+        color_attachments: &[Some(RenderPassColorAttachment {
+            view: &target.texture_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: LoadOp::Clear(LinearRgba::WHITE.into()),
+                store: StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind_groups.raymarch, &[]);
     pass.draw(0..3, 0..1);
 }
 

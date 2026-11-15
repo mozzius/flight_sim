@@ -61,6 +61,10 @@ pub type SceneryMaterial = ExtendedMaterial<StandardMaterial, SceneryExt>;
 pub struct SceneryExt {
     #[uniform(100)]
     pub params: SceneryParams,
+    /// The clouds' top-down shadow map (`clouds::SHADOW_MAP`).
+    #[texture(110)]
+    #[sampler(111)]
+    pub cloud_shadow: Handle<Image>,
 }
 
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
@@ -71,6 +75,8 @@ pub struct SceneryParams {
     pub mist: Vec4,
     /// xyz: direction to the sun
     pub sun: Vec4,
+    /// x, y: cloud layer bottom / top (m), z: shadow map extent (m), w: 1 = clouds on
+    pub clouds: Vec4,
 }
 
 impl MaterialExtension for SceneryExt {
@@ -93,6 +99,10 @@ pub struct TerrainDetail {
     /// The farms, for drawing the fields per pixel (`fields::farm_texture`).
     #[texture(101, sample_type = "float", filterable = false)]
     pub farms: Handle<Image>,
+    /// The clouds' top-down shadow map (`clouds::SHADOW_MAP`).
+    #[texture(110)]
+    #[sampler(111)]
+    pub cloud_shadow: Handle<Image>,
 }
 
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
@@ -118,6 +128,8 @@ pub struct TerrainParams {
     pub crops: [Vec4; fields::CROP_COUNT],
     /// Crop table: x: stripe contrast, y: stripe period (m)
     pub crop_stripes: [Vec4; fields::CROP_COUNT],
+    /// x, y: cloud layer bottom / top (m), z: shadow map extent (m), w: 1 = clouds on
+    pub clouds: Vec4,
 }
 
 impl MaterialExtension for TerrainDetail {
@@ -1550,8 +1562,10 @@ pub fn spawn_map(
                     seed: UVec4::new(terrain_seed(), 0, 0, 0),
                     crops,
                     crop_stripes,
+                    clouds: crate::clouds::shadow_params(look),
                 },
                 farms: farms.clone(),
+                cloud_shadow: crate::clouds::SHADOW_MAP,
             },
         });
 
@@ -1593,7 +1607,9 @@ pub fn spawn_map(
                 params: Vec4::new(1.0, 0.0, 0.0, 0.0),
                 mist: look.mist,
                 sun: look.sun_dir.extend(0.0),
+                clouds: crate::clouds::shadow_params(look),
             },
+            cloud_shadow: crate::clouds::SHADOW_MAP,
         },
     };
     let road_material = scenery_materials.add(scenery(16.0, 0.85));

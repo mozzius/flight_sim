@@ -49,6 +49,9 @@ struct Clouds {
     history_valid: u32,
     temporal_blend: f32,
     fade_start: f32,
+    // top-down cloud shadow map: metres across, texels across
+    shadow_extent: f32,
+    shadow_size: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Clouds;
@@ -469,6 +472,39 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
     out.color = vec4(radiance, alpha);
     out.data = vec2(scene_dist / 1000.0, mean_dist / 1000.0);
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// shadow pass: a top-down map of the sunlight let through the layer, for the
+// terrain, water and scenery shaders (see `cloud_shadow` in terrain.wesl).
+// Texels sit on the sun rays' crossings of a reference altitude, so any
+// height of ground looks it up by sliding along the sun ray to that altitude.
+// The map follows the camera, snapped to whole texels so it doesn't crawl.
+
+const SHADOW_REF: f32 = 3000.0;
+const SHADOW_STEPS: i32 = 10;
+
+@fragment
+fn fs_shadow(in: VsOut) -> @location(0) f32 {
+    let sun = u.sun_dir;
+    let sy = max(sun.y, 0.08);
+    let slide = sun.xz / sy;
+    let texel = u.shadow_extent / u.shadow_size;
+    let origin = floor(u.camera_pos.xz / texel) * texel + slide * SHADOW_REF - 0.5 * u.shadow_extent;
+    let q = origin + in.position.xy / u.shadow_size * u.shadow_extent;
+    let thickness = u.layer_top - u.layer_bottom;
+    var sum = 0.0;
+    for (var k = 0; k < SHADOW_STEPS; k++) {
+        let hf = (f32(k) + 0.5) / f32(SHADOW_STEPS);
+        let h = u.layer_bottom + hf * thickness;
+        let xz = q + slide * (h - SHADOW_REF);
+        let p = vec3(xz.x, h, xz.y);
+        sum += density(p, hf, sample_weather(p), 0.0);
+    }
+    let tau = sum * u.extinction * thickness / f32(SHADOW_STEPS) / sy;
+    // light scattered on through the cloud keeps the shadows from going black,
+    // and softens their edges
+    return exp(-tau * 0.12);
 }
 
 // ---------------------------------------------------------------------------

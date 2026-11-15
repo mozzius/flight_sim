@@ -18,7 +18,7 @@
 
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
-    mesh_view_bindings::{view, globals},
+    mesh_view_bindings::{view, globals, lights},
     forward_io::{VertexOutput, FragmentOutput},
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
     shadows::fetch_directional_shadow,
@@ -46,6 +46,8 @@ struct Water {
     near_frame: vec4<f32>,
     fine_frame: vec4<f32>,
     coarse_frame: vec4<f32>,
+    // x, y: cloud layer bottom / top (m), z: cloud shadow map extent (m), w: 1 = clouds
+    clouds: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100)
@@ -58,6 +60,31 @@ var fine_depth: texture_2d<f32>;
 var coarse_depth: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(104)
 var depth_sampler: sampler;
+
+@group(constants::MATERIAL_BIND_GROUP) @binding(110)
+var cloud_shadow_map: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(111)
+var cloud_shadow_sampler: sampler;
+
+// Sunlight let through the clouds at `p` (1 = clear): a lookup in the clouds'
+// top-down shadow map (fs_shadow in clouds.wgsl; keep the two in sync).
+// Texels sit where the sun rays cross a reference altitude, so slide `p` along
+// its sun ray to that altitude first. Only the part of the layer above `p`
+// shades it; past the edge of the map (which follows the camera) there's none.
+const CLOUD_SHADOW_REF: f32 = 3000.0;
+fn cloud_shadow(p: vec3<f32>) -> f32 {
+    let c = water.clouds;
+    let sun = lights.directional_lights[0].direction_to_light;
+    let slide = sun.xz / max(sun.y, 0.08);
+    let texel = c.z / f32(textureDimensions(cloud_shadow_map).x);
+    let origin = floor(view.world_position.xz / texel) * texel + slide * CLOUD_SHADOW_REF - 0.5 * c.z;
+    let uv = (p.xz + slide * (CLOUD_SHADOW_REF - p.y) - origin) / c.z;
+    let t = textureSampleLevel(cloud_shadow_map, cloud_shadow_sampler, uv, 0.0).r;
+    let above = clamp((c.y - p.y) / max(c.y - c.x, 1.0), 0.0, 1.0);
+    let edge = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
+    let s = exp(log(max(t, 0.002)) * above * (1.0 - smoothstep(0.4, 0.5, edge)));
+    return mix(1.0, s, c.w);
+}
 
 // keep in sync with src/terrain_gen/water.rs
 const DEPTH_RANGE: f32 = 128.0;
@@ -202,7 +229,8 @@ fn fragment(
     let dist = length(to_cam);
     let v = to_cam / max(dist, 1e-3);
     // the mountains' baked shadows, faded in where the shadow cascades run out (as the terrain)
-    let baked_sun = mix(1.0, sg.y, smoothstep1(1600.0, 2800.0, dist));
+    // (and the clouds')
+    let baked_sun = mix(1.0, sg.y, smoothstep1(1600.0, 2800.0, dist)) * cloud_shadow(pos);
 
     // ---- body colour, foam and ice (lit by the PBR path)
     let ds = water.shallow.a;
