@@ -67,6 +67,8 @@ pub(super) struct BiomeParams {
     pub snow: Vec3,
     pub tree_line: f32,
     pub snow_line: f32,
+    /// How much the snow line wanders and how gradually it fades in (1 = the original).
+    pub snow_spread: f32,
     /// Snow lies where the ground's flatness (normal.y) is above this range.
     pub snow_flatness: (f32, f32),
     /// Added to the slope where rock shows through (more rock above 0).
@@ -169,6 +171,7 @@ fn alpine() -> BiomeParams {
         dark_rock: srgb(0.31, 0.27, 0.22),
         snow: srgb(0.94, 0.95, 0.98),
         tree_line: 1650.0,
+        snow_spread: 1.0,
         snow_line: 2350.0,
         snow_flatness: (0.55, 0.72),
         rock_bias: 0.0,
@@ -219,6 +222,7 @@ fn tundra() -> BiomeParams {
         dark_rock: srgb(0.27, 0.29, 0.32),
         snow: srgb(0.92, 0.94, 0.98),
         tree_line: 1150.0,
+        snow_spread: 1.0,
         snow_line: 380.0,
         // wind-scoured: the steeper slopes show their rock
         snow_flatness: (0.74, 0.86),
@@ -265,6 +269,7 @@ fn farmland() -> BiomeParams {
         dark_rock: srgb(0.30, 0.27, 0.23),
         snow: srgb(0.94, 0.95, 0.98),
         tree_line: 1250.0,
+        snow_spread: 1.0,
         snow_line: 5000.0,
         snow_flatness: (0.55, 0.72),
         rock_bias: 0.0,
@@ -325,6 +330,7 @@ fn archipelago() -> BiomeParams {
         dark_rock: srgb(0.24, 0.21, 0.19),
         snow: srgb(0.94, 0.95, 0.98),
         tree_line: 1250.0,
+        snow_spread: 1.0,
         snow_line: 9000.0,
         snow_flatness: (0.55, 0.72),
         rock_bias: 0.0,
@@ -384,6 +390,7 @@ fn fjords() -> BiomeParams {
         dark_rock: srgb(0.20, 0.20, 0.20),
         snow: srgb(0.94, 0.95, 0.98),
         tree_line: 750.0,
+        snow_spread: 3.0,
         snow_line: 1450.0,
         snow_flatness: (0.6, 0.75),
         rock_bias: 0.04,
@@ -403,7 +410,8 @@ fn fjords() -> BiomeParams {
         tree_snow: 0.0,
         shader_rock: Vec3::new(0.66, 0.68, 0.72),
         veg_patches: 0.7,
-        shader_snow: Vec3::new(0.5, 0.7, 0.0),
+        // (the snow follows the bake's ragged line, not a crisp per-pixel one)
+        shader_snow: Vec3::new(0.5, 0.7, 1.0),
     }
 }
 
@@ -413,12 +421,12 @@ fn lakeland() -> BiomeParams {
     BiomeParams {
         relief: 0.12,
         // (lake beds)
-        soft_floor: 105.0,
+        soft_floor: 96.0,
         soft_floor_range: 35.0,
         sea_shift: 0.0,
         sea_regions: 1.0,
         sea_beaches: 1.0,
-        squash: Some((150.0, 25.0)),
+        squash: Some((150.0, 10.0)),
         hummocks: 150.0,
         water: Some(Water {
             level: LAKELAND_LEVEL,
@@ -432,8 +440,8 @@ fn lakeland() -> BiomeParams {
             deep: srgb(0.02, 0.04, 0.05),
             depth_scale: 8.0,
             foam: 0.0,
-            // (dark water under low shores)
-            reflect: 0.7,
+            // (dark water: the lakes read as lakes, not sky)
+            reflect: 0.35,
         }),
         // clearings and bog
         meadow: srgb(0.40, 0.45, 0.22),
@@ -444,6 +452,7 @@ fn lakeland() -> BiomeParams {
         dark_rock: srgb(0.30, 0.28, 0.26),
         snow: srgb(0.94, 0.95, 0.98),
         tree_line: 5000.0,
+        snow_spread: 1.0,
         snow_line: 9000.0,
         snow_flatness: (0.55, 0.72),
         rock_bias: -0.05,
@@ -469,7 +478,7 @@ fn lakeland() -> BiomeParams {
 }
 
 /// Lakeland: the level of every lake (the hollows between the hummocks).
-const LAKELAND_LEVEL: f32 = 127.0;
+const LAKELAND_LEVEL: f32 = 114.0;
 
 /// How the ground is covered at a point (each 0..1), shared by the colour
 /// bake and the tree planter so the trees grow where the ground looks wooded.
@@ -534,8 +543,9 @@ pub(super) fn cover(b: &BiomeParams, h: f32, normal: Vec3, ridge: f32, jitter: f
     let rock = smoothstep(steep_start, steep_start - 0.10, flatness);
 
     // Snow on high, not-too-steep ground; it lingers longer in creases.
-    let snow_line = b.snow_line + jitter * 200.0 - crease * 200.0;
-    let mut snow = smoothstep(snow_line - 100.0, snow_line + 250.0, h)
+    let spread = b.snow_spread;
+    let snow_line = b.snow_line + (jitter * 200.0 - crease * 200.0) * spread;
+    let mut snow = smoothstep(snow_line - 100.0 * spread, snow_line + 250.0 * spread, h)
         * smoothstep(
             b.snow_flatness.0 - smoothstep(snow_line + 150.0, snow_line + 1150.0, h) * 0.15,
             b.snow_flatness.1,

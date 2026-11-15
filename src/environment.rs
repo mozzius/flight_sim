@@ -356,8 +356,9 @@ impl Environment {
             Biome::Archipelago => 0.12,
             // mist lying in the inlets
             Biome::Fjords => 0.35,
-            // low ground: lots of it is in the mist layer
-            Biome::Lakeland => 0.5,
+            // all of it sits low in the mist layer: a light haze, or the forest
+            // fades to the colour of the lakes
+            Biome::Lakeland => 0.12,
             _ => 1.0,
         } * match w {
             Weather::Clear => 1.0,

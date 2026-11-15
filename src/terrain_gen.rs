@@ -709,7 +709,17 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
         height = centre + range * ((height - centre) / range).tanh();
     }
     if b.hummocks > 0.0 {
-        height += fractal_noise(p, 14.0, 3, 2.1, 0.45, terrain_seed() ^ 0x1A4E).x * b.hummocks;
+        // drawn out along the old ice flow (NW-SE), like the long Finnish lakes and eskers
+        let (s, c) = 0.6f32.sin_cos();
+        let q = Vec2::new(c * p.x - s * p.y, s * p.x + c * p.y) * Vec2::new(0.6, 1.3);
+        height += fractal_noise(q, 14.0, 3, 2.1, 0.45, terrain_seed() ^ 0x1A4E).x * b.hummocks;
+        // steeper at the waterline, so the forest rises straight out of the lakes
+        // (no wide flats a metre above the water, which read as shallows)
+        if let Some(w) = &b.water {
+            let (m, width) = (3.0, 10.0);
+            let s = height - w.level;
+            height = w.level + s - (1.0 - m) * width * (s / width).tanh();
+        }
     }
 
     // Squash the deepest basins into broad, nearly flat floors that bottom out just below 0
@@ -1781,10 +1791,19 @@ mod tests {
         if let Some(w) = &biome::params().water {
             let wet = hs.iter().filter(|h| **h < w.level).count() as f32 / hs.len() as f32;
             println!("under water: {:.1}%", wet * 100.0);
+            let mut near = (0, 0);
+            for j in -60..=60 {
+                for i in -60..=60 {
+                    let h = sample_terrain(i as f32 * 250.0, j as f32 * 250.0, 5.0).height;
+                    near.0 += (h < w.level) as u32;
+                    near.1 += 1;
+                }
+            }
+            println!("under water within 15 km: {:.1}%", near.0 as f32 / near.1 as f32 * 100.0);
             let range = match biome {
                 biome::Biome::Archipelago => 0.4..0.65,
                 biome::Biome::Fjords => 0.08..0.3,
-                biome::Biome::Lakeland => 0.15..0.4,
+                biome::Biome::Lakeland => 0.1..0.3,
                 _ => 0.005..0.06,
             };
             assert!(range.contains(&wet), "{:.1}% under water", wet * 100.0);
