@@ -527,8 +527,8 @@ fn player_loops(
                 let alive = if disabled { 0.0 } else { 1.0 };
                 match kind {
                     PlayerLoop::Engine => (
-                        (0.12 + 0.2 * state.spool) * alive,
-                        0.75 + 0.45 * state.spool,
+                        (0.06 + 0.28 * state.spool) * alive,
+                        0.6 + 0.7 * state.spool,
                     ),
                     PlayerLoop::Afterburner => (
                         if state.afterburner_on { 0.55 } else { 0.0 },
@@ -651,7 +651,7 @@ fn remote_loops(
                 match kind {
                     RemoteLoop::Engine => (
                         if disabled { 0.0 } else { 0.35 + 0.4 * state.spool + if state.afterburner_on { 0.4 } else { 0.0 } },
-                        d * (0.75 + 0.45 * state.spool),
+                        d * (0.6 + 0.7 * state.spool),
                     ),
                     _ => (
                         if weapons.trigger_gun && weapons.gun_ammo > 0 && !disabled { 0.9 } else { 0.0 },
