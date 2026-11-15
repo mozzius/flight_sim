@@ -451,7 +451,6 @@ impl Default for CloudSettings {
 /// shader uses, minus the shape and detail noise. Good enough for "is this
 /// point in cloud" queries from AI and seekers.
 #[derive(Resource)]
-#[allow(dead_code)] // gameplay hook, not wired into AI / seekers yet
 pub struct CloudField {
     weather: Arc<Vec<noise::Weather>>,
     layer_bottom: f32,
@@ -463,7 +462,6 @@ pub struct CloudField {
     time: f32,
 }
 
-#[allow(dead_code)] // gameplay hook, not wired into AI / seekers yet
 impl CloudField {
     fn new(weather: Arc<Vec<noise::Weather>>, s: &CloudSettings) -> Self {
         Self {
@@ -479,6 +477,7 @@ impl CloudField {
     }
 
     /// Altitudes (metres) of the bottom and top of the cloud layer.
+    #[allow(dead_code)] // gameplay hook, not used yet
     pub fn layer(&self) -> (f32, f32) {
         (self.layer_bottom, self.layer_top)
     }
@@ -537,7 +536,6 @@ impl CloudField {
 }
 
 /// Same curve as `height_gradient` in the shader.
-#[allow(dead_code)] // used by CloudField
 fn height_gradient(h: f32, cloud_type: f32) -> f32 {
     let top = 0.28 + (1.0 - 0.28) * cloud_type;
     noise::smoothstep(0.0, 0.08, h) * (1.0 - noise::smoothstep(top * 0.65, top, h))

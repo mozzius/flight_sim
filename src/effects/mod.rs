@@ -8,8 +8,10 @@
 //!
 //! This module decides *what* to emit: explosions (scaled by size), burning
 //! and damaged aircraft, wing vapour and vapour cones, contrails and wingtip
-//! vortices, missile and flare smoke, muzzle flashes, impact sparks and dust.
+//! vortices, missile and flare smoke, muzzle flashes, impact sparks and dust,
+//! and (`cloud_wake`) cloud dragged out behind jets leaving a cloud.
 
+mod cloud_wake;
 mod particles;
 mod plume;
 mod textures;
@@ -66,6 +68,7 @@ impl Plugin for EffectsPlugin {
                 update_engines,
                 update_missile_flames,
                 aircraft_fx,
+                cloud_wake::cloud_wake,
                 projectile_fx,
                 update_bursts,
                 update_ribbons,

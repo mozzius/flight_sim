@@ -90,6 +90,10 @@ pub struct Particle {
     /// Soft-particle fade distance, as a fraction of the size (vapour hugging
     /// the wing wants a small one).
     pub soft: f32,
+    /// Fades the particle out as the camera comes within this many of its
+    /// diameters, so big puffs flying past the camera don't fill the screen
+    /// (0: off).
+    pub near: f32,
     /// Simulate in this entity's local space (vapour, muzzle flashes).
     pub frame: Option<Entity>,
     pub tile: f32,
@@ -123,6 +127,7 @@ impl Particle {
             fade_in: 0.0,
             stretch: 0.0,
             soft: 1.0,
+            near: 0.0,
             frame: None,
             tile: rng.random_range(0..textures::ATLAS_TILES * textures::ATLAS_TILES) as f32,
             seed: rng.random_range(0.0..1.0),
@@ -489,7 +494,8 @@ pub fn build_mesh(
             corners[k] = world + x_axis * c.x * hx + y_axis * c.y * hy;
             uv[k] = Vec2::new(0.5 + 0.5 * c.x, 0.5 - 0.5 * c.y);
         }
-        let opacity = p.opacity * fade_in;
+        let near = if p.near > 0.0 { smoothstep01((dist / (p.near * size) - 0.3) / 0.7) } else { 1.0 };
+        let opacity = p.opacity * fade_in * near;
         built.push(Built {
             key: dist,
             corners,
@@ -574,4 +580,9 @@ pub fn build_mesh(
         );
         *log = (time.elapsed_secs(), 0.0, 0);
     }
+}
+
+fn smoothstep01(x: f32) -> f32 {
+    let t = x.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }

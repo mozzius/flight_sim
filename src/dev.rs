@@ -18,12 +18,17 @@
 //! `board` (the leaderboard screen with its rows), `queue` (waiting in the
 //! quick-play queue), `online<n>` (the server says n or more are online),
 //! `tut-<step>` (in that tutorial step, e.g. `tut-flares`, `tut-complete`;
-//! `tut-rings+20` waits 20 s into it).
+//! `tut-rings+20` waits 20 s into it), `cloudexit` (the player's jet has left
+//! a cloud; `cloudexit+0.5` half a second after).
 //! `FLIGHT_SIM_ALT=<m>` starts (and respawns) the player's jet at that
 //! altitude, e.g. inside the cloud layer (~1900-4300 m).
 //! `FLIGHT_SIM_STICK=<pitch>,<roll>[,<lead secs>]` holds the player's stick
 //! there (+1 = full pull / roll right), from `lead` seconds before the
 //! screenshot (default: all along), e.g. to swing the jet across the screen.
+//! `FLIGHT_SIM_CLOUD_EXIT=<secs>` moves the player's new jet along its heading
+//! so it flies out of a cloud (into a long clear stretch) about that many
+//! seconds after spawning, for the cloud wake effect; pair with
+//! `FLIGHT_SIM_ALT` and `FLIGHT_SIM_LOG=1` (logs the real time of the exit).
 
 use bevy::{
     prelude::*,
@@ -157,6 +162,13 @@ impl Plugin for DevPlugin {
         if std::env::var("FLIGHT_SIM_AUTOPILOT").is_ok() {
             app.add_systems(Update, autopilot_player);
         }
+        if let Some(secs) = std::env::var("FLIGHT_SIM_CLOUD_EXIT").ok().and_then(|s| s.parse::<f32>().ok()) {
+            app.add_systems(Update, move |field: Res<crate::clouds::CloudField>, time: Res<Time<Real>>, mut new: Query<(&mut Transform, &crate::flight::FlightState), Added<crate::game::Player>>| {
+                for (mut t, state) in &mut new {
+                    place_before_cloud_exit(&mut t, state.velocity, secs, &field, time.elapsed_secs());
+                }
+            });
+        }
         if let Ok(list) = std::env::var("FLIGHT_SIM_SCREENSHOT_EXTRA") {
             let shots = list
                 .split(',')
@@ -251,8 +263,13 @@ fn extra_screenshots(
     board: Res<crate::leaderboard::BoardUi>,
     state: Res<State<crate::loading::GameState>>,
     tutorial: Res<crate::tutorial::Tutorial>,
+    clouds: Res<crate::clouds::CloudField>,
+    player: Query<&GlobalTransform, With<crate::game::Player>>,
+    mut been_in_cloud: Local<bool>,
 ) {
     let now = time.elapsed_secs();
+    let in_cloud = player.single().is_ok_and(|p| clouds.density_at(p.translation()) > 0.03);
+    *been_in_cloud |= in_cloud;
     if kills.read().count() > 0 {
         *last_kill = Some(now);
     }
@@ -288,6 +305,8 @@ fn extra_screenshots(
                 "death" => prompt.ready() && net.death().is_some(),
                 "rank" => prompt.ready() && net.standing().is_some(),
                 "board" => board.open && net.board(board.kind).is_some(),
+                // the player's jet has flown out of a cloud (by `CloudField`)
+                "cloudexit" => *been_in_cloud && !in_cloud,
                 _ => false,
             }
         };
@@ -358,6 +377,27 @@ fn hide_player_model(mut player: Query<&mut Visibility, With<crate::game::Player
     for mut vis in &mut player {
         *vis = Visibility::Hidden;
     }
+}
+
+/// `FLIGHT_SIM_CLOUD_EXIT=<secs>`: slides the jet along its heading to `secs`
+/// of flight before the first point where it leaves 400 m of cloud for at
+/// least 1.5 km of clear air.
+fn place_before_cloud_exit(t: &mut Transform, velocity: Vec3, secs: f32, field: &crate::clouds::CloudField, now: f32) {
+    const STEP: f32 = 25.0;
+    let dir = Vec3::new(velocity.x, 0.0, velocity.z).normalize_or(Vec3::NEG_Z);
+    let start = t.translation;
+    let cloudy = |d: f32| field.density_at(start + dir * d) > 0.03;
+    let mut d = 400.0;
+    while d < 80_000.0 {
+        let inside = (1..=16).all(|i| cloudy(d - i as f32 * STEP));
+        if inside && (0..60).all(|i| !cloudy(d + i as f32 * STEP)) {
+            t.translation = start + dir * (d - velocity.length() * secs);
+            info!("cloud exit: placed {:.0} m before an exit at {:.0}, expect it ~{:.1} s real", velocity.length() * secs, start + dir * d, now + secs);
+            return;
+        }
+        d += STEP;
+    }
+    warn!("cloud exit: no cloud exit found along the heading");
 }
 
 /// `FLIGHT_SIM_AUTOPILOT=1`: the AI flies (and fights) the player's jet, so
