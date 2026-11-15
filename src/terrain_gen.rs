@@ -1572,7 +1572,7 @@ pub fn spawn_map(
     for road in &road_lines {
         let child = commands
             .spawn((
-                Mesh3d(meshes.add(roads::road_mesh(road))),
+                Mesh3d(meshes.add(roads::road_mesh(road, low.then_some(&fine)))),
                 MeshMaterial3d(road_material.clone()),
                 Transform::default(),
                 bevy::light::NotShadowCaster,

@@ -343,43 +343,58 @@ fn flatten(grid: &mut HeightGrid, roads: &[Road]) {
 }
 
 /// One ribbon mesh per road: gravel shoulder, asphalt, dashed centre line.
-pub(super) fn road_mesh(road: &Road) -> Mesh {
-    let gravel = Vec4::new(0.36, 0.33, 0.28, 1.0);
-    let asphalt = Vec4::new(0.075, 0.075, 0.08, 1.0);
-    let paint = Vec4::new(0.3, 0.29, 0.24, 1.0);
+/// The road's ribbon: gravel shoulders, asphalt, and a dashed centre line.
+///
+/// `surface`: the height grid that's actually drawn under the road when it isn't
+/// the (road-levelled) near grid (the low-memory scene draws the 64 m grid), so
+/// the ribbon is lifted clear of it.
+pub(super) fn road_mesh(road: &Road, surface: Option<&HeightGrid>) -> Mesh {
+    let gravel = [0.36, 0.33, 0.28, 1.0];
+    let asphalt = [0.075, 0.075, 0.08, 1.0];
+    let paint = [0.3, 0.29, 0.24, 1.0];
     let w = ROAD_HALF_WIDTH;
+    const LINE: f32 = 0.15; // centre line half-width
     // offsets across the road, left to right
-    let offsets = [-(w + SHOULDER), -w, -0.12, 0.12, w, w + SHOULDER];
+    let offsets = [-(w + SHOULDER), -w, -LINE, LINE, w, w + SHOULDER];
     let cols = offsets.len();
-    let mut positions = Vec::with_capacity(road.len() * cols);
-    let mut colors = Vec::with_capacity(road.len() * cols);
+    let rows = road.len();
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(rows * cols + rows * 4);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(positions.capacity());
     for (k, &p) in road.iter().enumerate() {
         let a = road[k.saturating_sub(1)];
-        let b = road[(k + 1).min(road.len() - 1)];
+        let b = road[(k + 1).min(rows - 1)];
         let dir = (b - a).xz().normalize_or(Vec2::X);
         let side = Vec2::new(-dir.y, dir.x);
-        let dash = (k / 2) % 3 == 0;
         for (c, &o) in offsets.iter().enumerate() {
             let xz = p.xz() + side * o;
             // shoulders drop a little so they don't float over banked ground
-            let y = p.y + if c == 0 || c == cols - 1 { 0.05 } else { 0.3 };
-            positions.push([xz.x, y, xz.y]);
-            let col = match c {
+            let lift = if c == 0 || c == cols - 1 { 0.05 } else { 0.3 };
+            let ground = surface.and_then(|g| g.sample_inside(xz.x, xz.y)).map_or(p.y, |h| h.max(p.y));
+            positions.push([xz.x, ground + lift, xz.y]);
+            colors.push(match c {
                 0 | 5 => gravel,
-                2 | 3 if dash => paint,
                 _ => asphalt,
-            };
-            colors.push(col.to_array());
+            });
         }
     }
-    let mut indices = Vec::with_capacity((road.len() - 1) * (cols - 1) * 6);
-    for k in 0..road.len() as u32 - 1 {
+    let mut indices = Vec::with_capacity((rows - 1) * (cols - 1) * 6);
+    let quad = |indices: &mut Vec<u32>, a: u32, b: u32, d: u32, e: u32| indices.extend_from_slice(&[a, b, d, b, e, d]);
+    for k in 0..rows as u32 - 1 {
         for c in 0..cols as u32 - 1 {
             let a = k * cols as u32 + c;
-            let b = a + 1;
-            let d = a + cols as u32;
-            let e = d + 1;
-            indices.extend_from_slice(&[a, b, d, b, e, d]);
+            if c == 2 {
+                // the centre line gets its own corners, so each segment is all paint
+                // or all asphalt (shared corners would smear the paint across the road)
+                let dash = (k / 2) % 3 == 0;
+                let base = positions.len() as u32;
+                for v in [a, a + 1, a + cols as u32, a + cols as u32 + 1] {
+                    positions.push(positions[v as usize]);
+                    colors.push(if dash { paint } else { asphalt });
+                }
+                quad(&mut indices, base, base + 1, base + 2, base + 3);
+            } else {
+                quad(&mut indices, a, a + 1, a + cols as u32, a + cols as u32 + 1);
+            }
         }
     }
     let count = positions.len();
