@@ -6,7 +6,9 @@
 //! the dense part of a cloud and spends it quickly in clear air, emitting many small, faint
 //! vapour particles ([`Particle::vapour`]: outline-free, fog-shaded) along
 //! its path at a rate that falls with what's left and gusts at random, plus
-//! a few thicker clumps right at the exit. They are hidden behind (and
+//! a few thicker clumps right at the exit. About half cling to the jet and
+//! stream off it for a second, so the chase camera sees the plume too. They
+//! are hidden behind (and
 //! inside) the real clouds by the occlusion map.
 
 use std::collections::HashMap;
@@ -34,12 +36,14 @@ const PEAK_FADE: f32 = 2.5;
 const CHARGE: f32 = 1.2;
 const CHARGE_DENSE: f32 = 3.0;
 /// Time constant (s) of the drain in clear air, and where emission stops:
-/// most of the cloud comes away in the first ~100-200 m.
-const DRAIN: f32 = 0.4;
+/// most of the cloud comes away in the first ~200-300 m.
+const DRAIN: f32 = 0.7;
 const EMPTY: f32 = 0.05;
 /// Wisps per second at full charge (fewer on the phone path); about 150-200
 /// per exit with the clumps.
-const RATE: f32 = 280.0;
+const RATE: f32 = 200.0;
+/// Share of the wisps that cling to the jet (see [`streamer`]).
+const CLING: f64 = 0.45;
 /// Thick clumps of wisps left right at the exit point.
 const CLUMPS: usize = 3;
 const CLUMP_WISPS: usize = 6;
@@ -84,6 +88,25 @@ fn wisp(rng: &mut impl rand::Rng, pos: Vec3, jet_vel: Vec3, c: f32, scale: f32, 
         dissolve: 0.0,
         near: 1.6,
         ..Particle::vapour(pos)
+    }
+}
+
+/// A wisp that clings to the airframe: it keeps most of the jet's speed and
+/// streams back off the wings over a second or so, so the plume also shows
+/// from the chase camera (the rest is left behind at the exit in a blink).
+fn streamer(rng: &mut impl rand::Rng, pos: Vec3, jet_vel: Vec3, c: f32, scale: f32, light: f32) -> Particle {
+    let s = (0.45 + 0.55 * c) * scale;
+    Particle {
+        vel: jet_vel * rng.random_range(0.86..0.97) + rand_dir(rng) * 3.0,
+        life: rng.random_range(0.9..1.7),
+        size: (rng.random_range(3.0..5.5) * s, rng.random_range(9.0..16.0) * s),
+        drag: rng.random_range(0.3..0.7),
+        stretch: 0.05,
+        opacity: 0.42 * c.powf(0.8),
+        fade_in: 0.12,
+        // thin out well before they reach the chase camera
+        near: 3.0,
+        ..wisp(rng, pos, jet_vel, c, scale, light)
     }
 }
 
@@ -203,6 +226,12 @@ pub fn cloud_wake(
                 rng.random_range(-4.0..5.0),
                 rng.random_range(-5.0..5.0),
             ) * (0.5 + 0.5 * c);
+            if rng.random_bool(CLING) {
+                // off the wings and the back of the fuselage
+                let at = tail + rot * Vec3::new(rng.random_range(-6.5..6.5), rng.random_range(-0.6..1.2), rng.random_range(-7.0..1.0));
+                particles.add(streamer(&mut rng, at, state.velocity, c, scale, light), 0.5);
+                continue;
+            }
             particles.add(wisp(&mut rng, along + rot * spread, state.velocity, c, scale, light), 0.5);
         }
     }
