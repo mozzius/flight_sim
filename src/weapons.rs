@@ -49,10 +49,8 @@ const SEEKER_GIMBAL: f32 = 0.87; // ~50 degrees
 pub const MAX_MISSILES: u32 = 6;
 /// A jet only carries a few flares, so wasting them early costs you later.
 pub const MAX_FLARES: u32 = 4;
-/// Flares per salvo (one press, or every [`FLARE_INTERVAL`] while held).
-pub const FLARE_SALVO: u32 = 2;
-/// Seconds between salvos while the flare button is held.
-const FLARE_INTERVAL: f32 = 0.4;
+/// Seconds between flares while the flare button is held (one per press).
+const FLARE_INTERVAL: f32 = 0.2;
 /// Seconds to regenerate one missile.
 pub const MISSILE_RELOAD_TIME: f32 = 12.0;
 /// Seconds to regenerate one flare (while below [`MAX_FLARES`]).
@@ -213,7 +211,7 @@ pub struct Seeker {
     pub lag: f32,
     /// Proportional navigation gain.
     pub nav_gain: f32,
-    /// Chance each flare salvo pulls it off its target.
+    /// Chance a pair of flares pulls it off its target.
     pub decoy_odds: f64,
 }
 
@@ -318,7 +316,7 @@ fn player_weapon_intents(
     };
     weapons.trigger_gun = actions.firing_gun;
     weapons.fire_missile = std::mem::take(&mut actions.fire_missile);
-    // a tap drops one salvo; holding the button keeps them coming
+    // a tap drops one flare; holding the button keeps them coming
     weapons.drop_flares = std::mem::take(&mut actions.drop_flares) || actions.holding_flares;
     let next = std::mem::take(&mut actions.next_target);
     let previous = std::mem::take(&mut actions.previous_target);
@@ -512,32 +510,30 @@ fn fire_weapons(
             && weapons.flare_cooldown <= 0.0
         {
             weapons.flare_cooldown = FLARE_INTERVAL;
-            let mut decoy = None;
-            for i in 0..FLARE_SALVO {
-                if weapons.flares == 0 {
-                    break;
-                }
-                weapons.flares -= 1;
-                let kick = transform.rotation
-                    * Vec3::new(if i % 2 == 0 { 25.0 } else { -25.0 }, -15.0, 10.0 + i as f32 * 16.0);
-                let flare = spawn_flare(&mut commands, &assets, transform.translation, state.velocity * 0.7 + kick, entity);
-                decoy.get_or_insert(flare);
-            }
-            if let Some(flare) = decoy {
-                decoy_missiles(entity, flare, missiles.iter_mut().map(|m| m.into_inner()));
-            }
+            weapons.flares -= 1;
+            // alternate sides, so a held button lays a pair-like spread
+            let side = if weapons.flares % 2 == 0 { 25.0 } else { -25.0 };
+            let kick = transform.rotation * Vec3::new(side, -15.0, 10.0);
+            let flare = spawn_flare(&mut commands, &assets, transform.translation, state.velocity * 0.7 + kick, entity);
+            decoy_missiles(entity, flare, missiles.iter_mut().map(|m| m.into_inner()));
         }
     }
 }
 
-/// Each salvo has a decent chance to pull each missile guiding on `target` off onto `flare`.
+/// Each flare has a chance to pull each missile guiding on `target` off onto
+/// it: two flares match the seeker's [`Seeker::decoy_odds`].
 pub fn decoy_missiles<'a>(target: Entity, flare: Entity, missiles: impl Iterator<Item = &'a mut Missile>) {
     let mut rng = rand::rng();
     for m in missiles {
-        if m.target == Some(target) && rng.random_bool(m.seeker.decoy_odds) {
+        if m.target == Some(target) && rng.random_bool(per_flare_odds(m.seeker.decoy_odds)) {
             m.target = Some(flare);
         }
     }
+}
+
+/// One flare's decoy chance, from a pair's.
+fn per_flare_odds(pair: f64) -> f64 {
+    (1.0 - (1.0 - pair.clamp(0.0, 1.0)).sqrt()).clamp(0.0, 1.0)
 }
 
 pub fn spawn_tracer(
@@ -949,7 +945,7 @@ mod tests {
             }
             if breaking.is_some() && salvos_left > 0 && missile.age >= next_salvo {
                 salvos_left -= 1;
-                next_salvo = missile.age + FLARE_INTERVAL;
+                next_salvo = missile.age + 0.4;
                 if flare.is_none() && roll() < seeker.decoy_odds {
                     flare = Some((tpos, tvel * 0.7));
                 }

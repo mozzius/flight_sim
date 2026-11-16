@@ -731,9 +731,9 @@ fn one_shots(
     }
     *flare_cooldown -= time.delta_secs();
     for gt in &new_flares {
-        // one pop per salvo
+        // one pop per frame's flares (several jets at once)
         if *flare_cooldown <= 0.0 {
-            *flare_cooldown = 0.2;
+            *flare_cooldown = 0.12;
             queue(&sounds.flare, gt.translation(), 0.6, 1.0 / 50.0);
         }
     }

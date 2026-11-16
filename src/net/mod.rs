@@ -1371,7 +1371,6 @@ fn interpolate(
 
         // tracers and flares, when the jet that fired them gets there
         let owner = peer.entity.unwrap_or(Entity::PLACEHOLDER);
-        let mut decoy = None;
         while let Some(&(t, flare, shot)) = peer.fire.front() {
             if t > render {
                 break;
@@ -1385,14 +1384,13 @@ fn interpolate(
             let pos = Vec3::from(shot.pos) + vel * late;
             if flare {
                 let f = spawn_flare(&mut commands, &assets, pos, vel, owner);
-                decoy.get_or_insert(f);
+                // their flares can pull our missiles off them (we fly our missiles)
+                if let Some(target) = peer.entity {
+                    decoy_missiles(target, f, our_missiles.iter_mut().map(|m| m.into_inner()));
+                }
             } else {
                 spawn_tracer(&mut commands, &assets, pos, vel, owner, crate::game::Team::Red, true, 0.0);
             }
-        }
-        // their flares can pull our missiles off them (we fly our missiles)
-        if let (Some(flare), Some(target)) = (decoy, peer.entity) {
-            decoy_missiles(target, flare, our_missiles.iter_mut().map(|m| m.into_inner()));
         }
 
         // their missiles
