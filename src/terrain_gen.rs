@@ -734,11 +734,28 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
         }
     }
 
+    // Desert mesas: over parts of the map the ground steps up in flat treads and cliff risers
+    if b.terraces > 0.0 {
+        // (the higher ground: the washes and low hills stay smooth)
+        let mask = smoothstep(-0.3, 0.1, noised(p * 2.2, terrain_seed() ^ 0x3E5A).x)
+            * smoothstep(b.soft_floor + 60.0, b.soft_floor + 260.0, height);
+        if mask > 0.0 {
+            // (the steps sit at slightly different heights from place to place)
+            let phase = noised(p * 3.0, terrain_seed() ^ 0x7E44).x * b.terraces;
+            let stepped = terrace(height + phase, b.terraces, 10.0) - phase;
+            height = lerp(height, stepped, mask);
+        }
+    }
+
     // Squash the deepest basins into broad, nearly flat floors that bottom out just below 0
     // (alpine: 120 m and 180 m; farmland squashes much more into wide plains).
     let (soft_floor, range) = (b.soft_floor, b.soft_floor_range);
     if height < soft_floor {
         height = soft_floor - range * (1.0 - ((height - soft_floor) / range).exp());
+    }
+
+    if b.canyons > 0.0 {
+        height = canyon(p, height, b.canyons);
     }
 
     // Hard spawn guarantee: a smooth cap that is SPAWN_CLEAR_HEIGHT within the clear radius
@@ -751,6 +768,63 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
         height,
         ridge_map: e.ridge_map,
     }
+}
+
+/// Steps `h` into flat treads `step` tall with steep risers between (`sharp`: how much of
+/// each step the riser takes, higher is narrower). Continuous and monotonic.
+fn terrace(h: f32, step: f32, sharp: f32) -> f32 {
+    let t = h / step;
+    let k = t.floor();
+    let f = t - k;
+    (k + 0.5 + 0.5 * ((f - 0.5) * sharp).tanh() / (0.5 * sharp).tanh()) * step
+}
+
+/// Desert canyons: meandering channels (the zero lines of a noise field) cut into the
+/// higher ground, with flat sandy floors at a slowly varying level, a sheer lower wall, a
+/// bench, then a second wall up to the rim; side canyons branch off them, their floors
+/// climbing away from the main one until they run out onto the plateau. Ground already
+/// near the floor (the washes and plains) is left alone, so the canyons open out onto
+/// them. `depth` (m) is the height of the two walls together; above the rim the ground
+/// climbs back steeply.
+fn canyon(p: Vec2, height: f32, depth: f32) -> f32 {
+    let seed = terrain_seed();
+    // patchy: whole regions without canyons
+    let mask = smoothstep(-0.35, 0.05, noised(p * 1.6, seed ^ 0xCA70).x);
+    if mask <= 0.0 {
+        return height;
+    }
+    // Distance (m) to a zero line of `n` (the warp is slow, so the noise's own gradient
+    // still gives a fair distance), with the walls' edges wobbling in and out.
+    let distance = |n: Vec3| n.x.abs() / Vec2::new(n.y, n.z).length().max(0.05) * WORLD_SCALE;
+    let wobble = 70.0 * noised(p * 35.0, seed ^ 0xCA76).x + 30.0 * noised(p * 95.0, seed ^ 0xCA77).x;
+    // floor, sheer wall, bench, wall, rim (the walls about as steep as the 32 m mesh
+    // can draw without zig-zagging)
+    let profile = |dist: f32, floor_half: f32, wall: f32, depth: f32| {
+        let u = (dist - floor_half) / wall;
+        depth * (0.55 * smoothstep(0.0, 0.28, u) + 0.45 * smoothstep(0.55, 0.8, u))
+            + (dist - floor_half - wall).max(0.0) * 1.5
+    };
+
+    let warp = Vec2::new(noised(p * 5.0, seed ^ 0xCA71).x, noised(p * 5.0, seed ^ 0xCA72).x) * 0.035;
+    let main = distance(fractal_noise(p + warp, 3.2, 2, 2.3, 0.4, seed ^ 0xCA73));
+    // (wider and narrower along the way)
+    let width = noised(p * 9.0, seed ^ 0xCA74).x;
+    let floor = 170.0 + 70.0 * noised(p * 1.3, seed ^ 0xCA75).x;
+    let mut target = floor + profile(main + wobble, 130.0 + 90.0 * width, 420.0 + 180.0 * width, depth);
+
+    // side canyons, within a few km of the main one
+    if main < 4_000.0 {
+        let side = distance(fractal_noise(p + warp * 1.6, 10.0, 2, 2.2, 0.4, seed ^ 0xCA78));
+        let side_floor = floor + 40.0 + main * 0.09;
+        let side_target = side_floor + profile(side + wobble * 0.7, 60.0 + 40.0 * width, 300.0, depth * 0.8)
+            + smoothstep(2_500.0, 4_000.0, main) * 2_000.0;
+        target = smooth_min(target, side_target, 40.0);
+    }
+
+    // only into ground well above the floor: the canyons open out onto the washes
+    // rather than running on as trenches through them
+    let mask = mask * smoothstep(floor + 30.0, floor + 160.0, height);
+    lerp(height, smooth_min(height, target, 30.0), mask)
 }
 
 /// Reshapes the height `s` around sea level (archipelago). `beachy` is the coast type: at 1
@@ -1552,11 +1626,11 @@ pub fn spawn_map(
             extension: TerrainDetail {
                 params: TerrainParams {
                     // normal detail strength, snow line (m), rock slope threshold, mist brightness
-                    params: Vec4::new(1.0, b.snow_line, 0.36, 1.0),
+                    params: Vec4::new(1.0, b.snow_line, b.rock_slope, 1.0),
                     mist: look.mist,
                     sun: look.sun_dir.extend(0.0),
                     biome: b.shader_rock.extend(b.veg_patches),
-                    snow: b.shader_snow.extend(0.0),
+                    snow: b.shader_snow.extend(b.strata),
                     farm,
                     hedge: b.forest.extend(fields::HEDGE_HALF_WIDTH),
                     seed: UVec4::new(terrain_seed(), 0, 0, 0),
@@ -1730,6 +1804,10 @@ mod tests {
         let Ok(path) = std::env::var("HILLSHADE") else {
             return;
         };
+        // (HILLSHADE_BIOME=<index into Biome::ALL>)
+        if let Some(b) = std::env::var("HILLSHADE_BIOME").ok().and_then(|v| v.parse::<usize>().ok()) {
+            biome::set(biome::Biome::ALL[b]);
+        }
         let size = 1024usize;
         let (cx, cz, extent) = (0.0f32, 0.0f32, 40000.0f32);
         let step = extent / size as f32;

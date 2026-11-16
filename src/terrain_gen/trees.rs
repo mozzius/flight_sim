@@ -57,6 +57,8 @@ struct Tree {
     width: f32,
     yaw: f32,
     conifer: bool,
+    /// A columnar cactus with arms (desert); `width` is then the column's radius.
+    cactus: bool,
     color: Vec3,
     /// Snow on the crown (0..1).
     snow: f32,
@@ -179,6 +181,18 @@ fn plant_one(iu: u32, ju: u32, xz: Vec2, field: &TreeField, terrain: &Terrain) -
     let conifer = rand01(iu, ju, 4) < low + (high - low) * smoothstep(500.0, 1100.0, ground);
     let r = rand01(iu, ju, 5);
     let shade = 0.8 + 0.35 * rand01(iu, ju, 6);
+    if rand01(iu, ju, 10) < b.cacti {
+        return Some(Tree {
+            pos: Vec3::new(xz.x, ground, xz.y),
+            height: 7.0 + 7.0 * r,
+            width: 0.045 + 0.015 * rand01(iu, ju, 7),
+            yaw: rand01(iu, ju, 8) * std::f32::consts::TAU,
+            conifer: false,
+            cactus: true,
+            color: b.cactus * shade,
+            snow: 0.0,
+        });
+    }
     let color = if conifer {
         b.conifer * shade
     } else if r < b.autumn_share {
@@ -192,6 +206,7 @@ fn plant_one(iu: u32, ju: u32, xz: Vec2, field: &TreeField, terrain: &Terrain) -
         width: if conifer { 0.28 + 0.08 * rand01(iu, ju, 7) } else { 0.45 + 0.12 * rand01(iu, ju, 7) },
         yaw: rand01(iu, ju, 8) * std::f32::consts::TAU,
         conifer,
+        cactus: false,
         color,
         snow: b.tree_snow * (0.6 + 0.4 * rand01(iu, ju, 9)),
     })
@@ -273,6 +288,49 @@ impl MeshBuilder {
         }
     }
 
+    /// An upright prism from `from` to `to` (relative to the tree), radius `r`,
+    /// capped with a short point.
+    fn column(&mut self, t: &Tree, sides: usize, from: Vec3, to: Vec3, r: f32, color: Vec3) {
+        let (a, b) = (t.pos + from, t.pos + to);
+        let axis = (b - a).normalize_or(Vec3::Y);
+        let side = axis.any_orthonormal_vector();
+        let side2 = axis.cross(side);
+        let first = self.positions.len() as u32;
+        for k in 0..sides {
+            let ang = t.yaw + k as f32 / sides as f32 * std::f32::consts::TAU;
+            let radial = side * ang.cos() + side2 * ang.sin();
+            self.vert(a + radial * r, radial, color * 0.75);
+            self.vert(b + radial * r, radial, color);
+        }
+        let tip = self.vert(b + axis * r * 0.9, axis, color * 1.1);
+        for k in 0..sides as u32 {
+            let (b0, t0) = (first + k * 2, first + k * 2 + 1);
+            let (b1, t1) = (first + (k + 1) % sides as u32 * 2, first + (k + 1) % sides as u32 * 2 + 1);
+            self.indices.extend_from_slice(&[b0, b1, t0, b1, t1, t0, t0, t1, tip]);
+        }
+    }
+
+    /// A saguaro: a trunk with an arm or two that bend up from its middle.
+    fn cactus(&mut self, t: &Tree, sides: usize, arms: bool) {
+        let (h, r) = (t.height, t.width * t.height);
+        // sunk into the ground so it never floats on a slope
+        self.column(t, sides, Vec3::NEG_Y * 1.5, Vec3::Y * h, r, t.color);
+        if !arms {
+            return;
+        }
+        // one or two arms (from the yaw), at different heights
+        let n = if (t.yaw * 7.3).fract() < 0.4 { 1 } else { 2 };
+        for k in 0..n {
+            let ang = t.yaw + k as f32 * 2.6;
+            let out = Vec3::new(ang.cos(), 0.0, ang.sin());
+            let y = h * (0.42 + 0.12 * k as f32);
+            let reach = h * 0.2;
+            let ra = r * 0.75;
+            self.column(t, sides, Vec3::Y * y, Vec3::Y * (y + reach * 0.35) + out * reach, ra, t.color);
+            self.column(t, sides, Vec3::Y * (y + reach * 0.3) + out * reach, Vec3::Y * (y + h * 0.33) + out * reach, ra, t.color);
+        }
+    }
+
     fn build(self) -> Mesh {
         Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
@@ -287,7 +345,10 @@ fn chunk_meshes(trees: &[Tree]) -> (Mesh, Mesh) {
     let mut near = MeshBuilder::default();
     let mut far = MeshBuilder::default();
     for t in trees {
-        if t.conifer {
+        if t.cactus {
+            near.cactus(t, 6, true);
+            far.cactus(t, 4, false);
+        } else if t.conifer {
             // snow lies on the tiers, so it shows towards each cone's tip
             let snowy = |c: Vec3, k: f32| c.lerp(snow, t.snow * k);
             near.trunk(t, 0.25);

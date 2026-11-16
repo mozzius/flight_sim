@@ -4,10 +4,10 @@
 //! colour and illuminance, exposure, distance fog, valley mist, the cloud
 //! layer, the atmosphere's aerosols and the fallback sky's gradient.
 //!
-//! The biome (`Biome`: alpine, tundra, farmland, archipelago) is rolled first and biases
+//! The biome (`Biome`: alpine, tundra, farmland, archipelago, fjords, lakeland, desert) is rolled first and biases
 //! the weather and time dice.
 //!
-//! Overrides: `FLIGHT_SIM_BIOME=alpine|tundra|farmland|archipelago`, `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
+//! Overrides: `FLIGHT_SIM_BIOME=alpine|tundra|farmland|archipelago|fjords|lakeland|desert`, `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 //! `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` natively, and
 //! `?biome=` / `?weather=` / `?time=` on the web (the page sets `window.FLIGHT_SIM_BIOME`,
 //! `FLIGHT_SIM_WEATHER` and `FLIGHT_SIM_TIME`). Screenshot runs default to alpine, clear midday so they stay
@@ -59,10 +59,13 @@ pub enum Biome {
     Fjords,
     /// Low forested hills and lakes everywhere (rural Finland).
     Lakeland,
+    /// Dry scrubland, red-rock mesas and canyons (the US / Mexico border).
+    Desert,
 }
 
 impl Biome {
-    pub const ALL: [Self; 6] = [Self::Alpine, Self::Tundra, Self::Farmland, Self::Archipelago, Self::Fjords, Self::Lakeland];
+    pub const ALL: [Self; 7] =
+        [Self::Alpine, Self::Tundra, Self::Farmland, Self::Archipelago, Self::Fjords, Self::Lakeland, Self::Desert];
 
     fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
@@ -72,6 +75,7 @@ impl Biome {
             "archipelago" | "islands" | "island" | "sea" => Self::Archipelago,
             "fjords" | "fjord" | "norway" => Self::Fjords,
             "lakeland" | "lakes" | "lake" | "finland" => Self::Lakeland,
+            "desert" | "canyons" | "canyon" | "mesa" | "border" => Self::Desert,
             _ => return None,
         })
     }
@@ -84,6 +88,7 @@ impl Biome {
             Self::Archipelago => "archipelago",
             Self::Fjords => "fjords",
             Self::Lakeland => "lakes",
+            Self::Desert => "desert",
         }
     }
 }
@@ -241,8 +246,8 @@ impl Environment {
                 })
                 .unwrap_or(weights.len() - 1)
         };
-        // alpine, tundra, farmland, archipelago, fjords, lakeland
-        let rolled_biome = Biome::ALL[pick(next(), &[3.5, 3.0, 3.0, 3.0, 3.0, 3.0])];
+        // alpine, tundra, farmland, archipelago, fjords, lakeland, desert
+        let rolled_biome = Biome::ALL[pick(next(), &[3.5, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0])];
         let biome = biome.unwrap_or(rolled_biome);
         let (times, weathers): ([f32; 5], [f32; 4]) = match biome {
             // (dawn, morning, midday, afternoon, golden), (clear, broken, overcast, hazy)
@@ -257,6 +262,8 @@ impl Environment {
             Biome::Fjords => ([1.5, 2.0, 2.0, 2.0, 2.0], [2.5, 3.0, 3.0, 0.7]),
             // northern summer: long golden evenings, misty mornings over the lakes
             Biome::Lakeland => ([2.0, 2.0, 2.0, 2.0, 3.5], [3.5, 3.0, 1.5, 1.2]),
+            // big skies, dust haze, red rock in the evening light; rarely grey
+            Biome::Desert => ([1.5, 2.0, 2.0, 2.5, 3.5], [5.0, 1.5, 0.3, 3.0]),
         };
         let time = TimeOfDay::ALL[pick(next(), &times)];
         let weather = Weather::ALL[pick(next(), &weathers)];
@@ -345,7 +352,9 @@ impl Environment {
             Weather::Overcast => (15_000.0, Vec3::new(0.5, 0.51, 0.53), Vec3::new(0.66, 0.68, 0.71), 0.05),
             Weather::Hazy => (17_000.0, Vec3::new(0.56, 0.56, 0.57), Vec3::new(0.84, 0.83, 0.8), 0.75),
         };
-        let fog_tint = tint * display;
+        // desert haze is dust: warmer, browner
+        let dust = if self.biome == Biome::Desert && hazy { Vec3::new(1.04, 0.98, 0.9) } else { Vec3::ONE };
+        let fog_tint = tint * display * dust;
         let sun_hue = sun_rel / sun_rel.max_element();
 
         // ---- valley mist
@@ -359,6 +368,8 @@ impl Environment {
             // all of it sits low in the mist layer: a light haze, or the forest
             // fades to the colour of the lakes
             Biome::Lakeland => 0.12,
+            // dry air: only a thin dusty haze in the canyons
+            Biome::Desert => 0.15,
             _ => 1.0,
         } * match w {
             Weather::Clear => 1.0,
@@ -378,6 +389,8 @@ impl Environment {
         } * match self.biome {
             // cold, blue-white mist over the snow
             Biome::Tundra => Vec3::new(1.0, 1.04, 1.1),
+            // warm dust
+            Biome::Desert => Vec3::new(1.08, 1.0, 0.88),
             _ => Vec3::ONE,
         };
 
@@ -413,7 +426,7 @@ impl Environment {
                 Weather::Broken => 0.2,
                 Weather::Overcast => 0.62,
                 Weather::Hazy => -0.18,
-            },
+            } - if self.biome == Biome::Desert { 0.12 } else { 0.0 },
             layer: overcast.then_some((2_150.0, 3_300.0)),
             extinction_mult: if overcast { 1.2 } else { 1.0 },
             // a deck carries on to the horizon; in haze clouds dissolve sooner
@@ -596,7 +609,7 @@ mod tests {
         let rolls: Vec<_> = (0..1000).map(|s| Environment::roll(s, None)).collect();
         for b in Biome::ALL {
             let n = rolls.iter().filter(|e| e.biome == b).count();
-            assert!(n > 120, "{b:?} rolled only {n} times in 1000");
+            assert!(n > 100, "{b:?} rolled only {n} times in 1000");
         }
         assert!(!rolls.iter().any(|e| e.biome == Biome::Tundra && e.weather == Weather::Hazy));
         for t in TimeOfDay::ALL {

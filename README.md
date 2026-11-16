@@ -103,10 +103,12 @@ Flares: you carry four, regaining one every 8 s. Each press drops a pair, and
 holding the button keeps them coming. AI pilots sometimes lose their nerve
 when you sit locked on their tail and waste theirs before you've fired.
 
-Every round flies a freshly generated map (mountains, roads and forests) in one of four
+Every round flies a freshly generated map (mountains, roads and forests) in one of seven
 biomes (alpine valleys; winter tundra with a low snow line, sparse snowy conifers and
 frozen lakes; gentle farmland with a patchwork of fields and hedgerows on the valley
-floors; an archipelago of beaches, sea cliffs and green islands, about half the map sea)
+floors; an archipelago of beaches, sea cliffs and green islands, about half the map sea;
+fjords; Finnish lakeland; a dry borderland desert of scrub, cacti, red-rock mesas and
+flat-floored canyons)
 under a time of day (dawn, morning, midday, afternoon, golden hour) and weather (clear,
 broken cloud, overcast, hazy) rolled from the same seed (the biome tilts the weather:
 tundra is never hazy, farmland gets more summer haze, the islands more golden hours). The
@@ -140,7 +142,7 @@ resolution divisor: 4 is cheapest, 2 is crispest), `FLIGHT_SIM_NO_CLOUDS=1`, `FL
 seed 1337), `FLIGHT_SIM_LOW_MEMORY=1` (the phone/tablet scene, whatever GRAPHICS says),
 `FLIGHT_SIM_GRAPHICS=auto|low|high` and `FLIGHT_SIM_DIFFICULTY=easy|normal|hard` (pin the
 settings for a run without saving them; screenshot runs never read or write the settings file), `FLIGHT_SIM_DEV_GRAPHICS_AT=<secs>:low|high` (switch GRAPHICS mid-run, to check the live switch), `FLIGHT_SIM_NO_ATMOSPHERE=1`
-(the plain gradient sky), `FLIGHT_SIM_BIOME=alpine|tundra|farmland|archipelago`,
+(the plain gradient sky), `FLIGHT_SIM_BIOME=alpine|tundra|farmland|archipelago|fjords|lakeland|desert`,
 `FLIGHT_SIM_WEATHER=clear|broken|overcast|hazy` and
 `FLIGHT_SIM_TIME=dawn|morning|midday|afternoon|golden` (pin the environment; screenshot runs
 default to alpine, clear midday), `FLIGHT_SIM_MODE=endless|challenge|tutorial` (skip the menu;

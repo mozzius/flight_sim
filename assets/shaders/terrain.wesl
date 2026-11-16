@@ -38,7 +38,8 @@ struct TerrainDetail {
     sun: vec4<f32>,
     // rgb: rock tint, a: vegetation mottling strength (src/terrain_gen/biome.rs)
     biome: vec4<f32>,
-    // xy: slope range the snow fades out over, z: 1 = snow only where the baked colour is snowy
+    // xy: slope range the snow fades out over, z: 1 = snow only where the baked colour is snowy,
+    // w: strength of the sandstone banding on the rock (desert)
     snow: vec4<f32>,
     // fields: x: first farm cell, y: farm cells across (0 = none), z: farm spacing (m),
     // w: where the fields start fading out (m from the centre)
@@ -308,6 +309,10 @@ fn fragment(
     let strata = noised(vec2<f32>((pos.y + breakup * 12.0) / 6.0, (pos.x + pos.z) / 150.0)).x;
     var rock_col = mix(vec3<f32>(0.34, 0.31, 0.28), vec3<f32>(0.42, 0.39, 0.35), strata * 0.5 + 0.5);
     rock_col = mix(rock_col * terrain.biome.rgb, macro_col, 0.25) * (0.85 + 0.2 * breakup);
+    // (desert) bold sandstone layers: pale, dark and red beds a few metres to tens of metres thick
+    let beds = noised(vec2<f32>((pos.y + breakup * 8.0) / 16.0, (pos.x - pos.z) / 500.0)).x
+        + 0.5 * noised(vec2<f32>((pos.y + breakup * 4.0) / 5.0, (pos.x + pos.z) / 260.0)).x;
+    rock_col *= 1.0 + terrain.snow.w * (0.4 * beds + vec3<f32>(0.0, 0.08, 0.12) * smoothstep1(0.25, 0.6, beds));
     let snow_col = vec3<f32>(0.92, 0.94, 0.98) * (0.92 + 0.08 * patches);
 
     var col = mix(veg, rock_col, rock);

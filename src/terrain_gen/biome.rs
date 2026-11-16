@@ -52,6 +52,12 @@ pub(super) struct BiomeParams {
     /// Smooth glacial hummocks (m, ± about half): with a water level near their
     /// hollows, lakes all over the map.
     pub hummocks: f32,
+    /// Mesas (desert): the ground is stepped into flat treads and steep risers this
+    /// tall (m) over parts of the map. 0 = off.
+    pub terraces: f32,
+    /// Canyons (desert): flat-floored channels with benched cliff walls, cut up to about
+    /// this deep (m) into the higher ground. 0 = off.
+    pub canyons: f32,
 
     // ---- water (`water`)
     pub water: Option<Water>,
@@ -99,15 +105,22 @@ pub(super) struct BiomeParams {
     pub autumn_share: f32,
     /// Snow on the crowns (0..1).
     pub tree_snow: f32,
+    /// Share of the trees that are columnar cacti instead (desert).
+    pub cacti: f32,
+    pub cactus: Vec3,
 
     // ---- terrain shader (`TerrainParams::biome`)
     /// Tint of the per-pixel rock colour (multiplies the shader's grey-brown).
     pub shader_rock: Vec3,
+    /// Per-pixel rock shows above this slope (1 - normal.y; the original is 0.36).
+    pub rock_slope: f32,
     /// Strength of the per-pixel vegetation mottling (the original is 1).
     pub veg_patches: f32,
     /// x..y: the per-pixel snow fades out over this slope (1 - normal.y) range,
     /// z: 1 makes it follow the baked colour (no fresh snow on forest or rock).
     pub shader_snow: Vec3,
+    /// Strength of the per-pixel sandstone banding on the rock (desert; 0 = none).
+    pub strata: f32,
 }
 
 /// Lakes or the sea: a single water level per map (see `water`).
@@ -132,8 +145,8 @@ pub(super) struct Water {
     pub reflect: f32,
 }
 
-static PARAMS: LazyLock<[BiomeParams; 6]> =
-    LazyLock::new(|| [alpine(), tundra(), farmland(), archipelago(), fjords(), lakeland()]);
+static PARAMS: LazyLock<[BiomeParams; 7]> =
+    LazyLock::new(|| [alpine(), tundra(), farmland(), archipelago(), fjords(), lakeland(), desert()]);
 
 /// Mountain lakes: a level just above the soft floor's flats, so the deepest basins fill.
 fn lakes(level: f32) -> Water {
@@ -162,6 +175,8 @@ fn alpine() -> BiomeParams {
         sea_beaches: 1.0,
         squash: None,
         hummocks: 0.0,
+        terraces: 0.0,
+        canyons: 0.0,
         water: Some(lakes(LAKE_LEVEL)),
         meadow: srgb(0.42, 0.47, 0.22),
         dry_meadow: srgb(0.52, 0.50, 0.30),
@@ -189,9 +204,13 @@ fn alpine() -> BiomeParams {
         autumn: srgb(0.48, 0.38, 0.12),
         autumn_share: 0.05,
         tree_snow: 0.0,
+        cacti: 0.0,
+        cactus: Vec3::ZERO,
         shader_rock: Vec3::ONE,
+        rock_slope: 0.36,
         veg_patches: 1.0,
         shader_snow: Vec3::new(0.55, 0.75, 0.0),
+        strata: 0.0,
     }
 }
 
@@ -205,6 +224,8 @@ fn tundra() -> BiomeParams {
         sea_beaches: 1.0,
         squash: None,
         hummocks: 0.0,
+        terraces: 0.0,
+        canyons: 0.0,
         water: Some(Water {
             frozen: true,
             shallow: srgb(0.80, 0.86, 0.90),
@@ -241,9 +262,13 @@ fn tundra() -> BiomeParams {
         autumn: srgb(0.30, 0.27, 0.22),
         autumn_share: 0.0,
         tree_snow: 0.75,
+        cacti: 0.0,
+        cactus: Vec3::ZERO,
         shader_rock: Vec3::new(0.95, 1.02, 1.12),
+        rock_slope: 0.36,
         veg_patches: 0.7,
         shader_snow: Vec3::new(0.3, 0.45, 1.0),
+        strata: 0.0,
     }
 }
 
@@ -258,6 +283,8 @@ fn farmland() -> BiomeParams {
         sea_beaches: 1.0,
         squash: None,
         hummocks: 0.0,
+        terraces: 0.0,
+        canyons: 0.0,
         // (the plains bottom out lower)
         water: Some(Water { shallow: srgb(0.20, 0.30, 0.22), ..lakes(FARM_LAKE_LEVEL) }),
         meadow: srgb(0.38, 0.48, 0.20),
@@ -288,9 +315,13 @@ fn farmland() -> BiomeParams {
         autumn: srgb(0.42, 0.40, 0.14),
         autumn_share: 0.04,
         tree_snow: 0.0,
+        cacti: 0.0,
+        cactus: Vec3::ZERO,
         shader_rock: Vec3::ONE,
+        rock_slope: 0.36,
         veg_patches: 0.45,
         shader_snow: Vec3::new(0.55, 0.75, 0.0),
+        strata: 0.0,
     }
 }
 
@@ -309,6 +340,8 @@ fn archipelago() -> BiomeParams {
         sea_beaches: 1.0,
         squash: None,
         hummocks: 0.0,
+        terraces: 0.0,
+        canyons: 0.0,
         water: Some(Water {
             level: 0.0,
             sea: true,
@@ -348,9 +381,13 @@ fn archipelago() -> BiomeParams {
         autumn: srgb(0.30, 0.36, 0.10),
         autumn_share: 0.06,
         tree_snow: 0.0,
+        cacti: 0.0,
+        cactus: Vec3::ZERO,
         shader_rock: Vec3::new(0.82, 0.8, 0.8),
+        rock_slope: 0.36,
         veg_patches: 0.6,
         shader_snow: Vec3::new(0.55, 0.75, 0.0),
+        strata: 0.0,
     }
 }
 
@@ -368,6 +405,8 @@ fn fjords() -> BiomeParams {
         sea_beaches: 0.2,
         squash: None,
         hummocks: 0.0,
+        terraces: 0.0,
+        canyons: 0.0,
         water: Some(Water {
             level: 0.0,
             sea: true,
@@ -408,10 +447,14 @@ fn fjords() -> BiomeParams {
         autumn: srgb(0.50, 0.42, 0.14),
         autumn_share: 0.06,
         tree_snow: 0.0,
+        cacti: 0.0,
+        cactus: Vec3::ZERO,
         shader_rock: Vec3::new(0.66, 0.68, 0.72),
+        rock_slope: 0.36,
         veg_patches: 0.7,
         // (the snow follows the bake's ragged line, not a crisp per-pixel one)
         shader_snow: Vec3::new(0.5, 0.7, 1.0),
+        strata: 0.0,
     }
 }
 
@@ -428,6 +471,8 @@ fn lakeland() -> BiomeParams {
         sea_beaches: 1.0,
         squash: Some((150.0, 10.0)),
         hummocks: 150.0,
+        terraces: 0.0,
+        canyons: 0.0,
         water: Some(Water {
             level: LAKELAND_LEVEL,
             sea: false,
@@ -471,14 +516,77 @@ fn lakeland() -> BiomeParams {
         autumn: srgb(0.52, 0.45, 0.14),
         autumn_share: 0.05,
         tree_snow: 0.0,
+        cacti: 0.0,
+        cactus: Vec3::ZERO,
         shader_rock: Vec3::new(0.95, 0.92, 0.9),
+        rock_slope: 0.36,
         veg_patches: 0.6,
         shader_snow: Vec3::new(0.55, 0.75, 0.0),
+        strata: 0.0,
     }
 }
 
 /// Lakeland: the level of every lake (the hollows between the hummocks).
 const LAKELAND_LEVEL: f32 = 114.0;
+
+/// Desert (the US / Mexico borderlands): gentle rolling scrubland of sand and
+/// creosote, red-rock mesas and buttes, and canyons with flat sandy floors cut
+/// into the higher ground. Sparse bushes, junipers up high, the odd saguaro; no water.
+fn desert() -> BiomeParams {
+    BiomeParams {
+        relief: 0.42,
+        // broad, flat washes and bajadas
+        soft_floor: 230.0,
+        soft_floor_range: 160.0,
+        sea_shift: 0.0,
+        sea_regions: 1.0,
+        sea_beaches: 1.0,
+        // the big mountains flattened into high desert, so the mesas and canyons read
+        squash: Some((420.0, 420.0)),
+        hummocks: 0.0,
+        terraces: 110.0,
+        canyons: 380.0,
+        water: None,
+        // creosote flats and pale sand
+        meadow: srgb(0.62, 0.49, 0.34),
+        dry_meadow: srgb(0.76, 0.64, 0.47),
+        // scrub thickets along the washes
+        forest: srgb(0.50, 0.41, 0.28),
+        // ochre caprock and slickrock on the high ground
+        alpine: srgb(0.72, 0.53, 0.35),
+        rock: srgb(0.68, 0.40, 0.24),
+        dark_rock: srgb(0.44, 0.23, 0.14),
+        snow: srgb(0.94, 0.95, 0.98),
+        tree_line: 700.0,
+        snow_spread: 1.0,
+        snow_line: 9000.0,
+        snow_flatness: (0.55, 0.72),
+        // bare: rock shows on gentler slopes than in the green biomes
+        rock_bias: 0.12,
+        low_snow: 0.0,
+        snow_in_forest: 1.0,
+        valley_woods: 0.7,
+        slope_woods: (1.01, 1.0),
+        hilltop_woods: 0.0,
+        field_line: None,
+        tree_density: 0.3,
+        tree_scale: 0.32,
+        // junipers on the higher ground, mesquite and creosote below
+        conifers: (0.05, 0.5),
+        conifer: srgb(0.22, 0.27, 0.17),
+        broadleaf: srgb(0.38, 0.40, 0.24),
+        autumn: srgb(0.50, 0.46, 0.30),
+        autumn_share: 0.25,
+        tree_snow: 0.0,
+        cacti: 0.22,
+        cactus: srgb(0.26, 0.36, 0.20),
+        shader_rock: Vec3::new(1.15, 0.62, 0.36),
+        rock_slope: 0.26,
+        veg_patches: 0.9,
+        shader_snow: Vec3::new(0.55, 0.75, 0.0),
+        strata: 1.0,
+    }
+}
 
 /// How the ground is covered at a point (each 0..1), shared by the colour
 /// bake and the tree planter so the trees grow where the ground looks wooded.
