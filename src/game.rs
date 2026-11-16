@@ -31,6 +31,7 @@ impl Plugin for GamePlugin {
                 FixedUpdate,
                 (
                     handle_damage,
+                    wreck_pops,
                     handle_crashes,
                     respawn,
                     // (multiplayer: other players; the tutorial brings its own)
@@ -89,6 +90,8 @@ pub struct PlayerKill {
     pub friendly: bool,
     /// Another player's handle (multiplayer).
     pub name: Option<String>,
+    /// Where it blew up (the boom is played from there).
+    pub position: Option<Vec3>,
 }
 
 /// An aircraft was shot down (it still falls until it hits the ground).
@@ -382,9 +385,44 @@ fn handle_damage(
             if let Ok(t) = transforms.get(entity) {
                 explosions.write(Explosion {
                     position: t.translation,
-                    size: 12.0,
+                    size: KILL_BLAST,
                 });
             }
+            let mut rng = rand::rng();
+            commands.entity(entity).insert(Wreck { pops: rng.random_range(2..=4), next: rng.random_range(0.2..0.45) });
+        }
+    }
+}
+
+/// The blast when a jet is shot down (under 20, which `effects` reads as
+/// hitting the ground).
+pub const KILL_BLAST: f32 = 18.0;
+
+/// A shot-down jet still blowing apart as it falls: a few more blasts.
+#[derive(Component)]
+struct Wreck {
+    pops: u32,
+    next: f32,
+}
+
+fn wreck_pops(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut wrecks: Query<(Entity, &Transform, &mut Wreck)>,
+    mut explosions: MessageWriter<Explosion>,
+) {
+    let mut rng = rand::rng();
+    for (e, t, mut w) in &mut wrecks {
+        w.next -= time.delta_secs();
+        if w.next > 0.0 {
+            continue;
+        }
+        let jitter = Vec3::new(rng.random_range(-4.0..4.0), rng.random_range(-2.0..3.0), rng.random_range(-6.0..6.0));
+        explosions.write(Explosion { position: t.translation + t.rotation * jitter, size: rng.random_range(7.5..11.0) });
+        w.pops -= 1;
+        w.next = rng.random_range(0.25..0.6);
+        if w.pops == 0 {
+            commands.entity(e).remove::<Wreck>();
         }
     }
 }
@@ -400,6 +438,7 @@ fn handle_crashes(
     mode: Res<GameMode>,
     aircraft: Query<(&Team, Has<Player>, Has<Disabled>, &Health, Option<&crate::net::RemoteName>)>,
     players: Query<(), With<Player>>,
+    transforms: Query<&Transform>,
     mut kills: MessageWriter<PlayerKill>,
 ) {
     // kills and deaths are counted when a plane is shot down
@@ -423,6 +462,7 @@ fn handle_crashes(
                 total: score.kills,
                 friendly: *team != Team::Red,
                 name: name.map(|n| n.0.clone()),
+                position: transforms.get(d.entity).ok().map(|t| t.translation),
             });
         }
     }
@@ -454,6 +494,7 @@ fn handle_crashes(
                 total: score.kills,
                 friendly: *team != Team::Red,
                 name: name.map(|n| n.0.clone()),
+                position: Some(crash.position),
             });
         }
         commands.entity(crash.entity).despawn();

@@ -796,6 +796,7 @@ fn play_delayed(
 }
 
 /// Hit ticks and the kill chime (cockpit sounds, not spatial).
+#[allow(clippy::too_many_arguments)]
 fn feedback_sounds(
     mut commands: Commands,
     sounds: Res<Sounds>,
@@ -804,13 +805,15 @@ fn feedback_sounds(
     mut hits: MessageReader<crate::weapons::HitConfirmed>,
     mut kills: MessageReader<crate::game::PlayerKill>,
     player: Query<Entity, With<Player>>,
+    camera: Query<&GlobalTransform, With<MainCamera>>,
     time: Res<Time>,
     mut tick_cooldown: Local<f32>,
 ) {
     *tick_cooldown -= time.delta_secs();
     let me = player.single().ok();
     let hit = hits.read().any(|h| Some(h.attacker) == me);
-    let killed = kills.read().count() > 0;
+    let kills: Vec<_> = kills.read().cloned().collect();
+    let killed = !kills.is_empty();
     let level = settings.volume();
     if muted.0 || level <= 0.0 {
         return;
@@ -832,6 +835,13 @@ fn feedback_sounds(
     }
     if killed {
         play(&sounds.kill_chime, 0.45);
+    }
+    // your kill's boom, however far off (the spatial one, at the speed of
+    // sound, is late and faint past a few hundred metres)
+    let listener = camera.single().map(|c| c.translation()).ok();
+    if let Some(d) = kills.iter().filter_map(|k| Some(listener?.distance(k.position?))).reduce(f32::min) {
+        let volume = (500.0 / d.max(1.0)).clamp(0.45, 1.0);
+        play(if d > 2_500.0 { &sounds.explosion_far } else { &sounds.explosion }, volume);
     }
 }
 

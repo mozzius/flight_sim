@@ -608,7 +608,7 @@ fn kill_test(
     let t = time.elapsed_secs();
     if t > shot.after - 0.4 && !*done {
         *done = true;
-        kills.write(crate::game::PlayerKill { total: 3, friendly: false, name: None });
+        kills.write(crate::game::PlayerKill { total: 3, friendly: false, name: None, position: None });
     }
     if t > shot.after - 0.1 {
         hits.write(crate::weapons::HitConfirmed { attacker: me });
