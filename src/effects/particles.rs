@@ -51,6 +51,9 @@ pub enum Kind {
     Glow = 2,
     /// Trail ribbon segment shaded as a lit tube.
     Tube = 3,
+    /// Soft, outline-free vapour shaded like fog (torn cloud): a gaussian
+    /// blob eaten by noise, smeared along its motion by `stretch`.
+    Vapour = 4,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -136,6 +139,10 @@ impl Particle {
 
     pub fn puff(pos: Vec3) -> Self {
         Self::base(pos, Kind::Puff)
+    }
+
+    pub fn vapour(pos: Vec3) -> Self {
+        Self::base(pos, Kind::Vapour)
     }
 
     pub fn spark(pos: Vec3, vel: Vec3) -> Self {
@@ -482,6 +489,22 @@ pub fn build_mesh(
                 let side = dir.cross(to_cam).normalize_or(right);
                 let len = (speed * p.stretch).max(size);
                 (side, dir, size * 0.5, len * 0.5, 0.0)
+            }
+            Kind::Vapour if p.stretch > 0.0 => {
+                // smeared along its motion as seen on screen (none when it
+                // flies straight at the camera)
+                let view = to_cam / dist.max(1e-3);
+                let along = vel - view * vel.dot(view);
+                let speed = along.length();
+                if speed > 1e-3 {
+                    let dir = along / speed;
+                    let side = dir.cross(view);
+                    let len = size + speed * p.stretch;
+                    let angle = side.dot(up).atan2(side.dot(right));
+                    (side, dir, size * 0.5, len * 0.5, angle)
+                } else {
+                    (right, up, size * 0.5, size * 0.5, 0.0)
+                }
             }
             _ => {
                 let (s, c) = p.rot.sin_cos();

@@ -169,7 +169,25 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
     var density: f32;
     var n: vec3<f32>;
     var thick: f32;
-    if kind == 3 {
+    if kind == 4 {
+        // vapour: a wide gaussian (zero at the quad's edge) eaten by two
+        // octaves of drifting noise with soft thresholds, so there is no
+        // outline anywhere, and lit through a mostly flat normal so it
+        // shades like fog rather than a lumpy puff
+        let p = in.uv * 2.0 - 1.0;
+        let r2 = dot(p, p);
+        let g = exp(-r2 * 2.5) * clamp(1.0 - r2, 0.0, 1.0);
+        let drift = vec2(seed * 7.0, seed * 3.0) + vec2(t * 0.01, -t * 0.03);
+        let n1 = textureSampleGrad(noise_tex, noise_sampler, in.uv * 0.35 + drift, ddx * 0.35, ddy * 0.35);
+        let n2 = textureSampleGrad(noise_tex, noise_sampler, in.uv * 0.9 + drift * 1.7 + n1.rg * 0.15, ddx * 0.9, ddy * 0.9);
+        let wisp = n1.r * 0.6 + n2.g * 0.4;
+        let cut = 0.2 + dissolve * 0.45;
+        density = g * smoothstep(cut, cut + 0.5, wisp + g * 0.35);
+        // cloud scatters light all through itself: lit much like the sunlit
+        // cloud around it from any side, with a hint of the blob's roundness
+        n = normalize(fx.sun_dir.xyz * 0.6 + to_cam * 0.4 + (x_axis * p.x - y_axis * p.y) * 0.25 + up * (n2.b - 0.5) * 0.3);
+        thick = g * 0.5;
+    } else if kind == 3 {
         // tube: a lit cylinder impostor, its edge eaten by noise along the trail
         let across = in.uv.x * 2.0 - 1.0;
         let along = in.uv.y;

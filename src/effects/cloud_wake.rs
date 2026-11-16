@@ -1,11 +1,13 @@
-//! Cloud wake: a jet flying out of a cloud drags some of it along, a plume of
-//! torn wisps pulled out behind the exit point that follow the jet for a
-//! moment, then hang in the air and dissolve.
+//! Cloud wake: a jet flying out of a cloud tears some of it away, the cloud's
+//! edge pulled out behind the exit point into soft wisps that drift to a
+//! stop and dissolve within a few seconds.
 //!
 //! Each jet charges up a `carried` amount while [`CloudField`] says it is in
-//! cloud and spends it in clear air, emitting white puffs along its path at a
-//! rate proportional to what's left. The puffs are lit like any smoke and
-//! hidden behind (and inside) the real clouds by the occlusion map.
+//! cloud and spends it quickly in clear air, emitting many small, faint
+//! vapour particles ([`Particle::vapour`]: outline-free, fog-shaded) along
+//! its path at a rate that falls with what's left and gusts at random, plus
+//! a few thicker clumps right at the exit. They are hidden behind (and
+//! inside) the real clouds by the occlusion map.
 
 use std::collections::HashMap;
 
@@ -20,22 +22,67 @@ const IN_CLOUD: f32 = 0.03;
 /// Charge per second in cloud, plus this much more per unit density.
 const CHARGE: f32 = 1.2;
 const CHARGE_DENSE: f32 = 3.0;
-/// Time constant (s) of the drain in clear air, and where emission stops.
-const DRAIN: f32 = 0.55;
+/// Time constant (s) of the drain in clear air, and where emission stops:
+/// most of the cloud comes away in the first ~100-200 m.
+const DRAIN: f32 = 0.4;
 const EMPTY: f32 = 0.05;
-/// Puffs per second at full charge (fewer on the phone path).
-const RATE: f32 = 120.0;
+/// Wisps per second at full charge (fewer on the phone path); about 150-200
+/// per exit with the clumps.
+const RATE: f32 = 280.0;
+/// Thick clumps of wisps left right at the exit point.
+const CLUMPS: usize = 3;
+const CLUMP_WISPS: usize = 6;
 /// Jets further than this from the camera don't emit (they still charge).
 const MAX_DISTANCE: f32 = 6_000.0;
 
 #[derive(Default)]
 pub struct Wake {
     carried: f32,
-    /// fractional puffs owed
+    /// fractional wisps owed
     owed: f32,
+    /// emission gusts (gaps and thicker patches), re-rolled every so often
+    gust: f32,
+    gust_left: f32,
     /// where the wake point was last frame
     last: Option<Vec3>,
     in_cloud: bool,
+}
+
+/// One wisp of torn cloud. `c` is the charge left (0..1): wisps shrink and
+/// fade toward the jet end of the plume.
+fn wisp(rng: &mut impl rand::Rng, pos: Vec3, jet_vel: Vec3, c: f32, scale: f32, light: f32) -> Particle {
+    // left behind with a little of the jet's speed, which drag soon kills
+    let vel = jet_vel * rng.random_range(0.15..0.5) + rand_dir(rng) * 5.0;
+    let s = (0.45 + 0.55 * c) * scale;
+    Particle {
+        vel,
+        life: rng.random_range(2.2..3.6),
+        size: (rng.random_range(7.0..13.0) * s, rng.random_range(16.0..30.0) * s),
+        grow: 2.0,
+        drag: rng.random_range(1.6..2.4),
+        spin: rng.random_range(-0.15..0.15),
+        // smeared along its motion while it's still being dragged
+        stretch: 0.12,
+        // a touch above 1: thin vapour lit by the sun and sky, like the cloud
+        // it came from (more than this glows at sunset)
+        albedo: Vec3::new(0.88, 0.91, 0.98) * light * rng.random_range(0.97..1.03),
+        opacity: 0.6 * c.powf(0.8),
+        fade_in: 0.2,
+        dissolve: 0.0,
+        near: 1.6,
+        ..Particle::vapour(pos)
+    }
+}
+
+/// How much sun reaches `p` through the cloud toward the sun (by
+/// [`CloudField`]), as a light scale: the wisps don't get the clouds' own
+/// shadows, so torn from the shaded side of a bank they'd glow against it
+/// (worst at sunset, when the sun comes in low through the whole layer).
+fn sunlight(field: &CloudField, p: Vec3, sun: Vec3) -> f32 {
+    const STEP: f32 = 150.0;
+    let depth: f32 = (1..=15).map(|i| field.density_at(p + sun * (i as f32 * STEP))).sum::<f32>() * STEP;
+    let transmittance = (-depth * 0.04).exp();
+    0.28 + 0.72 * transmittance
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -46,6 +93,7 @@ pub fn cloud_wake(
     mut particles: ResMut<Particles>,
     aircraft: Query<(Entity, &GlobalTransform, &FlightState, Has<Player>)>,
     camera: Query<&GlobalTransform, With<MainCamera>>,
+    sun: Query<&GlobalTransform, With<DirectionalLight>>,
     mut wakes: Local<HashMap<Entity, Wake>>,
 ) {
     let dt = time.delta_secs();
@@ -54,6 +102,7 @@ pub fn cloud_wake(
         return;
     }
     let cam = camera.single().map(|c| c.translation()).ok();
+    let sun = sun.iter().next().map_or(Vec3::Y, |s| s.back().as_vec3());
     let low = crate::platform::low_memory();
     let (rate, scale) = if low { (RATE * 0.6, 1.25) } else { (RATE, 1.0) };
     let log = std::env::var("FLIGHT_SIM_LOG").is_ok();
@@ -73,6 +122,7 @@ pub fn cloud_wake(
                 wake.carried
             );
         }
+        let just_left = wake.in_cloud && !in_cloud;
         wake.in_cloud = in_cloud;
         // the wake point, just behind the wings
         let tail = gt.transform_point(Vec3::new(0.0, 0.2, 4.0));
@@ -93,44 +143,43 @@ pub fn cloud_wake(
         if cam.is_some_and(|cam| cam.distance(pos) > MAX_DISTANCE) {
             continue;
         }
-        // a steady stream that thins out (fewer puffs would leave beads at the
-        // tail), spread evenly over the path moved: by distance, not time, as
-        // the transform can move in uneven steps
-        let moved = last.distance(tail);
-        wake.owed += rate * c.sqrt() * moved / state.velocity.length().max(50.0);
         let rot = gt.rotation();
+        let light = sunlight(&field, pos, sun);
+        if just_left && log && player {
+            info!("cloud wake: sunlight {light:.2} (sun {sun:.2})");
+        }
+        if just_left {
+            // the cloud's edge, torn away in a few thick clumps
+            for _ in 0..CLUMPS {
+                let centre = last
+                    + rot * Vec3::new(rng.random_range(-9.0..9.0), rng.random_range(-4.0..5.0), rng.random_range(-10.0..25.0));
+                for _ in 0..CLUMP_WISPS {
+                    let at = centre + rand_dir(&mut rng) * rng.random_range(0.0..8.0);
+                    let mut p = wisp(&mut rng, at, state.velocity, c, scale * 1.15, light);
+                    p.opacity *= 1.3;
+                    particles.add(p, 0.5);
+                }
+            }
+        }
+        // gusts: patches of thicker wisps and near-gaps, so it isn't a tube
+        wake.gust_left -= dt;
+        if wake.gust_left <= 0.0 {
+            wake.gust_left = rng.random_range(0.06..0.16);
+            wake.gust = if rng.random_bool(0.2) { rng.random_range(0.0..0.25) } else { rng.random_range(0.6..1.6) };
+        }
+        // spread evenly over the path moved: by distance, not time, as the
+        // transform can move in uneven steps (it clumped into beads)
+        let moved = last.distance(tail);
+        wake.owed += rate * c.sqrt() * wake.gust * moved / state.velocity.length().max(50.0);
         while wake.owed >= 1.0 {
             wake.owed -= 1.0;
             let along = last.lerp(tail, rng.random::<f32>());
-            let vel = state.velocity * rng.random_range(0.6..0.92) + rand_dir(&mut rng) * 7.0;
             let spread = Vec3::new(
-                rng.random_range(-10.0..10.0),
-                rng.random_range(-5.0..6.0),
-                rng.random_range(-6.0..6.0),
-            ) * (0.6 + 0.4 * c);
-            let s = (0.6 + 0.4 * c) * scale;
-            particles.add(
-                Particle {
-                    // dragged along with the jet, then left hanging
-                    vel,
-                    life: rng.random_range(3.0..5.0),
-                    size: (rng.random_range(12.0..20.0) * s, rng.random_range(28.0..48.0) * s),
-                    grow: 3.0,
-                    drag: rng.random_range(0.8..1.2),
-                    spin: rng.random_range(-0.3..0.3),
-                    // far brighter than smoke (cloud scatters light many times over), to
-                    // match the lit cloud it came from
-                    albedo: Vec3::new(1.75, 1.8, 1.9) * rng.random_range(0.95..1.05),
-                    opacity: 0.14 * c.powf(0.7),
-                    // faint while still beside the jet (and the chase camera)
-                    fade_in: 0.35,
-                    // eroding from birth: torn wisps rather than round puffs
-                    dissolve: 0.05,
-                    near: 1.6,
-                    ..Particle::puff(along + rot * spread)
-                },
-                0.5,
-            );
+                rng.random_range(-9.0..9.0),
+                rng.random_range(-4.0..5.0),
+                rng.random_range(-5.0..5.0),
+            ) * (0.5 + 0.5 * c);
+            particles.add(wisp(&mut rng, along + rot * spread, state.velocity, c, scale, light), 0.5);
         }
     }
 }
