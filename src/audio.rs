@@ -306,18 +306,37 @@ fn synth_hit() -> Vec<f32> {
     finish(s, 0.8, None)
 }
 
-/// Flare: pop, then a short fizz.
+/// Flare: the dispenser's thump (a cartridge kicking it out), the whoosh of
+/// it lighting and falling away, and a crackle of burning magnesium.
 fn synth_flare() -> Vec<f32> {
     let mut rng = Rng(0xf1a4_e000);
-    let mut bp = BandPass::new(4_000.0, 0.6);
-    let s = (0..samples(0.6))
+    let mut charge = LowPass::new(700.0);
+    let mut whoosh = BandPass::new(2_400.0, 0.9);
+    let mut fizz = BandPass::new(5_500.0, 1.2);
+    let mut crackle = 0.0f32;
+    let mut phase = 0.0f32;
+    let s = (0..samples(1.3))
         .map(|i| {
             let t = t_of(i);
-            let pop = (-t * 80.0).exp() * (t * TAU * 180.0).sin();
-            pop * 0.9 + bp.run(rng.next()) * (-t * 5.0).exp() * 0.6
+            // thump: a pitch drop from 150 to 55 Hz
+            let f = 55.0 + 95.0 * (-t * 40.0).exp();
+            phase += f / SAMPLE_RATE as f32;
+            let thump = (phase * TAU).sin() * (-t * 22.0).exp();
+            let kick = charge.run(rng.next()) * (-t * 45.0).exp();
+            // whoosh: lights within ~20 ms, sweeps down as it falls behind
+            whoosh.set(900.0 + 1_500.0 * (-t * 2.5).exp());
+            let light = (t / 0.02).min(1.0) * (-t * 2.2).exp();
+            let burn = whoosh.run(rng.next()) * light + fizz.run(rng.next()) * light * 0.5;
+            // crackle: sparse sharp clicks, thinning out
+            if rng.next() > 1.0 - 0.0016 * (-t * 1.5).exp() {
+                crackle = 1.0;
+            }
+            crackle *= 0.86;
+            let click = crackle * rng.next();
+            thump * 1.3 + kick * 2.2 + burn * 0.9 + click * 0.5
         })
         .collect();
-    finish(s, 0.7, None)
+    finish(s, 0.9, None)
 }
 
 /// Seeker growl while acquiring: a buzzy tone, warbling.
@@ -692,7 +711,8 @@ fn one_shots(
     camera: Query<&GlobalTransform, With<MainCamera>>,
     mut explosions: MessageReader<Explosion>,
     new_missiles: Query<&GlobalTransform, Added<Missile>>,
-    new_flares: Query<&GlobalTransform, Added<Flare>>,
+    new_flares: Query<(&GlobalTransform, &Flare), Added<Flare>>,
+    player: Query<Entity, With<crate::game::Player>>,
     mut flare_cooldown: Local<f32>,
     time: Res<Time>,
     state: Res<State<crate::loading::GameState>>,
@@ -730,11 +750,15 @@ fn one_shots(
         queue(&sounds.launch, gt.translation(), 0.9, 1.0 / 60.0);
     }
     *flare_cooldown -= time.delta_secs();
-    for gt in &new_flares {
-        // one pop per frame's flares (several jets at once)
-        if *flare_cooldown <= 0.0 {
+    let me = player.single().ok();
+    for (gt, flare) in &new_flares {
+        if Some(flare.owner) == me {
+            // our own: right behind us, so loud and every one
+            queue(&sounds.flare, gt.translation(), 1.0, 1.0 / 90.0);
+        } else if *flare_cooldown <= 0.0 {
+            // others': one per frame's flares (several jets at once)
             *flare_cooldown = 0.12;
-            queue(&sounds.flare, gt.translation(), 0.6, 1.0 / 50.0);
+            queue(&sounds.flare, gt.translation(), 0.7, 1.0 / 50.0);
         }
     }
 }
@@ -826,5 +850,16 @@ mod tests {
             let looped: Vec<f32> = s.iter().chain(&s).chain(&s).copied().collect();
             std::fs::write(format!("{dir}/{name}.wav"), &*wav(&looped).bytes).unwrap();
         }
+        // one-shots: a tap, then four held at the 0.2 s flare interval
+        let flare = synth_flare();
+        let mut shots = vec![0.0f32; samples(3.5)];
+        for start in [0.0, 1.5, 1.7, 1.9, 2.1] {
+            for (i, x) in flare.iter().enumerate() {
+                if let Some(o) = shots.get_mut(samples(start) + i) {
+                    *o += x * 0.6;
+                }
+            }
+        }
+        std::fs::write(format!("{dir}/flare.wav"), &*wav(&shots).bytes).unwrap();
     }
 }
