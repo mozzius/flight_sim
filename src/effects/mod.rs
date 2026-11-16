@@ -426,36 +426,56 @@ fn aircraft_fx(
             let g = smoothstep(4.0, 8.0, state.g_load.abs());
             let aoa = smoothstep(11.0, 22.0, state.alpha.to_degrees().abs());
             let sheet = g.max(aoa) * humidity * smoothstep(60.0, 120.0, state.airspeed);
-            let mut n = sheet * 650.0 * dt;
-            while n > 0.0 {
-                if n < 1.0 && rng.random::<f32>() > n {
-                    break;
+            // a thin, bright sheet hugging the upper surface: it condenses a
+            // little behind the leading edge, streams back along the chord,
+            // spills briefly off the trailing edge, and flickers with every
+            // twitch of the load (each wing on its own)
+            for side in [1.0f32, -1.0] {
+                let flicker = plume::turbulence(t * 0.8, fx.seed + side * 3.7);
+                let s = (sheet * (0.55 + 0.45 * (flicker - 0.8) / 0.4)).clamp(0.0, 1.0);
+                // light pulls show a narrow band near the suction peak; hard
+                // ones cover the wing back to the trailing edge
+                let reach = 0.35 + 0.65 * s;
+                let mut n = s * 1100.0 * dt;
+                while n > 0.0 {
+                    if n < 1.0 && rng.random::<f32>() > n {
+                        break;
+                    }
+                    n -= 1.0;
+                    let u = rng.random::<f32>().powf(0.8);
+                    let spill = rng.random_bool(0.18);
+                    let v = if spill { 1.0 } else { 0.08 + rng.random::<f32>() * reach * 0.9 };
+                    let lead = WING[0].lerp(WING[1], u);
+                    let trail = WING[3].lerp(WING[2], u);
+                    let mut p = lead.lerp(trail, v);
+                    p.y += rng.random_range(0.03..0.18);
+                    p.x *= side;
+                    // the wing slides under it: chordwise streaks, faster and
+                    // longer off the trailing edge, where the sheet tears up
+                    let (speed, life) = if spill {
+                        (rng.random_range(30.0..50.0), rng.random_range(0.04..0.08))
+                    } else {
+                        (rng.random_range(18.0..34.0), rng.random_range(0.07..0.14))
+                    };
+                    particles.add(
+                        Particle {
+                            vel: Vec3::new(side * rng.random_range(0.0..1.5), 0.3, speed),
+                            life,
+                            size: (rng.random_range(0.5..0.8), rng.random_range(0.9..1.5)),
+                            stretch: 0.05,
+                            albedo: Vec3::splat(rng.random_range(1.0..1.1)),
+                            opacity: if spill { 0.2 } else { 0.36 } * (0.35 + 0.65 * s),
+                            soft: 0.1,
+                            drag: 0.0,
+                            wind: 0.0,
+                            fade_in: 0.02,
+                            dissolve: 0.3,
+                            frame: Some(entity),
+                            ..Particle::vapour(p)
+                        },
+                        0.6,
+                    );
                 }
-                n -= 1.0;
-                let (u, v) = (rng.random::<f32>(), rng.random::<f32>().powf(0.7));
-                let lead = WING[0].lerp(WING[1], u);
-                let trail = WING[3].lerp(WING[2], u);
-                let mut p = lead.lerp(trail, v * 0.85);
-                p.y += rng.random_range(0.1..0.4);
-                if rng.random_bool(0.5) {
-                    p.x = -p.x;
-                }
-                particles.add(
-                    Particle {
-                        vel: Vec3::new(0.0, 0.6, rng.random_range(14.0..30.0)),
-                        life: rng.random_range(0.08..0.18),
-                        size: (rng.random_range(0.7..1.1), rng.random_range(1.5..2.3)),
-                        albedo: Vec3::splat(1.0),
-                        opacity: 0.28 * (0.4 + 0.6 * sheet),
-                        soft: 0.15,
-                        drag: 0.0,
-                        fade_in: 0.03,
-                        dissolve: 0.0,
-                        frame: Some(entity),
-                        ..Particle::puff(p)
-                    },
-                    0.6,
-                );
             }
             // shock collar around Mach 1
             let cone = smoothstep(0.9, 0.97, state.mach)
