@@ -286,9 +286,11 @@ fn fragment(
     let breakup = noised(pos.xz / 35.0).x * 0.5 + noised(pos.xz / 9.0).x * 0.25;
     let rock = smoothstep1(terrain.params.z - 0.06, terrain.params.z + 0.06, slope + breakup * 0.08);
     let snow_line = terrain.params.y + breakup * 140.0;
-    // snow settles on gentler slopes
+    // snow settles on gentler slopes (with a ragged edge: the slope comes from the normal
+    // map, whose texels are tens of metres across further out, so a plain fade smears into
+    // soft blotches)
     var snow = smoothstep1(snow_line - 60.0, snow_line + 120.0, pos.y)
-        * (1.0 - smoothstep1(terrain.snow.x, terrain.snow.y, slope));
+        * (1.0 - smoothstep1(terrain.snow.x, terrain.snow.y, slope + breakup * 0.25));
 
     // the baked colour, with the fields redrawn per pixel where the bake's alpha says
     // there are fields (zero outside farmland)
