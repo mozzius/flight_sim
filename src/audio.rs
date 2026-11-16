@@ -195,19 +195,22 @@ fn synth_engine() -> Vec<f32> {
 /// Afterburner: deep rumble with random crackle.
 fn synth_afterburner() -> Vec<f32> {
     let mut rng = Rng(0xdead_beef);
-    let (mut low, mut crack_f) = (LowPass::new(90.0), BandPass::new(1_400.0, 0.7));
-    let mut crack_env = 0.0f32;
-    let s = (0..samples(3.0))
+    // deep rumble: noise through two low-passes
+    let (mut rumble_a, mut rumble_b) = (LowPass::new(130.0), LowPass::new(130.0));
+    // the roar: a mid band whose loudness churns smoothly (turbulence, not
+    // discrete pops, which sounded like a fire crackling)
+    let mut roar = BandPass::new(420.0, 0.7);
+    let mut churn = LowPass::new(35.0);
+    let mut air = BandPass::new(1_800.0, 0.8);
+    let s = (0..samples(4.0))
         .map(|_| {
-            let n = rng.next();
-            if rng.next() > 0.9985 {
-                crack_env = 1.0;
-            }
-            crack_env *= 0.996;
-            low.run(n) * 4.0 + crack_f.run(n) * crack_env * 0.9
+            let turbulence = 1.0 + 3.0 * churn.run(rng.next());
+            rumble_b.run(rumble_a.run(rng.next())) * 22.0
+                + roar.run(rng.next()) * turbulence.max(0.3) * 0.9
+                + air.run(rng.next()) * 0.12
         })
         .collect();
-    finish(s, 0.9, Some(0.4))
+    finish(s, 0.9, Some(0.5))
 }
 
 /// Wind: band-passed noise with slow gusting.
