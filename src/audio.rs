@@ -306,36 +306,29 @@ fn synth_hit() -> Vec<f32> {
     finish(s, 0.8, None)
 }
 
-/// Flare: the dispenser's thump (a cartridge kicking it out), the whoosh of
-/// it lighting and falling away, and a crackle of burning magnesium.
+/// Flare: "shunk", a cartridge punched out of the dispenser. A short soft
+/// "sh" of gas, then the clunk of the breech: a damped low knock with a
+/// little metal ring.
 fn synth_flare() -> Vec<f32> {
     let mut rng = Rng(0xf1a4_e000);
-    let mut charge = LowPass::new(500.0);
-    let mut whoosh = BandPass::new(1_400.0, 1.4);
-    // no hiss on top (white noise up there read as static)
-    let mut soften = LowPass::new(2_200.0);
-    let mut pops = BandPass::new(1_100.0, 2.0);
-    let mut crackle = 0.0f32;
-    let mut phase = 0.0f32;
-    let s = (0..samples(1.1))
+    let mut sh = BandPass::new(2_600.0, 1.0);
+    // keep the "sh" smooth, not static
+    let mut sh_soft = LowPass::new(4_000.0);
+    let mut knock_noise = LowPass::new(900.0);
+    const CLUNK: f32 = 0.045;
+    let s = (0..samples(0.45))
         .map(|i| {
             let t = t_of(i);
-            // thump: a pitch drop from 150 to 55 Hz
-            let f = 55.0 + 95.0 * (-t * 40.0).exp();
-            phase += f / SAMPLE_RATE as f32;
-            let thump = (phase * TAU).sin() * (-t * 22.0).exp();
-            let kick = charge.run(rng.next()) * (-t * 45.0).exp();
-            // whoosh: lights within ~25 ms, sweeps down as it falls behind
-            whoosh.set(500.0 + 1_000.0 * (-t * 2.5).exp());
-            let light = (t / 0.025).min(1.0) * (-t * 3.0).exp();
-            let burn = soften.run(whoosh.run(rng.next())) * light;
-            // crackle: a few soft pops, thinning out
-            if rng.next() > 1.0 - 0.0008 * (-t * 2.0).exp() {
-                crackle = 1.0;
-            }
-            crackle *= 0.97;
-            let pop = pops.run(crackle * rng.next());
-            thump * 1.4 + kick * 2.0 + burn * 1.2 + pop * 0.6
+            // sh: swells in over ~25 ms, cut off by the clunk
+            let sh_env = (t / 0.025).min(1.0).powi(2) * (1.0 - ((t - 0.035) / 0.02).clamp(0.0, 1.0));
+            let hiss = sh_soft.run(sh.run(rng.next())) * sh_env;
+            // unk: the knock
+            let k = (t - CLUNK).max(0.0);
+            let on = if t >= CLUNK { 1.0 } else { 0.0 };
+            let body = ((k * TAU * 210.0).sin() + 0.5 * (k * TAU * 140.0).sin()) * (-k * 28.0).exp();
+            let ring = ((k * TAU * 1_350.0).sin() * 0.6 + (k * TAU * 2_050.0).sin() * 0.4) * (-k * 45.0).exp();
+            let impact = knock_noise.run(rng.next()) * (-k * 120.0).exp();
+            hiss * 0.9 + on * (body * 1.0 + ring * 0.3 + impact * 2.5)
         })
         .collect();
     finish(s, 0.9, None)
