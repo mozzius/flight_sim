@@ -219,6 +219,8 @@ const NEAR_EROSION_OCTAVES: u32 = 6;
 const EROSION_GAIN: f32 = 0.5;
 const EROSION_LACUNARITY: f32 = 2.0;
 const EROSION_NORMALIZATION: f32 = 0.5;
+/// (knife-edge rounding in mesh grid spacings, its cap in |sin| per octave) (`soften_at`)
+const EROSION_SOFTEN: Vec2 = Vec2::new(4.0, 0.4);
 
 /// The map's seed (set by `MapBake::bake` / `from_bytes`).
 static SEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1337);
@@ -515,11 +517,15 @@ struct ErosionOutput {
 /// `octaves` may be fractional: the last octave's contribution is scaled by the fractional
 /// part. We use that to drop the finest gullies smoothly with distance where the mesh is too
 /// coarse to show them (pure LOD, it doesn't change the look up close).
+///
+/// `soften` (metres) rounds off the knife-edges the filter leaves along each octave's stripe
+/// crests and troughs, where `|sin|` and `sign(sin)` turn sharply (see `soften_at`).
 fn erosion_filter(
     p: Vec2,
     mut height_and_slope: Vec3,
     mut fade_target: f32,
     octaves: f32,
+    soften: f32,
 ) -> ErosionOutput {
     let rounding = EROSION_ROUNDING;
     let onset = EROSION_ONSET;
@@ -565,11 +571,21 @@ fn erosion_filter(
         // Multiply with freq since p was multiplied with freq; negate since slope directions
         // point down.
         let dir = Vec2::new(ph.z, ph.w) * -freq;
-        let sloping = ph.y.abs();
+        // A soft |sin| and sign(sin), rounded over about `soften` metres of this octave's
+        // stripes (whose phase moves |dir| = freq * CELL_SCALE * TAU noise units, i.e.
+        // |dir| / WORLD_SCALE radians, per metre). Capped, since only the coarse octaves
+        // are tall enough to need it.
+        let k = (soften * freq * (EROSION_CELL_SCALE * std::f32::consts::TAU / WORLD_SCALE)).min(EROSION_SOFTEN.y);
+        let (sloping, sign) = if k > 0.0 {
+            let r = (ph.y * ph.y + k * k).sqrt();
+            ((r - k) / ((1.0 + k * k).sqrt() - k), ph.y / r)
+        } else {
+            (ph.y.abs(), ph.y.signum())
+        };
 
         // Non-masked, normalised slope feeds the gully directions of subsequent octaves
         // ("straight gullies": sign of the sine instead of the sine itself).
-        gully_slope += ph.y.signum() * dir * strength * gully_weight * octave_weight;
+        gully_slope += sign * dir * strength * gully_weight * octave_weight;
 
         // Gullies: height offset (-1..1) and its derivative.
         let gullies = Vec3::new(ph.x, ph.y * dir.x, ph.y * dir.y);
@@ -698,7 +714,7 @@ fn sample_terrain(x: f32, z: f32, octaves: f32) -> TerrainSample {
     // Heights from [-1, 1] to [0, 1] (as in the reference).
     n = n * 0.5 + Vec3::new(0.5, 0.0, 0.0);
 
-    let e = erosion_filter(p, n, fade_target, octaves);
+    let e = erosion_filter(p, n, fade_target, octaves, soften_at(x, z));
     let offset = lerp(HEIGHT_OFFSET.x, -fade_target, HEIGHT_OFFSET.y) * e.magnitude;
     let eroded = n.x + e.delta.x + offset;
 
@@ -838,6 +854,25 @@ fn coast_profile(s: f32, beachy: f32) -> f32 {
     // (the shelf below reaches further out than the flats above)
     let w = if s < 0.0 { lerp(55.0, 220.0, beachy) } else { lerp(45.0, 280.0, beachy) };
     s - (1.0 - m) * w * (s / w).tanh()
+}
+
+/// How far (metres) the erosion's knife-edges are rounded off at a world position: a few
+/// spacings of the mesh grid drawn there, blended across the grids' overlaps like
+/// `octaves_at` (so neighbouring grids agree along their seams).
+///
+/// Along the lines where a coarse octave's stripes cross zero, every finer octave fades out
+/// in a V and its gullies swing round, which leaves a knife-edge ridge with near-vertical
+/// walls running straight for kilometres. The mesh can't follow an edge that sharp, but the
+/// colour and normal maps (projected straight down, at a few metres per texel) do, so the
+/// snowy crest's texels land on the mesh's wall triangles: a diagonal crest turns into a
+/// row of teeth. Rounding the edge to what the mesh can draw keeps the two in step.
+fn soften_at(x: f32, z: f32) -> f32 {
+    let r = x.abs().max(z.abs());
+    let fine_edge = FINE_SPACING * FINE_CELLS as f32 * 0.5;
+    let near_edge = NEAR_SPACING * NEAR_CELLS as f32 * 0.5;
+    let spacing = lerp(NEAR_SPACING, FINE_SPACING, smoothstep(near_edge * 0.7, near_edge * 0.95, r));
+    let spacing = lerp(spacing, COARSE_SPACING, smoothstep(fine_edge * 0.75, fine_edge, r));
+    spacing * EROSION_SOFTEN.x
 }
 
 /// Erosion octave count used at a world position (fewer far away, where the mesh is coarse).
