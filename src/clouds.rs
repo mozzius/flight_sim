@@ -256,7 +256,7 @@ impl Plugin for CloudsPlugin {
         let detail = noise::detail_shape(DETAIL_NOISE_SIZE);
         let weather_bytes: Vec<u8> = weather
             .iter()
-            .flat_map(|w| [(w.coverage * 255.0) as u8, (w.cloud_type * 255.0) as u8])
+            .flat_map(|w| [(w.coverage * 255.0) as u8, (w.cloud_type * 255.0) as u8, (w.base * 255.0) as u8, 0])
             .collect();
         info!(
             "baked cloud noise ({}^3 base, {}^3 detail, {}^2 weather) in {:.0} ms",
@@ -494,7 +494,7 @@ impl CloudField {
         }
         let w = self.weather_at(p.x, p.z);
         let coverage = (w.coverage + self.coverage_bias).clamp(0.0, 1.0);
-        let grad = height_gradient(h, w.cloud_type);
+        let grad = height_gradient(h, w.cloud_type, w.base);
         if coverage <= 0.0 || grad <= 0.0 {
             return 0.0;
         }
@@ -531,14 +531,25 @@ impl CloudField {
         noise::Weather {
             coverage: bilerp(|w| w.coverage),
             cloud_type: bilerp(|w| w.cloud_type),
+            base: bilerp(|w| w.base),
         }
     }
 }
 
+/// Most the cloud base is lifted, as a fraction of the layer.
+const BASE_LIFT: f32 = 0.22;
+
+/// Height in the layer measured from the local (lifted) base.
+fn above_base(h: f32, base: f32) -> f32 {
+    let lift = base * BASE_LIFT;
+    (h - lift) / (1.0 - lift)
+}
+
 /// Same curve as `height_gradient` in the shader.
-fn height_gradient(h: f32, cloud_type: f32) -> f32 {
+fn height_gradient(h: f32, cloud_type: f32, base: f32) -> f32 {
+    let hb = above_base(h, base);
     let top = 0.28 + (1.0 - 0.28) * cloud_type;
-    noise::smoothstep(0.0, 0.08, h) * (1.0 - noise::smoothstep(top * 0.65, top, h))
+    noise::smoothstep(0.0, 0.16, hb) * (1.0 - noise::smoothstep(top * 0.65, top, hb))
 }
 
 fn update_field_time(time: Res<Time>, mut field: ResMut<CloudField>) {
@@ -933,7 +944,7 @@ fn init_clouds_pipelines(
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
-                format: TextureFormat::Rg8Unorm,
+                format: TextureFormat::Rgba8Unorm,
                 usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
                 view_formats: &[],
             },

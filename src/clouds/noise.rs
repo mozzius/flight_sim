@@ -294,26 +294,31 @@ pub struct Weather {
     pub coverage: f32,
     /// 0 = flat strato-cumulus, 1 = tall cumulus.
     pub cloud_type: f32,
+    /// How far the cloud base is lifted here (0..1 of `BASE_LIFT`), so the
+    /// layer doesn't end in one level cut across the whole map.
+    pub base: f32,
 }
 
 /// `size²` weather map (coverage, type) generated from 2D Perlin FBM.
 pub fn weather_map(size: u32, coverage_bias: f32) -> Vec<Weather> {
     let n = size as usize;
-    let bytes = parallel_slices(n, n * 8, |y, row| {
+    let bytes = parallel_slices(n, n * 12, |y, row| {
         for x in 0..n {
             let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) / size as f32;
             let w = weather_at(p, coverage_bias);
-            row[x * 8..x * 8 + 4].copy_from_slice(&w.coverage.to_le_bytes());
-            row[x * 8 + 4..x * 8 + 8].copy_from_slice(&w.cloud_type.to_le_bytes());
+            row[x * 12..x * 12 + 4].copy_from_slice(&w.coverage.to_le_bytes());
+            row[x * 12 + 4..x * 12 + 8].copy_from_slice(&w.cloud_type.to_le_bytes());
+            row[x * 12 + 8..x * 12 + 12].copy_from_slice(&w.base.to_le_bytes());
         }
     });
     bytes
-        .as_chunks::<8>()
+        .as_chunks::<12>()
         .0
         .iter()
         .map(|c| Weather {
             coverage: f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
             cloud_type: f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+            base: f32::from_le_bytes([c[8], c[9], c[10], c[11]]),
         })
         .collect()
 }
@@ -331,9 +336,15 @@ pub fn weather_at(p: Vec2, coverage_bias: f32) -> Weather {
     let regional = perlin2_fbm(p + Vec2::new(0.37, 0.61), 2, 2, 43);
     let local = perlin2_fbm(p + Vec2::new(0.11, 0.83), 7, 3, 44);
     let cloud_type = smoothstep(0.28, 0.66, regional * 0.55 + local * 0.45);
+    // the base rises and falls over a few km: broad swells plus bank-sized
+    // steps, so neighbouring banks sit at different heights
+    let swell = perlin2_fbm(p + Vec2::new(0.71, 0.29), 4, 3, 45);
+    let step = perlin2_fbm(p + Vec2::new(0.53, 0.17), 14, 3, 46);
+    let base = smoothstep(0.3, 0.7, swell * 0.6 + step * 0.4);
     Weather {
         coverage: coverage.clamp(0.0, 1.0),
         cloud_type: cloud_type.clamp(0.0, 1.0),
+        base: base.clamp(0.0, 1.0),
     }
 }
 

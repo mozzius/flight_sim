@@ -152,24 +152,36 @@ fn height_frac(p: vec3<f32>) -> f32 {
     return (altitude(p) - u.layer_bottom) / (u.layer_top - u.layer_bottom);
 }
 
-/// (coverage, cloud type) at a world position, wind-advected.
-fn sample_weather(p: vec3<f32>) -> vec2<f32> {
+/// (coverage, cloud type, base lift) at a world position, wind-advected.
+fn sample_weather(p: vec3<f32>) -> vec3<f32> {
     let uv = (p.xz + u.wind * u.time) / u.weather_scale;
-    return textureSampleLevel(weather_tex, repeat_sampler, uv, 0.0).rg;
+    return textureSampleLevel(weather_tex, repeat_sampler, uv, 0.0).rgb;
+}
+
+/// Most the cloud base is lifted, as a fraction of the layer (`BASE_LIFT` in
+/// clouds.rs): the base rises and falls bank to bank, so the layer doesn't
+/// end in one level cut across the whole map (worst against mountains).
+const BASE_LIFT: f32 = 0.22;
+
+/// Height in the layer measured from the local (lifted) base.
+fn above_base(h: f32, base: f32) -> f32 {
+    let lift = base * BASE_LIFT;
+    return (h - lift) / (1.0 - lift);
 }
 
 /// Vertical profile: everything fades in just above the base; strato-cumulus
 /// (type 0) stops low, cumulus (type 1) towers to the top of the layer.
-fn height_gradient(h: f32, cloud_type: f32) -> f32 {
+fn height_gradient(hb: f32, cloud_type: f32) -> f32 {
     let top = mix(0.28, 1.0, cloud_type);
-    return smoothstep(0.0, 0.08, h) * (1.0 - smoothstep(top * 0.65, top, h));
+    return smoothstep(0.0, 0.16, hb) * (1.0 - smoothstep(top * 0.65, top, hb));
 }
 
 /// `detail` is how much erosion to apply (0 = none); it is faded out with
 /// distance where the march steps are too coarse to resolve it.
-fn density(p: vec3<f32>, h: f32, w: vec2<f32>, detail: f32) -> f32 {
+fn density(p: vec3<f32>, h: f32, w: vec3<f32>, detail: f32) -> f32 {
     let coverage = saturate(w.x + u.coverage_bias);
-    let grad = height_gradient(h, w.y);
+    let hb = above_base(h, w.z);
+    let grad = height_gradient(hb, w.y);
     if coverage <= 0.0 || grad <= 0.0 {
         return 0.0;
     }
@@ -183,7 +195,15 @@ fn density(p: vec3<f32>, h: f32, w: vec2<f32>, detail: f32) -> f32 {
     // carve the coverage out of the shape; multiplying by coverage keeps
     // the edges of banks wispy
     let cov = coverage * mix(1.0, 0.65, h);
-    d = remap(d, 1.0 - cov, 1.0, 0.0, 1.0) * cov;
+    // the underside frays: the lowest few hundred metres are carved harder,
+    // so the base is lumpy and ragged instead of a clean flat sheet
+    let fray = 1.0 - smoothstep(0.0, 0.22, hb);
+    let cut = 1.0 - cov + fray * 0.22;
+    // (past 1 the remap would flip and fill thin cover with flat sheets)
+    if cut >= 0.98 {
+        return 0.0;
+    }
+    d = remap(d, cut, 1.0, 0.0, 1.0) * cov;
     if d <= 0.0 {
         return 0.0;
     }
@@ -192,8 +212,8 @@ fn density(p: vec3<f32>, h: f32, w: vec2<f32>, detail: f32) -> f32 {
         let dn = textureSampleLevel(detail_tex, repeat_sampler, dp, 0.0).rgb;
         let dfbm = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
         // wispy near the base, billowy higher up
-        let dmod = mix(dfbm, 1.0 - dfbm, saturate(h * 6.0));
-        d = remap(d, dmod * 0.42 * detail, 1.0, 0.0, 1.0);
+        let dmod = mix(dfbm, 1.0 - dfbm, saturate(hb * 6.0));
+        d = remap(d, dmod * (0.42 + 0.25 * fray) * detail, 1.0, 0.0, 1.0);
     }
     return saturate(d);
 }
