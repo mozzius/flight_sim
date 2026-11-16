@@ -522,6 +522,8 @@ fn fs_raymarch(in: VsOut) -> RaymarchOut {
 
 const SHADOW_REF: f32 = 3000.0;
 const SHADOW_STEPS: i32 = 10;
+/// Sunlight a thick cloud's shadow still lets through (scattered round it).
+const SHADOW_FLOOR: f32 = 0.5;
 
 @fragment
 fn fs_shadow(in: VsOut) -> @location(0) f32 {
@@ -542,8 +544,9 @@ fn fs_shadow(in: VsOut) -> @location(0) f32 {
     }
     let tau = sum * u.extinction * thickness / f32(SHADOW_STEPS) / sy;
     // light scattered on through the cloud keeps the shadows from going black,
-    // and softens their edges
-    return exp(-tau * 0.12);
+    // and softens their edges; and under broken cloud the bright cloud sides
+    // all round still light the ground, so even a thick one leaves a share
+    return mix(SHADOW_FLOOR, 1.0, exp(-tau * 0.12));
 }
 
 // ---------------------------------------------------------------------------
