@@ -4,8 +4,13 @@
 //! height grid and joined one at a time: each new site is routed to the nearest
 //! point of the network so far with a Dijkstra search whose cost climbs steeply
 //! with the grade, so roads follow valley floors and switch back up passes.
-//! The paths are then smoothed, given a gently graded elevation profile, and
-//! the terrain is levelled under them before the meshes are built.
+//! Each lattice path is then pulled taut wherever a straight line is no dearer
+//! than the zig-zag (so flat ground loses the grid's 45° steps but mountain
+//! switchbacks stay), given a gentle meander on long flat legs, and rounded into a
+//! B-spline. Turn radii follow the leg lengths (wide on the plains, tight hairpins
+//! where the legs are short), and a slope-weighted blur opens up any bend left
+//! tight on gentle ground. Finally the roads get a gently graded elevation
+//! profile, and the terrain is levelled under them before the meshes are built.
 
 use std::{cmp::Reverse, collections::BinaryHeap};
 
@@ -31,47 +36,106 @@ const SHOULDER: f32 = 2.5;
 /// then blended back to the natural ground by `BLEND_OUTER`.
 const BLEND_INNER: f32 = 20.0;
 const BLEND_OUTER: f32 = 75.0;
-/// A road's end is tied into a road within this distance (m).
-const JOIN_REACH: f32 = 100.0;
+/// Longest straight leg a path is pulled into (m).
+const MAX_LEG: f32 = 3_000.0;
+/// A straight leg replaces the lattice path if it costs at most this much more.
+const PULL_SLACK: f32 = 1.02;
+/// Long legs are cut into pieces about this long (m), each end nudged sideways
+/// by up to `MEANDER` of it where the ground allows.
+const MEANDER_PIECE: f32 = 600.0;
+const MEANDER: f32 = 0.2;
+/// Smoothing passes over the finished centreline, averaging over ±`EASE_REACH`
+/// points: they open tight bends up to a radius of a few hundred metres on
+/// gentle ground only.
+const EASE_PASSES: usize = 40;
+const EASE_REACH: usize = 8;
 
 /// A road centreline: points ~8 m apart, y = road surface height.
 pub(super) type Road = Vec<Vec3>;
 
 /// Plans the network and levels `grid` under it. Returns the centrelines.
 pub(super) fn build_roads(grid: &mut HeightGrid) -> Vec<Road> {
-    let paths = plan(grid);
+    let dry = dry_level();
+    // per road: its waypoints, its centreline, and whether its end meets another road
+    let mut ways: Vec<Vec<Vec2>> = Vec::new();
     let mut roads: Vec<Road> = Vec::new();
-    for path in paths {
-        let mut road = profile(grid, &smooth(&path));
-        // tie the end into the road it joins
-        if let Some(&end) = road.last() {
-            // (only if it ends on one: a road out to a site on another island ends
-            // at that site, and the nearest road could be kilometres away)
-            if let Some((join, _)) = nearest_on_roads(&roads, end.xz()).filter(|&(_, d)| d < JOIN_REACH) {
-                let join_y = join.y;
-                let n = road.len().min(25);
-                let len = road.len();
-                for k in 0..n {
-                    let t = k as f32 / n as f32; // 0 at the join
-                    let idx = len - 1 - k;
-                    road[idx].y = join_y + (road[idx].y - join_y) * smoothstep(0.0, 1.0, t);
+    let mut joins: Vec<bool> = Vec::new();
+    for path in plan(grid) {
+        let mut way = straighten(grid, &path.nodes, dry);
+        // end exactly on the road it joins: that road was pulled off the lattice,
+        // sometimes by a few hundred metres where it cut a corner
+        let target = path.joins_road.then(|| nearest_on_roads(&roads, *way.last().unwrap())).flatten();
+        if let Some((_, q, _)) = target {
+            *way.last_mut().unwrap() = q.xz();
+        }
+        meander(grid, &mut way, dry);
+        // arriving at the village at either end of a road: carry on along it as one
+        // road, so the two don't meet in a sharp V
+        if let Some((r, q, _)) = target {
+            let at_start = q.xz().distance(ways[r][0]) < 1.0;
+            let at_end = !joins[r] && q.xz().distance(*ways[r].last().unwrap()) < 1.0;
+            let rest: Option<Vec<Vec2>> = if at_start {
+                Some(ways[r].clone())
+            } else if at_end {
+                Some(ways[r].iter().rev().copied().collect())
+            } else {
+                None
+            };
+            if let Some(rest) = rest {
+                // (carrying on backwards along it, the road now ends at its start: a village)
+                if !at_start {
+                    joins[r] = false;
                 }
+                way.extend_from_slice(&rest[1..]);
+                roads[r] = finish(grid, &way, dry);
+                ways[r] = way;
+                continue;
             }
         }
-        roads.push(road);
+        roads.push(finish(grid, &way, dry));
+        ways.push(way);
+        joins.push(target.is_some());
+    }
+    // tie each joining road's end into the road it meets, in plan and in height
+    // (once all are final: a merge may have nudged the road it meets)
+    for i in 0..roads.len() {
+        if !joins[i] {
+            continue;
+        }
+        let end = roads[i].last().unwrap().xz();
+        let others: Vec<Road> = roads.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, r)| r.clone()).collect();
+        let Some((_, q, _)) = nearest_on_roads(&others, end) else { continue };
+        let road = &mut roads[i];
+        let len = road.len();
+        let n = len.min(25);
+        let shift = q.xz() - end;
+        for k in 0..n {
+            let t = smoothstep(0.0, 1.0, k as f32 / n as f32); // 0 at the join
+            let p = &mut road[len - 1 - k];
+            let xz = p.xz() + shift * (1.0 - t);
+            *p = Vec3::new(xz.x, q.y + (p.y - q.y) * t, xz.y);
+        }
     }
     flatten(grid, &roads);
+    plot(grid, &roads);
     roads
 }
 
-/// Nearest point on any road to `p`, and its distance.
-fn nearest_on_roads(roads: &[Road], p: Vec2) -> Option<(Vec3, f32)> {
-    let mut best: Option<(Vec3, f32)> = None;
-    for road in roads {
+/// Waypoints to a finished centreline: splined, eased, evenly spaced, graded.
+fn finish(grid: &HeightGrid, way: &[Vec2], dry: f32) -> Road {
+    let mut line = spline(way);
+    ease(grid, &mut line, dry);
+    profile(grid, &resample(&line))
+}
+
+/// Nearest point on any road to `p`: the road's index, the point, and its distance.
+fn nearest_on_roads(roads: &[Road], p: Vec2) -> Option<(usize, Vec3, f32)> {
+    let mut best: Option<(usize, Vec3, f32)> = None;
+    for (r, road) in roads.iter().enumerate() {
         for w in road.windows(2) {
             let (q, d) = closest_on_segment(w[0], w[1], p);
-            if best.is_none_or(|(_, bd)| d < bd) {
-                best = Some((q, d));
+            if best.is_none_or(|(.., bd)| d < bd) {
+                best = Some((r, q, d));
             }
         }
     }
@@ -141,7 +205,14 @@ impl Lattice<'_> {
     }
 }
 
-fn plan(grid: &HeightGrid) -> Vec<Vec<Vec2>> {
+/// A planned route through lattice nodes, and whether it ends on an earlier route
+/// (rather than at a lone site).
+struct Route {
+    nodes: Vec<Vec2>,
+    joins_road: bool,
+}
+
+fn plan(grid: &HeightGrid) -> Vec<Route> {
     let m = (grid.n - 1) / STRIDE + 1;
     let margin = (EDGE_MARGIN / (grid.spacing * STRIDE as f32)).ceil() as usize;
     let lat = Lattice { grid, m, lo: margin, hi: m - 1 - margin };
@@ -190,6 +261,8 @@ fn plan(grid: &HeightGrid) -> Vec<Vec<Vec2>> {
 
     // ---- join them up, nearest first, each to the nearest point of the network
     let mut on_road = vec![false; m * m];
+    // (the subset of `on_road` that's actually on a route, not a lone site)
+    let mut routed = vec![false; m * m];
     let mut connected = vec![sites[0]];
     on_road[sites[0].1 * m + sites[0].0] = true;
     let mut remaining: Vec<_> = sites[1..].to_vec();
@@ -209,10 +282,13 @@ fn plan(grid: &HeightGrid) -> Vec<Vec<Vec2>> {
             .unwrap();
         let start = remaining.swap_remove(k);
         if let Some(nodes) = route(&lat, start, &on_road) {
+            let &(ei, ej) = nodes.last().unwrap();
+            let joins_road = routed[ej * m + ei];
             for &(i, j) in &nodes {
                 on_road[j * m + i] = true;
+                routed[j * m + i] = true;
             }
-            paths.push(nodes.iter().map(|&(i, j)| lat.pos(i, j)).collect());
+            paths.push(Route { nodes: nodes.iter().map(|&(i, j)| lat.pos(i, j)).collect(), joins_road });
         } else {
             // cut off (another island): later sites there can join this one
             on_road[start.1 * m + start.0] = true;
@@ -232,8 +308,7 @@ fn route(lat: &Lattice, start: (usize, usize), goal: &[bool]) -> Option<Vec<(usi
     cost[s] = 0.0;
     heap.push(Reverse((0u32, s as u32)));
     let step = lat.grid.spacing * STRIDE as f32;
-    // roads don't cross water
-    let dry = super::biome::params().water.as_ref().map_or(f32::MIN, |w| w.level + 2.0);
+    let dry = dry_level();
     while let Some(Reverse((c_bits, node))) = heap.pop() {
         let node = node as usize;
         let c = f32::from_bits(c_bits);
@@ -262,14 +337,7 @@ fn route(lat: &Lattice, start: (usize, usize), goal: &[bool]) -> Option<Vec<(usi
                 continue;
             }
             let len = step * if di != 0 && dj != 0 { std::f32::consts::SQRT_2 } else { 1.0 };
-            let grade = (lat.h(ni, nj) - h).abs() / len;
-            // gentle grades are cheap, steep ones very expensive; a little
-            // pull toward low ground keeps roads in the valleys
-            let mut w = len * (1.0 + 60.0 * grade * grade + lat.h(ni, nj).max(0.0) * 0.0006);
-            if grade > 0.14 {
-                w += len * 40.0 * (grade - 0.14) / 0.1;
-            }
-            let nc = c + w;
+            let nc = c + weight(len, h, lat.h(ni, nj));
             let n = nj * m + ni;
             if nc < cost[n] {
                 cost[n] = nc;
@@ -281,10 +349,159 @@ fn route(lat: &Lattice, start: (usize, usize), goal: &[bool]) -> Option<Vec<(usi
     None
 }
 
-/// Chaikin corner cutting, then resampled to even spacing.
-fn smooth(path: &[Vec2]) -> Vec<Vec2> {
-    let mut pts = path.to_vec();
-    for _ in 0..4 {
+/// Roads don't cross water (or run along the very edge of it).
+fn dry_level() -> f32 {
+    super::biome::params().water.as_ref().map_or(f32::MIN, |w| w.level + 2.0)
+}
+
+/// What a stretch of road `len` long from height `h0` to `h1` costs: gentle
+/// grades are cheap, steep ones very expensive, and a little pull toward low
+/// ground keeps roads in the valleys.
+fn weight(len: f32, h0: f32, h1: f32) -> f32 {
+    let grade = (h1 - h0).abs() / len;
+    let mut w = len * (1.0 + 60.0 * grade * grade + h1.max(0.0) * 0.0006);
+    if grade > 0.14 {
+        w += len * 40.0 * (grade - 0.14) / 0.1;
+    }
+    w
+}
+
+/// The cost of a straight leg from `a` to `b`, sampled every grid cell along it
+/// (infinite if it dips below `dry`).
+fn leg_cost(grid: &HeightGrid, a: Vec2, b: Vec2, dry: f32) -> f32 {
+    leg_cost_within(grid, a, b, dry, f32::INFINITY)
+}
+
+/// `leg_cost`, giving up (infinite) as soon as it passes `budget`.
+fn leg_cost_within(grid: &HeightGrid, a: Vec2, b: Vec2, dry: f32, budget: f32) -> f32 {
+    let n = (a.distance(b) / grid.spacing).ceil().max(1.0) as usize;
+    let step = a.distance(b) / n as f32;
+    let mut h0 = grid.sample_clamped(a.x, a.y);
+    let mut cost = 0.0;
+    for s in 1..=n {
+        let p = a.lerp(b, s as f32 / n as f32);
+        let h1 = grid.sample_clamped(p.x, p.y);
+        cost += weight(step, h0, h1);
+        if h1 < dry || cost > budget {
+            return f32::INFINITY;
+        }
+        h0 = h1;
+    }
+    cost
+}
+
+/// String-pulls a lattice path: from each waypoint, jump to the farthest later
+/// node (within `MAX_LEG`) whose straight line costs no more than the path does.
+/// Flat ground loses the lattice's 0/45/90° zig-zags; on steep ground a straight
+/// line climbs too hard, so the switchbacks stay.
+fn straighten(grid: &HeightGrid, path: &[Vec2], dry: f32) -> Vec<Vec2> {
+    let mut along = vec![0.0; path.len()];
+    for k in 1..path.len() {
+        along[k] = along[k - 1] + leg_cost(grid, path[k - 1], path[k], f32::MIN);
+    }
+    let mut out = vec![path[0]];
+    let mut a = 0;
+    while a + 1 < path.len() {
+        let next = (a + 2..path.len())
+            .rev()
+            .filter(|&k| path[a].distance(path[k]) <= MAX_LEG)
+            .find(|&k| leg_cost_within(grid, path[a], path[k], dry, (along[k] - along[a]) * PULL_SLACK).is_finite())
+            .unwrap_or(a + 1);
+        out.push(path[next]);
+        a = next;
+    }
+    out
+}
+
+/// Cuts long legs into pieces and nudges the cuts sideways a little where that
+/// costs next to nothing (flat, dry ground), so long straights become lazy bends.
+fn meander(grid: &HeightGrid, way: &mut Vec<Vec2>, dry: f32) {
+    let seed = super::terrain_seed() ^ 0x6d65_616e;
+    let mut out = vec![way[0]];
+    for w in way.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let len = a.distance(b);
+        let n = (len / MEANDER_PIECE).round() as usize;
+        if n >= 2 {
+            let dir = (b - a) / len;
+            let side = Vec2::new(-dir.y, dir.x) * (len / n as f32) * MEANDER;
+            let cuts: Vec<Vec2> = (1..n)
+                .map(|k| {
+                    let p = a.lerp(b, k as f32 / n as f32);
+                    p + side * super::hash2(p.x as i32, p.y as i32, seed).x
+                })
+                .collect();
+            // keep the bends only if the leg stays as cheap (try half as wide first)
+            let budget = leg_cost(grid, a, b, dry) * 1.05;
+            let cost = |scale: f32| {
+                let pts: Vec<Vec2> = cuts.iter().enumerate().map(|(k, &c)| {
+                    let straight = a.lerp(b, (k + 1) as f32 / n as f32);
+                    straight + (c - straight) * scale
+                }).collect();
+                let mut c = 0.0;
+                let mut prev = a;
+                for &p in pts.iter().chain(std::iter::once(&b)) {
+                    c += leg_cost(grid, prev, p, dry);
+                    prev = p;
+                }
+                (c <= budget).then_some(pts)
+            };
+            if let Some(pts) = cost(1.0).or_else(|| cost(0.5)) {
+                out.extend(&pts[..]);
+            } else {
+                out.extend((1..n).map(|k| a.lerp(b, k as f32 / n as f32)));
+            }
+        }
+        out.push(b);
+    }
+    *way = out;
+}
+
+/// Relaxes the centreline toward its neighbours where the ground is gentle,
+/// which widens tight bends there; switchbacks on steep ground stay put. The ends
+/// are fixed, and no point is moved into water.
+fn ease(grid: &HeightGrid, line: &mut [Vec2], dry: f32) {
+    let n = line.len();
+    if n < 3 {
+        return;
+    }
+    let d = 4.0 * grid.spacing;
+    let give: Vec<f32> = line
+        .iter()
+        .map(|p| {
+            let dx = grid.sample_clamped(p.x + d, p.y) - grid.sample_clamped(p.x - d, p.y);
+            let dz = grid.sample_clamped(p.x, p.y + d) - grid.sample_clamped(p.x, p.y - d);
+            let slope = Vec2::new(dx, dz).length() / (2.0 * d);
+            // (switchbacks only happen where the ground is steeper than a road climbs)
+            1.0 - smoothstep(0.08, 0.18, slope)
+        })
+        .collect();
+    // repeated box averages over ±EASE_REACH points (via prefix sums): a blur
+    // about a quarter of a kilometre wide where the ground is gentle
+    let r = EASE_REACH;
+    let mut sum = vec![Vec2::ZERO; n + 1];
+    for _ in 0..EASE_PASSES {
+        for k in 0..n {
+            sum[k + 1] = sum[k] + line[k];
+        }
+        for k in 1..n - 1 {
+            let (lo, hi) = (k.saturating_sub(r), (k + r).min(n - 1));
+            let avg = (sum[hi + 1] - sum[lo]) / (hi - lo + 1) as f32;
+            let p = line[k] + (avg - line[k]) * give[k];
+            if grid.sample_clamped(p.x, p.y) >= dry {
+                line[k] = p;
+            }
+        }
+    }
+}
+
+/// Chaikin corner cutting (converging on a quadratic B-spline through the
+/// waypoints' legs), resampled to even spacing. Each bend is spread over half of
+/// each leg either side of it: sweeping where the legs are long (the plains),
+/// tight hairpins where they're short, and the lattice's 64 m jags rounded off.
+fn spline(way: &[Vec2]) -> Vec<Vec2> {
+    let mut pts = way.to_vec();
+    for _ in 0..5 {
         if pts.len() < 3 {
             break;
         }
@@ -296,12 +513,19 @@ fn smooth(path: &[Vec2]) -> Vec<Vec2> {
         next.push(*pts.last().unwrap());
         pts = next;
     }
-    // resample
+    resample(&pts)
+}
+
+/// Points `POINT_SPACING` apart along a polyline (keeping both ends).
+fn resample(pts: &[Vec2]) -> Vec<Vec2> {
     let mut out = vec![pts[0]];
     let mut carry = 0.0;
     for w in pts.windows(2) {
         let seg = w[1] - w[0];
         let len = seg.length();
+        if len < 1e-6 {
+            continue;
+        }
         let mut t = POINT_SPACING - carry;
         while t <= len {
             out.push(w[0] + seg * (t / len));
@@ -309,8 +533,9 @@ fn smooth(path: &[Vec2]) -> Vec<Vec2> {
         }
         carry = len - (t - POINT_SPACING);
     }
-    if out.last().unwrap().distance(*pts.last().unwrap()) > 1.0 {
-        out.push(*pts.last().unwrap());
+    let end = *pts.last().unwrap();
+    if out.last().unwrap().distance(end) > 1.0 {
+        out.push(end);
     }
     out
 }
@@ -409,4 +634,44 @@ pub(super) fn road_mesh(road: &Road, surface: Option<&HeightGrid>) -> Mesh {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; count])
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
         .with_inserted_indices(Indices::U32(indices))
+}
+
+/// Dev: `FLIGHT_SIM_ROAD_PLOT=/abs/out.ppm` writes a plan view of the near grid
+/// (hillshade, water, roads in red) at 16 m per pixel after the roads are built.
+fn plot(grid: &HeightGrid, roads: &[Road]) {
+    let Ok(path) = std::env::var("FLIGHT_SIM_ROAD_PLOT") else { return };
+    let px = 16.0;
+    let size = ((grid.n - 1) as f32 * grid.spacing / px) as usize;
+    let origin = grid.origin;
+    let water = super::biome::params().water.as_ref().map(|w| w.level);
+    let mut img = vec![0u8; size * size * 3];
+    for y in 0..size {
+        for x in 0..size {
+            let (wx, wz) = (origin.x + x as f32 * px, origin.y + y as f32 * px);
+            let h = grid.sample_clamped(wx, wz);
+            let (hx, hz) = (grid.sample_clamped(wx + px, wz), grid.sample_clamped(wx, wz + px));
+            let n = Vec3::new(h - hx, px, h - hz).normalize();
+            let shade = n.dot(Vec3::new(-0.5, 0.7, -0.5).normalize()).clamp(0.0, 1.0);
+            let base = 60.0 + 160.0 * shade + (h / 2_000.0).clamp(0.0, 1.0) * 35.0;
+            let c = if water.is_some_and(|l| h <= l + 0.5) { [40.0, 70.0, 140.0] } else { [base; 3] };
+            img[(y * size + x) * 3..][..3].copy_from_slice(&c.map(|v| v.min(255.0) as u8));
+        }
+    }
+    for road in roads {
+        for w in road.windows(2) {
+            let steps = (w[0].xz().distance(w[1].xz()) / (px * 0.5)).ceil().max(1.0) as usize;
+            for s in 0..=steps {
+                let p = w[0].xz().lerp(w[1].xz(), s as f32 / steps as f32);
+                let (x, y) = (((p.x - origin.x) / px) as isize, ((p.y - origin.y) / px) as isize);
+                if (0..size as isize).contains(&x) && (0..size as isize).contains(&y) {
+                    img[(y as usize * size + x as usize) * 3..][..3].copy_from_slice(&[230, 30, 30]);
+                }
+            }
+        }
+    }
+    let mut out = format!("P6\n{size} {size}\n255\n").into_bytes();
+    out.extend_from_slice(&img);
+    if let Err(e) = std::fs::write(&path, out) {
+        warn!("road plot: {e}");
+    }
 }
