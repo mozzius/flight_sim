@@ -1279,7 +1279,7 @@ impl Trail {
     /// (lifetime, start width, end width, opacity, dissolve start, albedo)
     fn style(&self) -> (f32, f32, f32, f32, f32, f32) {
         match self.kind {
-            RibbonKind::Vortex => (0.9, 0.2, 0.8, 0.5, 0.15, 0.97),
+            RibbonKind::Vortex => (3.0, 0.2, 1.6, 0.5, 0.15, 0.97),
             RibbonKind::Contrail => (16.0, 0.6, 9.0, 0.8, 0.25, 0.97),
         }
     }
