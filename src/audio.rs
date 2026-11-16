@@ -306,29 +306,34 @@ fn synth_hit() -> Vec<f32> {
     finish(s, 0.8, None)
 }
 
-/// Flare: "shunk", a cartridge punched out of the dispenser. A short soft
-/// "sh" of gas, then the clunk of the breech: a damped low knock with a
-/// little metal ring.
+/// Flare: a low whoosh of gas sweeping down into the dull clunk of the
+/// cartridge leaving the dispenser, then a softer whoosh as it falls away.
 fn synth_flare() -> Vec<f32> {
     let mut rng = Rng(0xf1a4_e000);
-    let mut sh = BandPass::new(2_600.0, 1.0);
-    // keep the "sh" smooth, not static
-    let mut sh_soft = LowPass::new(4_000.0);
-    let mut knock_noise = LowPass::new(900.0);
-    const CLUNK: f32 = 0.045;
-    let s = (0..samples(0.45))
+    let mut rush = BandPass::new(1_100.0, 1.2);
+    let mut rush_soft = LowPass::new(1_800.0);
+    let mut tail = BandPass::new(600.0, 1.0);
+    let mut tail_soft = LowPass::new(1_200.0);
+    let mut knock_noise = LowPass::new(400.0);
+    const CLUNK: f32 = 0.09;
+    let s = (0..samples(0.7))
         .map(|i| {
             let t = t_of(i);
-            // sh: swells in over ~25 ms, cut off by the clunk
-            let sh_env = (t / 0.025).min(1.0).powi(2) * (1.0 - ((t - 0.035) / 0.02).clamp(0.0, 1.0));
-            let hiss = sh_soft.run(sh.run(rng.next())) * sh_env;
-            // unk: the knock
+            // whoosh in: swells over ~70 ms, sweeping down into the clunk
+            rush.set(1_100.0 - 500.0 * (t / CLUNK).min(1.0));
+            let rush_env = (t / 0.07).min(1.0).powi(2) * (1.0 - ((t - CLUNK) / 0.03).clamp(0.0, 1.0));
+            let whoosh_in = rush_soft.run(rush.run(rng.next())) * rush_env;
+            // the clunk: low and dull, barely any ring
             let k = (t - CLUNK).max(0.0);
             let on = if t >= CLUNK { 1.0 } else { 0.0 };
-            let body = ((k * TAU * 210.0).sin() + 0.5 * (k * TAU * 140.0).sin()) * (-k * 28.0).exp();
-            let ring = ((k * TAU * 1_350.0).sin() * 0.6 + (k * TAU * 2_050.0).sin() * 0.4) * (-k * 45.0).exp();
-            let impact = knock_noise.run(rng.next()) * (-k * 120.0).exp();
-            hiss * 0.9 + on * (body * 1.0 + ring * 0.3 + impact * 2.5)
+            let body = ((k * TAU * 110.0).sin() + 0.6 * (k * TAU * 70.0).sin()) * (-k * 22.0).exp();
+            let ring = (k * TAU * 620.0).sin() * (-k * 50.0).exp();
+            let impact = knock_noise.run(rng.next()) * (-k * 90.0).exp();
+            // whoosh out: falling away behind
+            tail.set(300.0 + 350.0 * (-k * 4.0).exp());
+            let tail_env = (k / 0.04).min(1.0) * (-k * 6.0).exp();
+            let whoosh_out = tail_soft.run(tail.run(rng.next())) * tail_env;
+            whoosh_in * 1.3 + on * (body * 1.0 + ring * 0.12 + impact * 3.0 + whoosh_out * 1.4)
         })
         .collect();
     finish(s, 0.9, None)
