@@ -424,6 +424,7 @@ fn autopilot_player(
 /// - `engines` / `dry`: afterburner / full dry power only
 /// - `missile`: fires a missile
 /// - `vapour`: a hard pull
+/// - `mach`: held at Mach 0.96 (the shock collar)
 /// - `damage`: the player is badly damaged from the start
 /// - `burning`: the player is shot down
 /// - `gun`: holds the trigger
@@ -494,7 +495,7 @@ fn fx_test_explosion(
     time: Res<Time<Real>>,
     shot: Option<Res<AutoScreenshot>>,
     terrain: Res<crate::world::Terrain>,
-    mut player: Query<(&mut Transform, &crate::flight::FlightState, &mut crate::game::Health), With<crate::game::Player>>,
+    mut player: Query<(&mut Transform, &mut crate::flight::FlightState, &mut crate::game::Health), With<crate::game::Player>>,
     mut explosions: MessageWriter<crate::game::Explosion>,
     mut done: Local<bool>,
     mut stress_count: Local<u32>,
@@ -508,6 +509,12 @@ fn fx_test_explosion(
     {
         t.translation.y += 5_000.0;
         *lifted = true;
+    }
+    // `mach`: held just under Mach 1, where the shock collar forms
+    if mode == "mach"
+        && let Ok((t, mut state, _)) = player.single_mut()
+    {
+        state.velocity = t.forward() * crate::flight::SPEED_OF_SOUND * 0.96;
     }
     if mode == "damage" {
         for (_, _, mut health) in &mut player {

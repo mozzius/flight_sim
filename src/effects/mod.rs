@@ -481,29 +481,38 @@ fn aircraft_fx(
             let cone = smoothstep(0.9, 0.97, state.mach)
                 * (1.0 - smoothstep(1.03, 1.15, state.mach))
                 * humidity;
-            let mut n = cone * 320.0 * dt;
+            // a thin bell-shaped shell round the airframe at the wing's widest
+            // point: it fades in from the front and ends in a hard edge at the
+            // shock, flaring aft toward the wingtips, and flickers as the
+            // shock wanders
+            let flicker = plume::turbulence(t * 0.6, fx.seed + 11.0);
+            let c = (cone * (0.6 + 0.4 * (flicker - 0.8) / 0.4)).clamp(0.0, 1.0);
+            let mut n = c * 700.0 * dt;
             while n > 0.0 {
                 if n < 1.0 && rng.random::<f32>() > n {
                     break;
                 }
                 n -= 1.0;
                 let a = rng.random_range(0.0..std::f32::consts::TAU);
-                let r = rng.random_range(1.2..4.8);
-                let z = rng.random_range(-1.0..1.8) + r * 0.35;
-                let p = Vec3::new(a.cos() * r * 1.4, a.sin() * r * 0.75 + 0.4, z);
+                let r = 1.6 + 4.4 * rng.random::<f32>().sqrt();
+                let edge = 1.4 + r * 0.4;
+                let z = edge - 3.0 * rng.random::<f32>().powi(2);
+                let p = Vec3::new(a.cos() * r * 1.2, a.sin() * r * 0.7 + 0.4, z);
                 particles.add(
                     Particle {
-                        vel: Vec3::new(0.0, 0.0, 10.0),
-                        life: rng.random_range(0.08..0.16),
-                        size: (2.0, 3.4),
-                        albedo: Vec3::splat(0.97),
-                        opacity: 0.3 * cone,
-                        soft: 0.2,
+                        vel: Vec3::new(a.cos() * 2.0, a.sin() * 1.2, rng.random_range(18.0..32.0)),
+                        life: rng.random_range(0.07..0.13),
+                        size: (rng.random_range(2.2..3.0), rng.random_range(3.0..4.2)),
+                        stretch: 0.04,
+                        albedo: Vec3::splat(rng.random_range(1.0..1.1)),
+                        opacity: 0.22 * (0.4 + 0.6 * c),
+                        soft: 0.3,
                         drag: 0.0,
-                        fade_in: 0.03,
-                        dissolve: 0.2,
+                        wind: 0.0,
+                        fade_in: 0.02,
+                        dissolve: 0.3,
                         frame: Some(entity),
-                        ..Particle::puff(p)
+                        ..Particle::vapour(p)
                     },
                     0.6,
                 );

@@ -17,7 +17,7 @@ use crate::world::Terrain;
 pub const PHYSICS_HZ: f64 = 60.0;
 pub const GRAVITY: f32 = 9.81;
 const SEA_LEVEL_DENSITY: f32 = 1.225;
-const SPEED_OF_SOUND: f32 = 340.0;
+pub const SPEED_OF_SOUND: f32 = 340.0;
 
 pub struct FlightPlugin;
 
