@@ -15,6 +15,20 @@ pub fn server_url() -> String {
 
 /// Whether the menu offers multiplayer at all: always (signed out, it offers
 /// SIGN IN).
+/// Whether a stored sign-in has been restored (or found missing), so
+/// signed out means signed out. Natively that's at launch; the web page sets
+/// `FLIGHT_SIM_AUTH_SETTLED` once `web/auth.js` is ready.
+pub fn settled() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::environment::setting("FLIGHT_SIM_AUTH_SETTLED").is_some()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        true
+    }
+}
+
 pub fn available() -> bool {
     true
 }

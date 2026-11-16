@@ -892,6 +892,29 @@ pub fn spawn_point() -> (Vec3, Vec3) {
     (pos, heading)
 }
 
+/// A room's shareable link: this page with `?join=CODE` on the web, the
+/// public site natively.
+pub fn room_link(code: &str) -> String {
+    #[cfg(target_arch = "wasm32")]
+    let origin = js_sys::Reflect::get(&js_sys::global(), &"location".into())
+        .and_then(|l| js_sys::Reflect::get(&l, &"origin".into()))
+        .ok()
+        .and_then(|o| o.as_string())
+        .unwrap_or_else(|| SITE.into());
+    #[cfg(not(target_arch = "wasm32"))]
+    let origin = SITE;
+    format!("{origin}/?join={code}")
+}
+
+const SITE: &str = "https://flight.mozzius.dev";
+
+/// The join link's been followed: the web page stops carrying it (across a
+/// sign-in redirect, `web/index.html`).
+pub fn join_link_taken() {
+    #[cfg(target_arch = "wasm32")]
+    let _ = js_sys::Reflect::set(&js_sys::global(), &"FLIGHT_SIM_JOIN".into(), &"".into());
+}
+
 pub enum DevAuto {
     Create(Option<String>),
     Join(String),

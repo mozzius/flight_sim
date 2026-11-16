@@ -48,7 +48,7 @@ impl GameMode {
     /// screenshot runs default to endless).
     pub fn from_settings() -> Option<Self> {
         // (multiplayer dev runs start from the menu, see `net`)
-        if crate::net::dev_auto().is_some() {
+        if crate::net::dev_auto().is_some() || crate::menu::join_link_code().is_some() {
             return None;
         }
         match crate::environment::setting("FLIGHT_SIM_MODE").map(|s| s.to_ascii_lowercase()).as_deref() {

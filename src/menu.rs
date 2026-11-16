@@ -15,7 +15,12 @@
 //!
 //! In a multiplayer room that hasn't started, the menu is the lobby: the
 //! room code, who's in (and who hosts), the friends list, a thin bar for the
-//! map baking meanwhile, START (the host) and LEAVE (Esc / (B) too).
+//! map baking meanwhile, START (the host), COPY LINK (`?join=CODE`) and
+//! LEAVE (Esc / (B) too).
+//!
+//! A join link (`?join=CODE` on the web, `FLIGHT_SIM_JOIN` natively) skips
+//! the mode menu: it opens JOIN GAME with the code and joins at once
+//! (signing in first if need be); NO ROOM / FULL show there if it fails.
 //!
 //! Waiting in the quick-play queue, the menu is SEARCHING (animated dots),
 //! the online count, the friends list and CANCEL (Esc / (B) too), plus
@@ -48,13 +53,15 @@ impl Plugin for MenuPlugin {
         app.init_resource::<Pressed>()
             .init_resource::<Focus>()
             .init_resource::<JoinCode>()
+            .init_resource::<CopiedAt>()
+            .insert_resource(JoinLink::from_settings())
             .insert_resource(MenuPicks(Picks::from_settings()))
             .insert_resource(panel)
             .add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), despawn_menu)
             .add_systems(
                 Update,
-                (lobby_focus, navigate, crate::leaderboard::handle_pressed, crate::tutorial::handle_pressed, handle_pressed, style_buttons, layout_menu, compact_pickers, layout_lobby, layout_queue, layout_account)
+                (follow_join_link, lobby_focus, navigate, crate::leaderboard::handle_pressed, copy_link, crate::tutorial::handle_pressed, handle_pressed, style_buttons, layout_menu, compact_pickers, layout_lobby, layout_queue, layout_account)
                     .chain()
                     .in_set(MenuSystems),
             )
@@ -122,8 +129,9 @@ pub enum UiAction {
     /// The card's JOIN / ACCEPT and ✕ (an invite, or a join request when we host).
     AcceptInvite,
     DismissInvite,
-    /// The lobby's START (the host) and LEAVE.
+    /// The lobby's START (the host), COPY LINK and LEAVE.
     StartRoom,
+    CopyLink,
     Leave,
     /// The quick-play queue's CANCEL and PLAY SOLO.
     CancelQueue,
@@ -194,6 +202,34 @@ impl Panel {
 /// The room code typed so far.
 #[derive(Resource, Default)]
 struct JoinCode(String);
+
+/// A join link's room code, until we've joined it.
+#[derive(Resource, Default)]
+struct JoinLink(Option<String>);
+
+impl JoinLink {
+    fn from_settings() -> Self {
+        Self(join_link_code())
+    }
+}
+
+/// The join link's code (`FLIGHT_SIM_JOIN`, `?join=` on the web), if it's a valid one.
+pub fn join_link_code() -> Option<String> {
+    use crate::net::protocol::{CODE_ALPHABET, CODE_LEN, normalize_code};
+    let raw = crate::environment::setting("FLIGHT_SIM_JOIN")?;
+    let code = normalize_code(&raw);
+    let ok = code.len() == CODE_LEN && code.bytes().all(|b| CODE_ALPHABET.contains(&b));
+    if !ok {
+        warn!("bad join link {raw:?}");
+    }
+    ok.then_some(code)
+}
+
+/// When COPY LINK was last pressed (it says COPIED for a moment).
+#[derive(Resource, Default)]
+struct CopiedAt(Option<f64>);
+
+const COPIED_SECS: f64 = 1.5;
 
 // Focus orders and rows on the mode menu (up / down go by row). Home is
 // orders / rows 0-5, the multiplayer page 6-8; each page's BACK comes last,
@@ -673,7 +709,8 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                         col.spawn((LobbyStart, column(0.0))).with_children(|w| {
                             button(w, &font, "START", Screen::Modes, ORDER_LOBBY, ROW_LOBBY, UiAction::StartRoom);
                         });
-                        quiet_button(col, &font, "LEAVE", Screen::Modes, ORDER_LOBBY + 1, ROW_LOBBY + 1, UiAction::Leave);
+                        quiet_button(col, &font, "COPY LINK", Screen::Modes, ORDER_LOBBY + 1, ROW_LOBBY + 1, UiAction::CopyLink);
+                        quiet_button(col, &font, "LEAVE", Screen::Modes, ORDER_LOBBY + 2, ROW_LOBBY + 2, UiAction::Leave);
                     });
                 });
                 main.spawn((
@@ -1020,6 +1057,8 @@ fn handle_pressed(
             }
             UiAction::DismissInvite => net.dismiss_invite(),
             UiAction::StartRoom => net.start_game(),
+            // (taken by `copy_link` first)
+            UiAction::CopyLink => {}
             UiAction::Leave => net.leave(),
             UiAction::CancelQueue => net.cancel_queue(),
             UiAction::PlaySolo => {
@@ -1250,13 +1289,86 @@ fn layout_menu(
     }
 }
 
+/// A join link: JOIN GAME with its code, joining once we're signed in (the
+/// sign-in prompt first if we're not).
+#[allow(clippy::too_many_arguments)]
+fn follow_join_link(
+    mut link: ResMut<JoinLink>,
+    mut net: ResMut<crate::net::Net>,
+    mut panel: ResMut<Panel>,
+    mut focus: ResMut<Focus>,
+    mut code: ResMut<JoinCode>,
+    mut sign_in: ResMut<crate::signin::SignInPrompt>,
+    mut asked: Local<bool>,
+) {
+    let Some(c) = link.0.clone() else { return };
+    // (once the menu has the focus: its first frame resets it)
+    if focus.screen != Some(Screen::Modes) {
+        return;
+    }
+    if crate::identity::current_user().is_some() {
+        info!("multiplayer: following a join link to {c}");
+        net.join(&c);
+        *panel = Panel::Join;
+        code.0 = c;
+        focus.order = ORDER_BACK;
+        link.0 = None;
+        crate::net::join_link_taken();
+    } else if !*asked && crate::net::auth::settled() {
+        *asked = true;
+        *panel = Panel::Multi;
+        focus.order = 6;
+        crate::signin::sign_in(&mut sign_in);
+    }
+}
+
+/// COPY LINK: the room's `?join=` link to the clipboard, and COPIED for a moment.
+fn copy_link(
+    mut pressed: ResMut<Pressed>,
+    net: Res<crate::net::Net>,
+    time: Res<Time<Real>>,
+    mut clipboard: ResMut<bevy::clipboard::Clipboard>,
+    mut copied: ResMut<CopiedAt>,
+    buttons: Query<(&UiButton, &Children)>,
+    mut labels: Query<&mut Text, With<ButtonLabel>>,
+) {
+    let now = time.elapsed_secs_f64();
+    let before = pressed.0.len();
+    pressed.0.retain(|(a, _)| *a != UiAction::CopyLink);
+    if pressed.0.len() != before
+        && let Some(c) = net.room_code()
+    {
+        let url = crate::net::room_link(c);
+        match clipboard.set_text(url.clone()) {
+            Ok(()) => {
+                info!("copied {url}");
+                copied.0 = Some(now);
+            }
+            Err(e) => warn!("copy link: {e:?}"),
+        }
+    }
+    let label = if copied.0.is_some_and(|at| now - at < COPIED_SECS) { "COPIED" } else { "COPY LINK" };
+    for (b, children) in &buttons {
+        if b.action != UiAction::CopyLink {
+            continue;
+        }
+        for child in children {
+            if let Ok(mut t) = labels.get_mut(*child)
+                && t.0 != label
+            {
+                t.0 = label.into();
+            }
+        }
+    }
+}
+
 /// Into the lobby: the multiplayer panel underneath (for when we leave), and
 /// the focus on START (the host) or LEAVE.
 fn lobby_focus(net: Res<crate::net::Net>, mut was: Local<(bool, bool)>, mut panel: ResMut<Panel>, mut focus: ResMut<Focus>) {
     let lobby = net.in_lobby();
     if lobby && !was.0 {
         *panel = Panel::Multi;
-        focus.order = if net.is_host() { ORDER_LOBBY } else { ORDER_LOBBY + 1 };
+        focus.order = if net.is_host() { ORDER_LOBBY } else { ORDER_LOBBY + 2 };
     }
     // (the queue: CANCEL; PLAY SOLO shows above it later)
     let queued = net.queued();
