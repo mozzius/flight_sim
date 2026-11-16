@@ -751,8 +751,11 @@ fn configure_depth_usage(mut cameras: Query<&mut Camera3d, With<CloudsView>>) {
 
 #[derive(Clone, Copy, ShaderType)]
 struct CloudsUniform {
-    world_from_clip: Mat4,
-    prev_clip_from_world: Mat4,
+    /// Clip space to positions relative to the camera (no translation, so
+    /// rays stay precise far from the origin).
+    rel_from_clip: Mat4,
+    /// Camera-relative positions (this frame's camera) to last frame's clip.
+    prev_clip_from_rel: Mat4,
     camera_pos: Vec3,
     time: f32,
     sun_dir: Vec3,
@@ -1173,7 +1176,10 @@ struct CloudsViewHistory {
     frame: u32,
     valid: bool,
     low_size: UVec2,
-    prev_clip_from_world: Mat4,
+    /// Last frame's clip from positions relative to its camera, and where
+    /// that camera was.
+    prev_clip_from_rel: Mat4,
+    prev_camera_pos: Vec3,
 }
 
 impl CloudsViewHistory {
@@ -1378,21 +1384,24 @@ fn prepare_clouds_uniforms(
     >,
 ) {
     for (entity, view, camera, textures, mut history, existing) in &mut views {
-        let world_from_view = view.world_from_view.to_matrix();
-        let clip_from_world = view
-            .clip_from_world
-            .unwrap_or_else(|| view.clip_from_view * world_from_view.inverse());
-        let prev_clip_from_world = if history.valid {
-            history.prev_clip_from_world
+        // camera-relative: building rays from world positions 20 km out
+        // loses so much float precision that the clouds shake every frame
+        let mut view_rotation = view.world_from_view.to_matrix();
+        view_rotation.w_axis = Vec4::W;
+        let clip_from_rel = view.clip_from_view * view_rotation.inverse();
+        let camera_pos = view.world_from_view.translation();
+        let prev_clip_from_rel = if history.valid {
+            history.prev_clip_from_rel * Mat4::from_translation(camera_pos - history.prev_camera_pos)
         } else {
-            clip_from_world
+            clip_from_rel
         };
-        history.prev_clip_from_world = clip_from_world;
+        history.prev_clip_from_rel = clip_from_rel;
+        history.prev_camera_pos = camera_pos;
         let s = &*settings;
         let value = CloudsUniform {
-            world_from_clip: clip_from_world.inverse(),
-            prev_clip_from_world,
-            camera_pos: view.world_from_view.translation(),
+            rel_from_clip: clip_from_rel.inverse(),
+            prev_clip_from_rel,
+            camera_pos,
             time: sun.time,
             sun_dir: sun.dir_to_light,
             exposure: camera.exposure,

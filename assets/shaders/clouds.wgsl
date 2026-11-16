@@ -13,8 +13,9 @@
 //    item of the transparent pass so nearer effects still draw over it.
 
 struct Clouds {
-    world_from_clip: mat4x4<f32>,
-    prev_clip_from_world: mat4x4<f32>,
+    // camera-relative (precise far from the origin)
+    rel_from_clip: mat4x4<f32>,
+    prev_clip_from_rel: mat4x4<f32>,
     camera_pos: vec3<f32>,
     time: f32,
     sun_dir: vec3<f32>,
@@ -104,8 +105,8 @@ fn ndc_of(uv: vec2<f32>) -> vec2<f32> {
 }
 
 fn ray_dir(uv: vec2<f32>) -> vec3<f32> {
-    let p = u.world_from_clip * vec4(ndc_of(uv), 0.5, 1.0);
-    return normalize(p.xyz / p.w - u.camera_pos);
+    let p = u.rel_from_clip * vec4(ndc_of(uv), 0.5, 1.0);
+    return normalize(p.xyz / p.w);
 }
 
 /// Distance along the view ray to the scene, in metres (huge when the depth
@@ -114,8 +115,8 @@ fn depth_to_dist(uv: vec2<f32>, depth: f32) -> f32 {
     if depth <= 0.0 {
         return FAR_KM * 1000.0;
     }
-    let p = u.world_from_clip * vec4(ndc_of(uv), depth, 1.0);
-    return min(length(p.xyz / p.w - u.camera_pos), FAR_KM * 1000.0);
+    let p = u.rel_from_clip * vec4(ndc_of(uv), depth, 1.0);
+    return min(length(p.xyz / p.w), FAR_KM * 1000.0);
 }
 
 fn load_dist(px: vec2<i32>) -> f32 {
@@ -627,8 +628,8 @@ fn fs_resolve(in: VsOut) -> ResolveOut {
     // where was this bit of cloud last frame? (through the scene where
     // there's no cloud: no cloud has a mean distance of FAR_KM)
     let rd = ray_dir(in.uv);
-    let world = u.camera_pos + rd * (min(cur_data.y, cur_data.x) * 1000.0);
-    let prev_clip = u.prev_clip_from_world * vec4(world, 1.0);
+    let rel = rd * (min(cur_data.y, cur_data.x) * 1000.0);
+    let prev_clip = u.prev_clip_from_rel * vec4(rel, 1.0);
     if prev_clip.w <= 0.0 {
         return out;
     }

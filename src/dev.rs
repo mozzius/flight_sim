@@ -425,6 +425,7 @@ fn autopilot_player(
 /// - `missile`: fires a missile
 /// - `vapour`: a hard pull
 /// - `mach`: held at Mach 0.96 (the shock collar)
+/// - `far`: the player starts 40 km out (float precision far from the origin)
 /// - `damage`: the player is badly damaged from the start
 /// - `burning`: the player is shot down
 /// - `gun`: holds the trigger
@@ -503,6 +504,15 @@ fn fx_test_explosion(
 ) {
     let Some(shot) = shot else { return };
     let mode = fx_mode();
+    // `far`: the player starts 40 km out, where float precision bites
+    if mode == "far"
+        && !*lifted
+        && let Ok((mut t, _, _)) = player.single_mut()
+    {
+        t.translation.x += 40_000.0;
+        t.translation.z += 40_000.0;
+        *lifted = true;
+    }
     if mode == "contrail"
         && !*lifted
         && let Ok((mut t, _, _)) = player.single_mut()
