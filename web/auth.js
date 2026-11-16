@@ -136,6 +136,8 @@ function hidePrompt() {
 async function signIn(handle) {
   if (!available) throw new Error("sign-in isn't available on this host");
   if (handle === undefined) return showPrompt();
+  // a join link the game hasn't followed yet survives the redirects (web/index.html)
+  try { if (window.FLIGHT_SIM_JOIN) sessionStorage.setItem("flight_sim_join", window.FLIGHT_SIM_JOIN); } catch {}
   // the loopback client redirects to 127.0.0.1, and sessions are per origin: sign in from there
   if (location.hostname === "localhost") {
     location.href = location.href.replace("//localhost", "//127.0.0.1");

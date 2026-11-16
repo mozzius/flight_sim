@@ -263,6 +263,20 @@
       window.FLIGHT_SIM_TIME = q.get("time") || "";
       // ?mode=endless|challenge skips the mode menu (src/modes.rs)
       window.FLIGHT_SIM_MODE = q.get("mode") || "";
+      // ?join=CODE (a room's COPY LINK) skips the mode menu into that room
+      // (src/menu.rs). Kept for the tab in sessionStorage, across a sign-in
+      // redirect (web/auth.js), until the game takes it; off the URL meanwhile,
+      // so a reload after leaving doesn't rejoin.
+      let join = q.get("join") || "";
+      try {
+        join = join || sessionStorage.getItem("flight_sim_join") || "";
+        sessionStorage.removeItem("flight_sim_join");
+      } catch {}
+      window.FLIGHT_SIM_JOIN = join;
+      if (q.has("join")) {
+        q.delete("join");
+        history.replaceState(null, "", location.pathname + (q.size ? "?" + q : "") + location.hash);
+      }
       // ?server=ws://localhost:8080 points multiplayer at another server (src/net/auth.rs)
       window.FLIGHT_SIM_SERVER = q.get("server") || window.FLIGHT_SIM_SERVER || "";
     }
@@ -307,7 +321,9 @@
     // live, so a slow restore just shows up in the menu a moment later.
     const auth = import("./auth.js")
       .then(() => window.flightSimAuth.ready)
-      .catch((e) => console.warn("auth:", e));
+      .catch((e) => console.warn("auth:", e))
+      // signed out now means signed out (src/net/auth.rs settled)
+      .finally(() => { window.FLIGHT_SIM_AUTH_SETTLED = "1"; });
 
     const overlay = document.getElementById("overlay");
     const canvas = document.getElementById("bevy");
