@@ -3,7 +3,7 @@
 //! stop and dissolve within a few seconds.
 //!
 //! Each jet charges up a `carried` amount while [`CloudField`] says it is in
-//! cloud and spends it quickly in clear air, emitting many small, faint
+//! the dense part of a cloud and spends it quickly in clear air, emitting many small, faint
 //! vapour particles ([`Particle::vapour`]: outline-free, fog-shaded) along
 //! its path at a rate that falls with what's left and gusts at random, plus
 //! a few thicker clumps right at the exit. They are hidden behind (and
@@ -17,8 +17,19 @@ use rand::RngExt;
 use super::{particles::Particle, particles::Particles, rand_dir};
 use crate::{camera::MainCamera, clouds::CloudField, flight::FlightState, game::Player};
 
-/// `density_at` above this counts as being in cloud.
-const IN_CLOUD: f32 = 0.03;
+/// In the dense part of a cloud above this `density_at` (charging), out
+/// again (the wake starts) below `LEAVE`. `density_at` has no shape noise,
+/// so below ~0.1 it's the thin haze and fluff round a cloud, which looks
+/// like clear air: waiting for zero fired the plume seconds late.
+const ENTER: f32 = 0.12;
+const LEAVE: f32 = 0.08;
+/// Thick clouds: out below this fraction of the thickest density seen on
+/// the way through, back in above `REENTER` of it.
+const RELEASE: f32 = 0.4;
+const REENTER: f32 = 0.7;
+/// Time constant (s) the remembered peak fades over once out, so the next
+/// cloud is judged on its own.
+const PEAK_FADE: f32 = 2.5;
 /// Charge per second in cloud, plus this much more per unit density.
 const CHARGE: f32 = 1.2;
 const CHARGE_DENSE: f32 = 3.0;
@@ -46,6 +57,8 @@ pub struct Wake {
     /// where the wake point was last frame
     last: Option<Vec3>,
     in_cloud: bool,
+    /// thickest density seen in this cloud
+    peak: f32,
 }
 
 /// One wisp of torn cloud. `c` is the charge left (0..1): wisps shrink and
@@ -112,7 +125,18 @@ pub fn cloud_wake(
         let pos = gt.translation();
         let wake = wakes.entry(entity).or_default();
         let density = field.density_at(pos);
-        let in_cloud = density > IN_CLOUD;
+        let in_cloud = if wake.in_cloud {
+            density > LEAVE.max(wake.peak * RELEASE)
+        } else {
+            density > ENTER.max(wake.peak * REENTER)
+        };
+        if in_cloud {
+            wake.peak = wake.peak.max(density);
+        } else if density <= LEAVE {
+            wake.peak = 0.0;
+        } else {
+            wake.peak *= (-dt / PEAK_FADE).exp();
+        }
         if log && player && in_cloud != wake.in_cloud {
             info!(
                 "cloud wake: {} cloud at real t={:.2} pos={:.0} carried {:.2}",
