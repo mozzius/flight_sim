@@ -310,12 +310,14 @@ fn synth_hit() -> Vec<f32> {
 /// it lighting and falling away, and a crackle of burning magnesium.
 fn synth_flare() -> Vec<f32> {
     let mut rng = Rng(0xf1a4_e000);
-    let mut charge = LowPass::new(700.0);
-    let mut whoosh = BandPass::new(2_400.0, 0.9);
-    let mut fizz = BandPass::new(5_500.0, 1.2);
+    let mut charge = LowPass::new(500.0);
+    let mut whoosh = BandPass::new(1_400.0, 1.4);
+    // no hiss on top (white noise up there read as static)
+    let mut soften = LowPass::new(2_200.0);
+    let mut pops = BandPass::new(1_100.0, 2.0);
     let mut crackle = 0.0f32;
     let mut phase = 0.0f32;
-    let s = (0..samples(1.3))
+    let s = (0..samples(1.1))
         .map(|i| {
             let t = t_of(i);
             // thump: a pitch drop from 150 to 55 Hz
@@ -323,17 +325,17 @@ fn synth_flare() -> Vec<f32> {
             phase += f / SAMPLE_RATE as f32;
             let thump = (phase * TAU).sin() * (-t * 22.0).exp();
             let kick = charge.run(rng.next()) * (-t * 45.0).exp();
-            // whoosh: lights within ~20 ms, sweeps down as it falls behind
-            whoosh.set(900.0 + 1_500.0 * (-t * 2.5).exp());
-            let light = (t / 0.02).min(1.0) * (-t * 2.2).exp();
-            let burn = whoosh.run(rng.next()) * light + fizz.run(rng.next()) * light * 0.5;
-            // crackle: sparse sharp clicks, thinning out
-            if rng.next() > 1.0 - 0.0016 * (-t * 1.5).exp() {
+            // whoosh: lights within ~25 ms, sweeps down as it falls behind
+            whoosh.set(500.0 + 1_000.0 * (-t * 2.5).exp());
+            let light = (t / 0.025).min(1.0) * (-t * 3.0).exp();
+            let burn = soften.run(whoosh.run(rng.next())) * light;
+            // crackle: a few soft pops, thinning out
+            if rng.next() > 1.0 - 0.0008 * (-t * 2.0).exp() {
                 crackle = 1.0;
             }
-            crackle *= 0.86;
-            let click = crackle * rng.next();
-            thump * 1.3 + kick * 2.2 + burn * 0.9 + click * 0.5
+            crackle *= 0.97;
+            let pop = pops.run(crackle * rng.next());
+            thump * 1.4 + kick * 2.0 + burn * 1.2 + pop * 0.6
         })
         .collect();
     finish(s, 0.9, None)
