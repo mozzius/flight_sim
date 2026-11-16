@@ -2,7 +2,7 @@
 //! edge pulled out behind the exit point into soft wisps that drift to a
 //! stop and dissolve within a few seconds.
 //!
-//! Each jet charges up a `carried` amount while [`CloudField`] says it is in
+//! Each jet charges up a `carried` amount (and already plumes) while [`CloudField`] says it is in
 //! the dense part of a cloud and spends it quickly in clear air, emitting many small, faint
 //! vapour particles ([`Particle::vapour`]: outline-free, fog-shaded) along
 //! its path at a rate that falls with what's left and gusts at random, plus
@@ -47,6 +47,14 @@ const CLING: f64 = 0.45;
 /// Thick clumps of wisps left right at the exit point.
 const CLUMPS: usize = 3;
 const CLUMP_WISPS: usize = 6;
+/// Least light on wisps shed inside a cloud (see `sunlight`).
+const IN_CLOUD_LIGHT: f32 = 0.85;
+/// ...and on those shed in the open after leaving it.
+const OUT_LIGHT: f32 = 0.55;
+/// Inside, a thinner stream (rate and opacity): you're in fog already, and
+/// seconds of wisps clinging to the airframe pile up into a ball round it.
+const IN_CLOUD_RATE: f32 = 0.35;
+const IN_CLOUD_OPACITY: f32 = 0.45;
 /// Jets further than this from the camera don't emit (they still charge).
 const MAX_DISTANCE: f32 = 6_000.0;
 
@@ -174,24 +182,33 @@ pub fn cloud_wake(
         // the wake point, just behind the wings
         let tail = gt.transform_point(Vec3::new(0.0, 0.2, 4.0));
         let last = wake.last.replace(tail);
+        // it plumes all the way through the dense part (building up over the
+        // first half second or so), then tails off in clear air
         if in_cloud {
             wake.carried = (wake.carried + dt * (CHARGE + CHARGE_DENSE * density)).min(1.0);
-            continue;
         }
         if wake.carried < EMPTY {
-            wake.carried = 0.0;
+            if !in_cloud {
+                wake.carried = 0.0;
+            }
             wake.owed = 0.0;
             continue;
         }
         let c = wake.carried;
-        wake.carried *= (-dt / DRAIN).exp();
+        if !in_cloud {
+            wake.carried *= (-dt / DRAIN).exp();
+        }
         // far away, or teleported (respawn): nothing to see
         let Some(last) = last.filter(|l| l.distance(tail) < 200.0) else { continue };
         if cam.is_some_and(|cam| cam.distance(pos) > MAX_DISTANCE) {
             continue;
         }
         let rot = gt.rotation();
-        let light = sunlight(&field, pos, sun);
+        // inside, the fog all round is lit by light scattered through the
+        // cloud: wisps darkened by the sun's path read as a murky blob
+        // (out in the open on the shaded side it can be darker, but not so
+        // dark it turns murky next to the stream shed inside)
+        let light = sunlight(&field, pos, sun).max(if in_cloud { IN_CLOUD_LIGHT } else { OUT_LIGHT });
         if just_left && log && player {
             info!("cloud wake: sunlight {light:.2} (sun {sun:.2})");
         }
@@ -217,7 +234,9 @@ pub fn cloud_wake(
         // spread evenly over the path moved: by distance, not time, as the
         // transform can move in uneven steps (it clumped into beads)
         let moved = last.distance(tail);
-        wake.owed += rate * c.sqrt() * wake.gust * moved / state.velocity.length().max(50.0);
+        let thin = if in_cloud { IN_CLOUD_RATE } else { 1.0 };
+        wake.owed += rate * thin * c.sqrt() * wake.gust * moved / state.velocity.length().max(50.0);
+        let fade = if in_cloud { IN_CLOUD_OPACITY } else { 1.0 };
         while wake.owed >= 1.0 {
             wake.owed -= 1.0;
             let along = last.lerp(tail, rng.random::<f32>());
@@ -229,10 +248,14 @@ pub fn cloud_wake(
             if rng.random_bool(CLING) {
                 // off the wings and the back of the fuselage
                 let at = tail + rot * Vec3::new(rng.random_range(-6.5..6.5), rng.random_range(-0.6..1.2), rng.random_range(-7.0..1.0));
-                particles.add(streamer(&mut rng, at, state.velocity, c, scale, light), 0.5);
+                let mut p = streamer(&mut rng, at, state.velocity, c, scale, light);
+                p.opacity *= fade;
+                particles.add(p, 0.5);
                 continue;
             }
-            particles.add(wisp(&mut rng, along + rot * spread, state.velocity, c, scale, light), 0.5);
+            let mut p = wisp(&mut rng, along + rot * spread, state.velocity, c, scale, light);
+            p.opacity *= fade;
+            particles.add(p, 0.5);
         }
     }
 }
