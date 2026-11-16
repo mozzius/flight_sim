@@ -131,6 +131,12 @@ fn apply_environment(
         // the planet's atmosphere (centered below the origin by default)
         // (with more aerosol in haze and under cloud)
         commands.spawn((SunAndSky, Atmosphere::earth(scattering_mediums.add(look.scattering_medium()))));
+        let a = look.ambient_color;
+        commands.insert_resource(GlobalAmbientLight {
+            color: Color::srgb(a.x, a.y, a.z),
+            brightness: look.sky_fill,
+            ..default()
+        });
     } else {
         spawn_sky_dome(&look, &mut commands, &mut meshes, &mut materials);
     }

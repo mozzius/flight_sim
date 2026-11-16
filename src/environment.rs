@@ -473,6 +473,7 @@ impl Environment {
             // (the fallback has no sky light from the atmosphere, so keep a floor)
             ambient_brightness: 12_000.0 * sky_light.max(0.85) * if overcast { 0.7 } else { 1.0 },
             env_light: if overcast { 0.85 } else { 1.0 },
+            sky_fill: SKY_FILL * sky_light * if overcast { 0.5 } else { 1.0 },
             mie: match w {
                 Weather::Hazy => 30.0,
                 Weather::Overcast => 20.0,
@@ -486,6 +487,9 @@ impl Environment {
 }
 
 /// The derived numbers. See where each is used.
+/// Brightness of [`Look::sky_fill`] with a high sun on a clear day.
+const SKY_FILL: f32 = 20_000.0;
+
 #[derive(Clone, Debug)]
 pub struct Look {
     pub sun_dir: Vec3,
@@ -513,6 +517,10 @@ pub struct Look {
     pub sky_glow: Vec3,
     pub ambient_color: Vec3,
     pub ambient_brightness: f32,
+    /// Extra flat sky light with the atmosphere (`GlobalAmbientLight`): its
+    /// environment light alone left shaded ground and forest near black at
+    /// midday, and turning that up glazes glossy surfaces (the jets).
+    pub sky_fill: f32,
     /// `AtmosphereEnvironmentMapLight::intensity`
     pub env_light: f32,
     /// Multiplier on the atmosphere's aerosol (Mie) scattering.
