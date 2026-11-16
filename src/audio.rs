@@ -274,20 +274,55 @@ fn synth_launch() -> Vec<f32> {
 /// Explosion: sharp crack, a rolling low boom, and a sub-bass thump.
 fn synth_explosion(distant: bool) -> Vec<f32> {
     let mut rng = Rng(if distant { 0xfa12_0001 } else { 0xb00b_5000 });
-    let (mut low, mut mid) = (LowPass::new(if distant { 160.0 } else { 400.0 }), LowPass::new(2_500.0));
-    let length = if distant { 4.5 } else { 3.5 };
-    let s = (0..samples(length))
+    // deep roar: noise through two low-passes (darker than one)
+    let roar_cut = if distant { 110.0 } else { 220.0 };
+    let (mut roar_a, mut roar_b) = (LowPass::new(roar_cut), LowPass::new(roar_cut));
+    // the fireball's whoosh, and the crack of the blast front
+    let mut whoosh = BandPass::new(if distant { 300.0 } else { 650.0 }, 0.8);
+    let mut crack = BandPass::new(2_200.0, 0.7);
+    // slow random swells, so the roar rolls instead of hissing evenly
+    let mut swell = LowPass::new(6.0);
+    let mut pops = BandPass::new(900.0, 1.5);
+    let mut pop = 0.0f32;
+    let mut phase = 0.0f32;
+    let attack = if distant { 0.04 } else { 0.004 };
+    let length = if distant { 4.0 } else { 3.2 };
+    let mut s: Vec<f32> = (0..samples(length))
         .map(|i| {
             let t = t_of(i);
-            let n = rng.next();
-            // rumble with a slightly uneven decay
-            let env = (t / 0.01).min(1.0) * (-t * 1.3).exp() * (1.0 + 0.3 * (t * TAU * 3.0).sin());
-            let crack = if distant { 0.0 } else { (-t * 40.0).exp() * mid.run(n) };
-            let sub_f = 55.0 * (-t * 0.8).exp() + 22.0;
-            let sub = (t * TAU * sub_f).sin() * (-t * 2.5).exp();
-            low.run(n) * env * 3.0 + crack * 1.2 + sub * 0.9
+            let rise = (t / attack).min(1.0);
+            // thump: a pitch drop, driven into saturation for punch
+            let (f0, f1) = if distant { (60.0, 28.0) } else { (95.0, 34.0) };
+            phase += (f1 + (f0 - f1) * (-t * 9.0).exp()) / SAMPLE_RATE as f32;
+            let thump = ((phase * TAU).sin() * 2.5).tanh() * rise * (-t * if distant { 4.0 } else { 6.0 }).exp();
+            let roll = 1.0 + 4.0 * swell.run(rng.next());
+            let roar = roar_b.run(roar_a.run(rng.next())) * rise * (-t * if distant { 1.4 } else { 1.6 }).exp() * roll.max(0.2);
+            let fire = whoosh.run(rng.next()) * rise * (-t * 4.5).exp();
+            let blast = if distant { 0.0 } else { crack.run(rng.next()) * (-t * 55.0).exp() };
+            // debris: sparse pops, mostly in the first second and a half
+            if !distant && t > 0.12 && rng.next() > 1.0 - 0.0012 * (-t * 1.6).exp() {
+                pop = 1.0;
+            }
+            pop *= 0.985;
+            let debris = pops.run(pop * rng.next());
+            thump * 0.9 + roar * 11.0 + fire * 0.7 + blast * 1.6 + debris * 0.5
         })
         .collect();
+    if distant {
+        // echoes rolling back off the hills, duller each time
+        let dry = s.clone();
+        for (delay, gain, cut) in [(0.45, 0.5, 220.0), (1.1, 0.35, 160.0), (1.9, 0.22, 120.0)] {
+            let mut lp = LowPass::new(cut);
+            let off = samples(delay);
+            for (i, x) in dry.iter().enumerate() {
+                if let Some(o) = s.get_mut(i + off) {
+                    *o += lp.run(*x) * gain;
+                }
+            }
+        }
+    }
+    // a soft limiter glues the layers together
+    s.iter_mut().for_each(|x| *x = (*x * 1.5).tanh());
     finish(s, 0.95, None)
 }
 
@@ -871,5 +906,8 @@ mod tests {
             }
         }
         std::fs::write(format!("{dir}/flare.wav"), &*wav(&shots).bytes).unwrap();
+        // the kill boom: near, then far
+        let boom: Vec<f32> = synth_explosion(false).into_iter().chain(vec![0.0; samples(0.5)]).chain(synth_explosion(true)).collect();
+        std::fs::write(format!("{dir}/boom.wav"), &*wav(&boom).bytes).unwrap();
     }
 }
