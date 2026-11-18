@@ -465,11 +465,11 @@ impl Layout {
         let (left_x, right_x) = (Val::Px(w - x1), Val::Px(w - x1));
 
         let ammo_left = clear.buttons_right + 14.0;
-        // "GUN 600   MSL 4 [===  ]   FLR 4/4", smaller on a narrow phone so it fits before the throttle
-        let ammo_font = ((clear.throttle_left - 12.0 - ammo_left) / text_width(34, 1.0)).clamp(11.0, 15.0 * k.max(0.85));
+        // "F/A-18   GUN 600   MSL 4 [===  ]   FLR 4/4", smaller on a narrow phone so it fits before the throttle
+        let ammo_font = ((clear.throttle_left - 12.0 - ammo_left) / text_width(43, 1.0)).clamp(11.0, 15.0 * k.max(0.85));
         let health_bottom = safe.w + 10.0;
         let weapons_bottom = health_bottom + line(ammo_font) + 2.0;
-        let ammo_w = text_width(34, ammo_font);
+        let ammo_w = text_width(43, ammo_font);
         let panel_font = 14.0 * k.max(0.85);
         let panel_right = w - clear.throttle_left + 12.0;
         // "1.7 km   +314 km/h closing" (no [TAB] on touch)
@@ -753,7 +753,7 @@ fn update_center_symbols(
 
 #[allow(clippy::type_complexity)]
 fn update_readouts(
-    player: Query<(&Transform, &FlightState, &Weapons, &Health, &ControlInput), With<Player>>,
+    player: Query<(&Transform, &FlightState, &Weapons, &Health, &ControlInput, Option<&crate::jets::JetChoice>), With<Player>>,
     mut readouts: Query<(&Readout, &mut Text, &mut TextColor)>,
 ) {
     let player = player.single().ok();
@@ -769,7 +769,7 @@ fn update_readouts(
             (Readout::Altitude, Some((t, s, ..))) => {
                 format!("{:>5.0} m\n{:>+4.0} m/s", t.translation.y, s.velocity.y)
             }
-            (Readout::Throttle, Some((_, s, _, _, input))) => {
+            (Readout::Throttle, Some((_, s, _, _, input, _))) => {
                 let extra = if s.afterburner_on {
                     " AB"
                 } else if input.airbrake {
@@ -779,7 +779,7 @@ fn update_readouts(
                 };
                 format!("THR {:>3.0}%{extra}", s.spool * 100.0)
             }
-            (Readout::Weapons, Some((_, _, w, ..))) => {
+            (Readout::Weapons, Some((_, _, w, _, _, jet))) => {
                 // reload progress for the next missile as a little bar
                 let reload = if w.missiles < crate::weapons::MAX_MISSILES {
                     let filled = (w.missile_reload * 5.0).floor() as usize;
@@ -787,12 +787,14 @@ fn update_readouts(
                 } else {
                     String::new()
                 };
+                // which jet, then its loadout
+                let jet = jet.map_or("", |j| j.airframe().name);
                 format!(
-                    "GUN {:>3}   MSL {}{reload}   FLR {}/{}",
+                    "{jet}   GUN {:>3}   MSL {}{reload}   FLR {}/{}",
                     w.gun_ammo, w.missiles, w.flares, crate::weapons::MAX_FLARES
                 )
             }
-            (Readout::Health, Some((_, _, _, h, _))) => {
+            (Readout::Health, Some((_, _, _, h, ..))) => {
                 let frac = (h.current / h.max).clamp(0.0, 1.0);
                 let bars = (frac * 20.0).round() as usize;
                 color.0 = if frac > 0.5 {
