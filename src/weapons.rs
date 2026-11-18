@@ -46,7 +46,7 @@ const MISSILE_DAMAGE: f32 = crate::net::protocol::MISSILE_DAMAGE;
 /// How far off its nose the seeker can look before it loses the target.
 const SEEKER_GIMBAL: f32 = 0.87; // ~50 degrees
 
-pub const MAX_MISSILES: u32 = 6;
+pub const MAX_MISSILES: u32 = 4;
 /// Seconds between missile launches.
 const MISSILE_COOLDOWN: f32 = 0.55;
 /// A jet only carries a few flares, so wasting them early costs you later.
