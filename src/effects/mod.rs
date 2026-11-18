@@ -72,6 +72,7 @@ impl Plugin for EffectsPlugin {
                 cloud_wake::cloud_wake,
                 projectile_fx,
                 update_bursts,
+                missile_trails,
                 update_ribbons,
                 particles::update_globals,
                 particles::build_mesh,
@@ -682,6 +683,10 @@ fn aircraft_fx(
 
 // ---------------------------------------------------------------- missiles & flares
 
+/// The motor nozzle in a missile's frame: missile meshes point along local -Y
+/// (looking_to(velocity) then +90° about X takes -Y to -Z); the motor is at +Y.
+const MISSILE_MOTOR: Vec3 = Vec3::new(0.0, 2.0, 0.0);
+
 fn projectile_fx(
     time: Res<Time>,
     mut particles: ResMut<Particles>,
@@ -700,9 +705,7 @@ fn projectile_fx(
     last.retain(|e, _| missiles.contains(*e) || flares.contains(*e));
     trails.report(|e| missiles.contains(e));
     for (entity, gt, missile) in &missiles {
-        // missile meshes point along local -Y (looking_to(velocity) then +90°
-        // about X takes -Y to -Z); the motor is at +Y
-        const MOTOR: Vec3 = Vec3::new(0.0, 2.0, 0.0);
+        const MOTOR: Vec3 = MISSILE_MOTOR;
         let motor = gt.transform_point(MOTOR);
         let flick = plume::turbulence(t * 1.7, entity.index().index() as f32);
         // never let it shrink below a few pixels, so missiles stay visible far out
@@ -739,36 +742,37 @@ fn projectile_fx(
             },
             1.0,
         );
-        // thick, billowing smoke, laid down every couple of metres
+        // the trail itself is a ribbon (`RibbonKind::Missile`); puffs only
+        // billow at the motor, where the ribbon is thin and young, and in a
+        // dense cloud left hanging at the launch
         let entry = last.entry(entity).or_insert(None);
         let age = missile.age;
-        // the sustainer leaves a thinner trail; far from the camera the
-        // (quickly swelling) puffs go down further apart, as a dense trail
-        // is thousands of puffs and a few in flight crowd the budget, which
-        // then hurries every trail away (see `particles::smoke_rush`)
-        let sparse = (motor.distance(cam) / 400.0).clamp(1.0, 3.5);
-        spaced(entry, motor, if boost { 1.1 } else { 1.6 } * sparse, &mut points);
+        let launch = age < 0.3;
+        spaced(entry, motor, if launch { 1.1 } else { 3.0 }, &mut points);
         let thin = if boost { 1.0 } else { 0.75 };
         let stats = trails.missiles.entry(entity).or_insert((0, 0, particles.list.len()));
         for &p in points.iter() {
             stats.1 += 1;
+            let (life, size) = if launch {
+                (rng.random_range(10.0..14.0), rng.random_range(13.0..19.0))
+            } else {
+                // short-lived: gone by the time the ribbon has swelled past them
+                (rng.random_range(0.9..1.5), rng.random_range(5.0..8.0))
+            };
             stats.0 += particles.add(
                 Particle {
                     vel: missile.velocity * 0.04 + rand_dir(&mut rng) * 2.5,
-                    life: rng.random_range(10.0..14.0),
-                    size: (
-                        rng.random_range(1.3..1.8) * thin,
-                        rng.random_range(13.0..19.0) * thin,
-                    ),
+                    life,
+                    size: (rng.random_range(1.3..1.8) * thin, size * thin),
                     grow: 3.5,
                     albedo: Vec3::splat(rng.random_range(0.95..1.0)),
                     opacity: 0.8 * thin.sqrt(),
-                    heat: if age < 0.3 { 0.0 } else { 0.9 },
+                    heat: if launch { 0.0 } else { 0.9 },
                     cool: 0.05,
                     glow: 3.5,
                     drag: 1.8,
                     buoyancy: 0.4,
-                    dissolve: 0.3,
+                    dissolve: if launch { 0.3 } else { 0.5 },
                     fade_in: 0.05,
                     ..Particle::puff(p + rand_dir(&mut rng) * 0.3)
                 },
@@ -1315,6 +1319,9 @@ fn update_bursts(
 enum RibbonKind {
     Vortex,
     Contrail,
+    /// A missile's smoke: one continuous ribbon that swells and drifts for
+    /// tens of seconds (puffs only billow at the launch and the motor).
+    Missile,
 }
 
 struct TrailPoint {
@@ -1351,6 +1358,7 @@ impl Trail {
         match self.kind {
             RibbonKind::Vortex => (3.0, 0.2, 1.6, 0.5, 0.15, 0.97),
             RibbonKind::Contrail => (16.0, 0.6, 9.0, 0.8, 0.25, 0.97),
+            RibbonKind::Missile => (MISSILE_TRAIL_LIFE, 1.6, 24.0, 0.85, 0.3, 0.97),
         }
     }
 }
@@ -1358,12 +1366,23 @@ impl Trail {
 #[derive(Resource, Default)]
 struct Ribbons(Vec<Trail>);
 
+/// How long (s) a missile's smoke ribbon hangs in the sky.
+const MISSILE_TRAIL_LIFE: f32 = 22.0;
+
+/// Every new missile gets a smoke ribbon from its motor.
+fn missile_trails(mut ribbons: ResMut<Ribbons>, new: Query<Entity, Added<Missile>>) {
+    for missile in &new {
+        ribbons.0.push(Trail::new(missile, MISSILE_MOTOR, RibbonKind::Missile));
+    }
+}
+
 fn update_ribbons(
     time: Res<Time>,
     mut ribbons: ResMut<Ribbons>,
     mut particles: ResMut<Particles>,
     camera: Query<&GlobalTransform, With<MainCamera>>,
     sources: Query<(&GlobalTransform, &FlightState, Has<Disabled>)>,
+    missiles: Query<(&GlobalTransform, &Missile)>,
 ) {
     let dt = time.delta_secs();
     let Ok(cam) = camera.single() else {
@@ -1380,27 +1399,46 @@ fn update_ribbons(
         while trail.points.front().is_some_and(|p| p.age > life) {
             trail.points.pop_front();
         }
-        match trail.source.and_then(|s| sources.get(s).ok()) {
-            Some((gt, state, disabled)) => {
+        let head = trail.source.and_then(|s| match trail.kind {
+            RibbonKind::Missile => {
+                let (gt, missile) = missiles.get(s).ok()?;
+                // the sustainer leaves a thinner trail; none once burnt out
+                let intensity = if missile.motor_burning() {
+                    1.0
+                } else if missile.motor_lit() {
+                    0.7
+                } else {
+                    return None;
+                };
+                Some((gt, intensity))
+            }
+            _ => {
+                let (gt, state, disabled) = sources.get(s).ok()?;
+                let on = if disabled { 0.0 } else { 1.0 };
                 let intensity = match trail.kind {
                     RibbonKind::Vortex => {
                         let g = smoothstep(3.5, 7.5, state.g_load.abs());
                         let aoa = smoothstep(10.0, 20.0, state.alpha.to_degrees().abs());
-                        g.max(aoa) * if disabled { 0.0 } else { 1.0 }
+                        g.max(aoa) * on
                     }
-                    RibbonKind::Contrail => {
-                        smoothstep(3_500.0, 5_000.0, gt.translation().y) * if disabled { 0.0 } else { 1.0 }
-                    }
+                    _ => smoothstep(3_500.0, 5_000.0, gt.translation().y) * on,
                 };
+                Some((gt, intensity))
+            }
+        });
+        match head {
+            Some((gt, intensity)) => {
                 let pos = gt.transform_point(trail.offset);
                 let step = trail.points.back().map_or(0.0, |p| p.pos.distance(pos));
                 if step > 300.0 {
                     trail.points.clear();
                 }
+                // (a missile covers ~12 m a frame: a point every couple of frames)
+                let spacing = if trail.kind == RibbonKind::Missile { 25.0 } else { 5.0 };
                 let far_enough = trail
                     .points
                     .back()
-                    .is_none_or(|p| p.pos.distance(pos) > 5.0 || p.age > 0.06);
+                    .is_none_or(|p| p.pos.distance(pos) > spacing || p.age > 0.06);
                 if far_enough {
                     trail.total += step.min(300.0);
                     trail.points.push_back(TrailPoint { pos, age: 0.0, intensity, s: trail.total });
@@ -1432,10 +1470,17 @@ fn update_ribbons(
             let to_cam = (cam_pos - trail.points[i].pos).normalize_or(Vec3::Y);
             tangent.cross(to_cam).normalize_or(Vec3::X)
         };
+        let missile = trail.kind == RibbonKind::Missile;
+        let seed = trail.seed * 40.0;
         let width_at = |p: &TrailPoint| {
             let t = (p.age / life).clamp(0.0, 1.0);
-            w0 + (w1 - w0) * t.sqrt()
+            let w = w0 + (w1 - w0) * t.sqrt();
+            // missile smoke swells and pinches unevenly along its length
+            if missile { w * (1.0 + 0.3 * (p.s * 0.05 + seed).sin() * (p.s * 0.013 + seed * 0.7).sin()) } else { w }
         };
+        // the edge noise is laid out in metres along the trail: contrails
+        // want long, smooth lumps; missile smoke billows at its own width
+        let along = if missile { 3.0 } else { 1.0 };
         let alpha_at = |i: usize, p: &TrailPoint| {
             let t = (p.age / life).clamp(0.0, 1.0);
             let head = if i == n - 1 { 0.0 } else { 1.0 };
@@ -1443,6 +1488,8 @@ fn update_ribbons(
             let gap = match trail.kind {
                 RibbonKind::Contrail => smoothstep(15.0, 60.0, head_s - p.s),
                 RibbonKind::Vortex => smoothstep(0.0, 6.0, head_s - p.s),
+                // (and the puffs at the motor cover the first few metres)
+                RibbonKind::Missile => smoothstep(0.0, 6.0, head_s - p.s),
             };
             opacity * p.intensity * (1.0 - t).powf(1.2) * head * gap
         };
@@ -1465,10 +1512,10 @@ fn update_ribbons(
                     b.pos - next_side * wb,
                 ],
                 uv: [
-                    Vec2::new(0.0, a.s),
-                    Vec2::new(1.0, a.s),
-                    Vec2::new(1.0, b.s),
-                    Vec2::new(0.0, b.s),
+                    Vec2::new(0.0, a.s * along),
+                    Vec2::new(1.0, a.s * along),
+                    Vec2::new(1.0, b.s * along),
+                    Vec2::new(0.0, b.s * along),
                 ],
                 albedo: Vec3::splat(albedo),
                 opacity: [oa, oa, ob, ob],
