@@ -6,6 +6,7 @@
 //! set the image size and scale factor (a landscape phone: `2556x1179`, 3).
 //! `FLIGHT_SIM_SCREENSHOT_BURST=<count>,<secs>` saves `count` frames `secs`
 //! apart instead (`out_00.png`, `out_01.png`, ...), for catching flicker.
+//! `FLIGHT_SIM_GUN=1` holds the player's trigger down.
 //! `FLIGHT_SIM_DIE_AT=<secs>` shoots the player down that many (real) seconds in.
 //! `FLIGHT_SIM_MENU_AT=<secs>` quits a round back to the menu that many (real)
 //! seconds in (the menu with a map loaded).
@@ -130,6 +131,15 @@ impl Plugin for DevPlugin {
                 orbit_camera
                     .after(TransformSystems::Propagate)
                     .before(crate::effects::EffectsSystems),
+            );
+        }
+        // `FLIGHT_SIM_GUN=1`: the player's trigger held down (gun shots)
+        if std::env::var("FLIGHT_SIM_GUN").is_ok() {
+            app.add_systems(
+                FixedUpdate,
+                (|mut actions: ResMut<crate::controls::PlayerActions>| actions.firing_gun = true)
+                .after(crate::flight::FlightSystems::Pilots)
+                .before(crate::flight::FlightSystems::Combat),
             );
         }
         if std::env::var("FLIGHT_SIM_KILL_TEST").is_ok() {
