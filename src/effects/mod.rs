@@ -404,6 +404,9 @@ fn update_missile_flames(
     }
 }
 
+/// Jets further than this (m) from the camera shed no wing vapour.
+const VAPOUR_RANGE: f32 = 1_500.0;
+
 #[allow(clippy::type_complexity)]
 fn aircraft_fx(
     time: Res<Time>,
@@ -419,6 +422,7 @@ fn aircraft_fx(
         &JetChoice,
     )>,
     mut muzzle_lights: Query<(&ChildOf, &mut PointLight), With<MuzzleLight>>,
+    camera: Query<&GlobalTransform, (With<MainCamera>, Without<AircraftFx>)>,
     mut points: Local<Vec<Vec3>>,
 ) {
     let dt = time.delta_secs();
@@ -426,14 +430,17 @@ fn aircraft_fx(
         return;
     }
     let t = time.elapsed_secs();
+    let cam = camera.single().map(|c| c.translation()).ok();
     let mut rng = rand::rng();
     for (entity, gt, state, health, weapons, disabled, mut fx, jet) in &mut aircraft {
         let pos = gt.translation();
         let spec = jet.airframe();
         let (wing, gun_port) = (spec.wing, spec.gun_port);
 
-        // ---- vapour: wing-surface sheets under G / AoA
-        if !disabled {
+        // ---- vapour: wing-surface sheets under G / AoA (only near the
+        // camera: it's thousands of short-lived particles per jet, which
+        // crowd the budget and hurry along the missile trails)
+        if !disabled && cam.is_none_or(|c| c.distance(pos) < VAPOUR_RANGE) {
             let humidity = 1.0 - 0.6 * smoothstep(2_000.0, 9_000.0, pos.y);
             let g = smoothstep(4.0, 8.0, state.g_load.abs());
             let aoa = smoothstep(11.0, 22.0, state.alpha.to_degrees().abs());
@@ -448,7 +455,7 @@ fn aircraft_fx(
                 // light pulls show a narrow band near the suction peak; hard
                 // ones cover the wing back to the trailing edge
                 let reach = 0.35 + 0.65 * s;
-                let mut n = s * 1500.0 * dt;
+                let mut n = s * 650.0 * dt;
                 while n > 0.0 {
                     if n < 1.0 && rng.random::<f32>() > n {
                         break;
@@ -482,7 +489,7 @@ fn aircraft_fx(
                             },
                             stretch: if spill { 0.2 } else { 0.12 },
                             albedo: Vec3::splat(rng.random_range(1.0..1.1)),
-                            opacity: if spill { 0.12 } else { 0.21 } * (0.35 + 0.65 * s),
+                            opacity: if spill { 0.08 } else { 0.13 } * (0.35 + 0.65 * s),
                             soft: 0.1,
                             drag: 0.0,
                             wind: 0.0,
@@ -508,7 +515,7 @@ fn aircraft_fx(
                 let axis = (end - start).normalize();
                 let across = axis.cross(Vec3::Y).normalize();
                 let over = across.cross(axis);
-                let mut n = lex * 900.0 * dt;
+                let mut n = lex * 1000.0 * dt;
                 while n > 0.0 {
                     if n < 1.0 && rng.random::<f32>() > n {
                         break;
@@ -531,10 +538,10 @@ fn aircraft_fx(
                         Particle {
                             vel: dir * rng.random_range(20.0..32.0),
                             life: rng.random_range(0.1..0.18),
-                            size: (0.25 + 0.6 * u, 0.5 + 1.2 * u),
+                            size: (0.3 + 0.7 * u, 0.6 + 1.4 * u),
                             stretch: 0.14,
                             albedo: Vec3::splat(rng.random_range(1.0..1.1)),
-                            opacity: 0.26 * (0.4 + 0.6 * lex) * (1.0 - 0.5 * u),
+                            opacity: 0.4 * (0.4 + 0.6 * lex) * (1.0 - 0.4 * u),
                             soft: 0.1,
                             drag: 0.0,
                             wind: 0.0,
@@ -735,8 +742,12 @@ fn projectile_fx(
         // thick, billowing smoke, laid down every couple of metres
         let entry = last.entry(entity).or_insert(None);
         let age = missile.age;
-        // the sustainer leaves a thinner trail
-        spaced(entry, motor, if boost { 1.1 } else { 1.6 }, &mut points);
+        // the sustainer leaves a thinner trail; far from the camera the
+        // (quickly swelling) puffs go down further apart, as a dense trail
+        // is thousands of puffs and a few in flight crowd the budget, which
+        // then hurries every trail away (see `particles::smoke_rush`)
+        let sparse = (motor.distance(cam) / 400.0).clamp(1.0, 3.5);
+        spaced(entry, motor, if boost { 1.1 } else { 1.6 } * sparse, &mut points);
         let thin = if boost { 1.0 } else { 0.75 };
         let stats = trails.missiles.entry(entity).or_insert((0, 0, particles.list.len()));
         for &p in points.iter() {
