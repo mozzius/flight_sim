@@ -94,6 +94,10 @@ pub struct JetSpec {
     /// Chase camera distance (1 = the old 21 m F-22's): a little closer to
     /// small jets, so they don't shrink to a speck, but not all the way.
     pub chase: f32,
+    /// Leading-edge extensions: the LEX vortices stream off them at high AoA.
+    pub lex: bool,
+    /// How much wing vapour it pulls (1 = a fighter's).
+    pub vapour: f32,
     /// How it flies.
     pub flight: fn() -> Aircraft,
     /// Speed it spawns at (m/s).
@@ -116,6 +120,8 @@ const F22: JetSpec = JetSpec {
     rudder_brake: false,
     eye: Vec3::new(0.0, 1.2, -6.2),
     chase: 1.0,
+    lex: true,
+    vapour: 1.0,
     flight: Aircraft::fighter,
     cruise: 240.0,
 };
@@ -211,6 +217,8 @@ const SPECS: [JetSpec; 4] = [
         rudder_brake: false,
         eye: Vec3::new(0.0, 0.97, -4.57),
         chase: 0.88,
+        lex: true,
+        vapour: 1.0,
         flight: f16,
         cruise: 240.0,
     },
@@ -228,6 +236,8 @@ const SPECS: [JetSpec; 4] = [
         rudder_brake: true,
         eye: Vec3::new(0.0, 1.41, -5.4),
         chase: 0.98,
+        lex: true,
+        vapour: 1.0,
         flight: f18,
         cruise: 240.0,
     },
@@ -245,6 +255,8 @@ const SPECS: [JetSpec; 4] = [
         rudder_brake: false,
         eye: Vec3::new(0.0, 1.72, -6.73),
         chase: 1.05,
+        lex: true,
+        vapour: 1.0,
         flight: su37,
         cruise: 240.0,
     },
@@ -265,6 +277,8 @@ const SPECS: [JetSpec; 4] = [
         rudder_brake: false,
         eye: Vec3::new(0.0, 1.15, -6.13),
         chase: 1.08,
+        lex: false,
+        vapour: 0.45,
         flight: a10,
         cruise: 170.0,
     },

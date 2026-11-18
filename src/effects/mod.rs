@@ -451,7 +451,7 @@ fn aircraft_fx(
             let humidity = 1.0 - 0.6 * smoothstep(2_000.0, 9_000.0, pos.y);
             let g = smoothstep(4.0, 8.0, state.g_load.abs());
             let aoa = smoothstep(11.0, 22.0, state.alpha.to_degrees().abs());
-            let sheet = g.max(aoa) * humidity * smoothstep(60.0, 120.0, state.airspeed);
+            let sheet = g.max(aoa) * humidity * smoothstep(60.0, 120.0, state.airspeed) * spec.vapour;
             // a thin, bright sheet hugging the upper surface: it condenses a
             // little behind the leading edge, streams back along the chord,
             // spills briefly off the trailing edge, and flickers with every
@@ -511,7 +511,9 @@ fn aircraft_fx(
                 // LEX vortex: the strake beside the cockpit sheds a tight,
                 // twisting core that condenses at high AoA and streams back
                 // over the wing root, swelling as it bursts behind the wing
-                let lex = (smoothstep(9.0, 20.0, state.alpha.to_degrees().abs()).max(g * 0.6)
+                // (none without strakes: the A-10's straight wing)
+                let lex = if !spec.lex { 0.0 } else { 1.0 }
+                    * (smoothstep(9.0, 20.0, state.alpha.to_degrees().abs()).max(g * 0.6)
                     * humidity
                     * smoothstep(60.0, 120.0, state.airspeed)
                     * (0.7 + 0.3 * (plume::turbulence(t * 1.1, fx.seed + side * 5.3) - 0.8) / 0.4))
