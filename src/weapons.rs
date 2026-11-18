@@ -760,7 +760,7 @@ fn move_bullets(
                     });
                     hits.write(HitConfirmed { attacker: bullet.owner });
                 } else {
-                    health.current -= bullet.damage;
+                    health.damage(bullet.damage);
                     health.last_attacker = Some(bullet.owner);
                     hits.write(HitConfirmed { attacker: bullet.owner });
                 }
@@ -861,7 +861,7 @@ fn guide_missiles(
                             });
                         }
                     } else {
-                        health.current -= damage;
+                        health.damage(damage);
                         health.last_attacker = Some(missile.owner);
                     }
                     hits.write(HitConfirmed { attacker: missile.owner });

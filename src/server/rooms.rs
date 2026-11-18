@@ -568,6 +568,8 @@ impl Room {
             }
         };
         let v = self.players.get_mut(&target).unwrap();
+        // (the victim's airframe: the A-10 takes less from each hit)
+        let damage = damage / toughness(v.state.as_ref().map_or(0, |(st, _)| st.jet));
         v.health = (v.health - damage).max(0.0);
         v.last_hit = Some((shooter, now));
         let health = v.health;
@@ -678,6 +680,24 @@ mod tests {
         assert!(out.is_empty());
         let out = s.handle(2, ClientMsg::Respawn, now + Duration::from_secs(5));
         assert_eq!(out[0].msg, ServerMsg::Respawned(2));
+    }
+
+    #[test]
+    fn the_a10_takes_less_from_each_hit() {
+        let (mut s, now) = duel([0.0; 3], [500.0, 0.0, 0.0]);
+        // player 2 flies the A-10
+        if let ClientMsg::State(mut st) = state([500.0, 0.0, 0.0], Status::Flying) {
+            st.jet = JET_A10 << 4;
+            s.handle(2, ClientMsg::State(st), now);
+        }
+        let out = s.handle(1, ClientMsg::Hit { target: 2, weapon: Weapon::Gun, damage: 5.0 }, now);
+        let health = out.iter().find_map(|o| match o.msg {
+            ServerMsg::Damage { health, .. } => Some(health),
+            _ => None,
+        });
+        assert_eq!(health, Some(MAX_HEALTH - GUN_DAMAGE / toughness(JET_A10 << 4)));
+        // and it survives a full missile
+        assert!(MISSILE_DAMAGE / toughness(JET_A10 << 4) < MAX_HEALTH * 0.6);
     }
 
     #[test]

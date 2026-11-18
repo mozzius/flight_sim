@@ -1371,7 +1371,7 @@ fn interpolate(
                         let e = spawn_remote_aircraft(&mut commands, &models, transform, s.vel, Remote { id: *id }, &peer.handle, s.jet);
                         info!("multiplayer: {} flies the {} ({})", peer.handle, s.jet.spec().name, s.jet.livery_name());
                         if s.health < MAX_HEALTH {
-                            let mut health = Health::new(MAX_HEALTH);
+                            let mut health = Health::for_jet(MAX_HEALTH, s.jet);
                             health.current = s.health.max(1.0);
                             commands.entity(e).insert(health);
                         }

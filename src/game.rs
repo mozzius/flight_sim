@@ -65,6 +65,8 @@ pub struct Health {
     pub max: f32,
     /// Who last hurt us, for kill credit.
     pub last_attacker: Option<Entity>,
+    /// Damage taken is divided by this (`protocol::toughness`: the A-10's 1.75).
+    pub toughness: f32,
 }
 
 impl Health {
@@ -73,7 +75,18 @@ impl Health {
             current: max,
             max,
             last_attacker: None,
+            toughness: 1.0,
         }
+    }
+
+    /// A jet's health: tougher for the A-10.
+    pub fn for_jet(max: f32, jet: JetChoice) -> Self {
+        Health { toughness: crate::net::protocol::toughness(jet.to_wire()), ..Self::new(max) }
+    }
+
+    /// Takes a hit (less, on a tough airframe).
+    pub fn damage(&mut self, amount: f32) {
+        self.current -= amount / self.toughness;
     }
 }
 
@@ -282,7 +295,7 @@ pub fn spawn_aircraft(
             ..default()
         },
         team,
-        Health::new(100.0),
+        Health::for_jet(100.0, jet),
         Weapons::for_jet(jet),
         Targeting::default(),
         (jet, Stick::default()),
@@ -307,7 +320,7 @@ pub fn spawn_remote_aircraft(commands: &mut Commands, models: &Models, transform
             jet.aircraft(),
             FlightState::new(velocity),
             Team::Red,
-            Health::new(crate::net::protocol::MAX_HEALTH),
+            Health::for_jet(crate::net::protocol::MAX_HEALTH, jet),
             Weapons::for_jet(jet),
             remote,
             crate::net::RemoteName(name.to_string()),

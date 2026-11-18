@@ -87,6 +87,13 @@ pub const GAU8: Gun = Gun { damage: 13.0, rate: 13.0, spin_up: 0.35 };
 /// The A-10's jet id (`PlayerState.jet >> 4`).
 pub const JET_A10: u8 = 3;
 
+/// How much a jet's airframe shrugs off: the damage it takes is divided by
+/// this (the A-10's armoured tub and redundant everything take about 1.75x
+/// the hits; it survives a missile). Health stays 0..MAX_HEALTH everywhere.
+pub fn toughness(jet: u8) -> f32 {
+    if jet >> 4 == JET_A10 { 1.75 } else { 1.0 }
+}
+
 /// The gun of a jet, by its wire byte (`PlayerState.jet`).
 pub fn gun(jet: u8) -> Gun {
     if jet >> 4 == JET_A10 { GAU8 } else { VULCAN }
