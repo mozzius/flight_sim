@@ -750,8 +750,11 @@ fn one_shots(
     mut delayed: ResMut<DelayedSounds>,
     camera: Query<&GlobalTransform, With<MainCamera>>,
     mut explosions: MessageReader<Explosion>,
-    new_missiles: Query<&GlobalTransform, Added<Missile>>,
-    new_flares: Query<(&GlobalTransform, &Flare), Added<Flare>>,
+    // (`Transform`: on the frame they're spawned the global transform is
+    // still the origin, so the sound played kilometres away; they have no
+    // parent, so it's already in world space)
+    new_missiles: Query<&Transform, Added<Missile>>,
+    new_flares: Query<(&Transform, &Flare), Added<Flare>>,
     player: Query<Entity, With<crate::game::Player>>,
     mut flare_cooldown: Local<f32>,
     time: Res<Time>,
@@ -787,18 +790,18 @@ fn one_shots(
         queue(handle, e.position, (e.size / 12.0).clamp(0.3, 1.0), 1.0 / reach);
     }
     for gt in &new_missiles {
-        queue(&sounds.launch, gt.translation(), 0.9, 1.0 / 60.0);
+        queue(&sounds.launch, gt.translation, 0.9, 1.0 / 60.0);
     }
     *flare_cooldown -= time.delta_secs();
     let me = player.single().ok();
     for (gt, flare) in &new_flares {
         if Some(flare.owner) == me {
             // our own: right behind us, so loud and every one
-            queue(&sounds.flare, gt.translation(), 1.0, 1.0 / 90.0);
+            queue(&sounds.flare, gt.translation, 1.0, 1.0 / 90.0);
         } else if *flare_cooldown <= 0.0 {
             // others': one per frame's flares (several jets at once)
             *flare_cooldown = 0.12;
-            queue(&sounds.flare, gt.translation(), 0.7, 1.0 / 50.0);
+            queue(&sounds.flare, gt.translation, 0.7, 1.0 / 50.0);
         }
     }
 }
