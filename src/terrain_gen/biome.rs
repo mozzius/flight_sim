@@ -181,7 +181,8 @@ fn alpine() -> BiomeParams {
         meadow: srgb(0.42, 0.47, 0.22),
         dry_meadow: srgb(0.52, 0.50, 0.30),
         forest: srgb(0.17, 0.25, 0.11),
-        alpine: srgb(0.46, 0.44, 0.30),
+        // alpine grass: summer green going khaki, not brown
+        alpine: srgb(0.42, 0.45, 0.28),
         rock: srgb(0.52, 0.46, 0.36),
         dark_rock: srgb(0.31, 0.27, 0.22),
         snow: srgb(0.94, 0.95, 0.98),

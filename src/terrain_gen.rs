@@ -951,7 +951,12 @@ fn terrain_color(h: f32, normal: Vec3, ridge: f32, jitter: f32, field: Option<&f
     }
     // what's left of the field under the layers below
     let mut field_weight = cover.field * (1.0 - cover.alpine) * (1.0 - cover.rock) * (1.0 - cover.snow);
-    c = c.lerp(b.alpine, cover.alpine);
+    // above the trees: mottled, not one flat colour, grassier in the hollows
+    // and lower down, the alpine tone on the crests and higher up
+    let crest = ridge.clamp(0.0, 1.0);
+    let grassy = (0.45 - 0.35 * jitter + 0.35 * crease - 0.35 * crest).clamp(0.0, 0.8)
+        * (1.0 - 0.6 * smoothstep(b.tree_line + 250.0, b.tree_line + 900.0, h));
+    c = c.lerp(b.alpine.lerp(b.meadow, grassy), cover.alpine);
     // rock darker in eroded creases
     let rock_col = b.rock.lerp(b.dark_rock, crease * 0.8 + jitter.max(0.0) * 0.2);
     c = c.lerp(rock_col, cover.rock);
