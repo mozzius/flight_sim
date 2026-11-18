@@ -30,7 +30,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use bevy::prelude::*;
+use bevy::{camera::visibility::VisibilityRange, prelude::*};
 
 use crate::flight::{ControlInput, Disabled, FlightState};
 
@@ -38,7 +38,7 @@ pub struct JetsPlugin;
 
 impl Plugin for JetsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (follow_controls, tag_parts, animate_parts).chain());
+        app.add_systems(Update, (follow_controls, tag_parts, animate_parts, set_lods).chain());
     }
 }
 
@@ -72,6 +72,9 @@ pub struct JetSpec {
     /// The right wingtip (the left mirrors it).
     pub wingtip: Vec3,
     pub gun_port: Vec3,
+    /// Missile stations on the right wing (centre of a hung missile), inboard
+    /// to the tip; the left wing mirrors them. Empty: internal bays (the F-22).
+    pub hardpoints: &'static [Vec3],
     /// The right wing's upper surface: root LE, tip LE, tip TE, root TE.
     pub wing: [Vec3; 4],
     /// Nozzles that swivel with the stick (thrust vectoring).
@@ -96,6 +99,7 @@ const F22: JetSpec = JetSpec {
     nozzle_size: Vec2::new(0.5, 0.36),
     wingtip: Vec3::new(7.3, 0.0, 2.0),
     gun_port: Vec3::new(0.9, 0.9, -7.5),
+    hardpoints: &[],
     wing: [Vec3::new(1.9, 0.55, -3.2), Vec3::new(6.7, 0.2, 1.1), Vec3::new(7.1, 0.2, 2.7), Vec3::new(1.9, 0.55, 4.0)],
     vectoring: false,
     rudder_brake: false,
@@ -123,6 +127,8 @@ const SPECS: [JetSpec; 3] = [
         nozzle_size: Vec2::splat(0.5),
         wingtip: Vec3::new(4.97, 0.03, 2.3),
         gun_port: Vec3::new(-0.75, 0.5, -4.6),
+        // under-wing pylons and the wingtip rail
+        hardpoints: &[Vec3::new(3.0, -0.56, 0.25), Vec3::new(4.38, -0.56, 1.25), Vec3::new(5.1, -0.05, 1.5)],
         wing: [Vec3::new(1.5, 0.3, -2.0), Vec3::new(4.5, 0.08, 0.9), Vec3::new(4.5, 0.08, 2.0), Vec3::new(1.5, 0.3, 2.6)],
         vectoring: false,
         rudder_brake: false,
@@ -137,6 +143,7 @@ const SPECS: [JetSpec; 3] = [
         nozzle_size: Vec2::splat(0.42),
         wingtip: Vec3::new(7.24, 0.25, 2.2),
         gun_port: Vec3::new(0.0, 0.75, -10.4),
+        hardpoints: &[Vec3::new(3.75, -0.1, 0.9), Vec3::new(5.12, 0.0, 1.55), Vec3::new(7.32, 0.12, 1.8)],
         wing: [Vec3::new(2.2, 0.68, -2.5), Vec3::new(6.5, 0.3, 1.6), Vec3::new(6.5, 0.3, 3.0), Vec3::new(2.2, 0.68, 3.2)],
         vectoring: false,
         rudder_brake: true,
@@ -151,6 +158,7 @@ const SPECS: [JetSpec; 3] = [
         nozzle_size: Vec2::splat(0.52),
         wingtip: Vec3::new(7.94, 0.44, 4.4),
         gun_port: Vec3::new(1.1, 0.75, -5.8),
+        hardpoints: &[Vec3::new(4.88, 0.0, 2.3), Vec3::new(6.62, 0.0, 3.1), Vec3::new(7.95, 0.3, 4.0)],
         wing: [Vec3::new(2.4, 1.0, -2.5), Vec3::new(7.2, 0.57, 3.0), Vec3::new(7.2, 0.57, 4.6), Vec3::new(2.4, 1.0, 5.5)],
         vectoring: true,
         rudder_brake: false,
@@ -158,6 +166,17 @@ const SPECS: [JetSpec; 3] = [
         chase: 1.05,
     },
 ];
+
+impl JetSpec {
+    /// Where missile `slot` hangs: pairs from the inboard pylons out to the
+    /// tips, left then right. A jet fires its highest slot first (tips
+    /// first, alternating sides) and reloads from the inboard pylons. None
+    /// past the stations, and for internal bays.
+    pub fn hardpoint(&self, slot: u32) -> Option<Vec3> {
+        let p = *self.hardpoints.get(slot as usize / 2)?;
+        Some(if slot.is_multiple_of(2) { p * Vec3::new(-1.0, 1.0, 1.0) } else { p })
+    }
+}
 
 /// A jet and its paint: on every aircraft, and what goes over the wire.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
@@ -371,6 +390,55 @@ fn tag_parts(
     }
 }
 
+/// Past this distance a jet draws its `lod1` node (one decimated mesh, ~2k
+/// triangles, 1-3 draws) instead of its parts (~10k triangles, ~15 draws);
+/// closer on phones. `FLIGHT_SIM_LOD_DIST=<m>` overrides it (dev).
+pub fn lod_distance() -> f32 {
+    if let Some(d) = std::env::var("FLIGHT_SIM_LOD_DIST").ok().and_then(|v| v.parse().ok()) {
+        return d;
+    }
+    if crate::platform::low_memory() { 180.0 } else { 350.0 }
+}
+
+/// The cockpit's inside only draws this close (it's only seen through the canopy).
+fn interior_distance() -> f32 {
+    if crate::platform::low_memory() { 40.0 } else { 70.0 }
+}
+
+/// Gives every mesh of a jet's model its distance band (abrupt switches: a
+/// dithered crossfade renders the jets' extended material black mid-fade).
+fn set_lods(
+    mut commands: Commands,
+    meshes: Query<Entity, Added<Mesh3d>>,
+    names: Query<&Name>,
+    parents: Query<&ChildOf>,
+    models: Query<(), With<crate::game::AircraftModel>>,
+) {
+    if fallback() {
+        return;
+    }
+    for mesh in &meshes {
+        // only the model's meshes (not the plumes, which glow from afar)
+        if !parents.iter_ancestors(mesh).any(|a| models.contains(a)) {
+            continue;
+        }
+        let mut band = None;
+        for a in parents.iter_ancestors(mesh) {
+            if models.contains(a) {
+                break;
+            }
+            if band.is_none() && let Ok(name) = names.get(a) {
+                band = match name.as_str() {
+                    "lod1" => Some(VisibilityRange::abrupt(lod_distance(), f32::MAX)),
+                    "cockpit" | "hud" | "canopy_inner" | "cockpit_tub" => Some(VisibilityRange::abrupt(0.0, interior_distance())),
+                    _ => None,
+                };
+            }
+        }
+        commands.entity(mesh).insert(band.unwrap_or(VisibilityRange::abrupt(0.0, lod_distance())));
+    }
+}
+
 /// Control surface throws (radians).
 const STAB_PITCH: f32 = 0.33;
 const STAB_ROLL: f32 = 0.12;
@@ -460,6 +528,20 @@ mod tests {
         assert_eq!(JetChoice::from_wire(0x2f), JetChoice::new(Jet::Su37, 0));
         assert_eq!(JetChoice::parse("f18"), Some(JetChoice::new(Jet::F18, 0)));
         assert_eq!(JetChoice::parse("mig"), None);
+    }
+
+    #[test]
+    fn missiles_pair_up_inboard_to_tip() {
+        let spec = Jet::F16.spec();
+        // slots alternate left / right, outward
+        let (l, r) = (spec.hardpoint(0).unwrap(), spec.hardpoint(1).unwrap());
+        assert!(l.x < 0.0 && r.x > 0.0 && l.x == -r.x);
+        assert!(spec.hardpoint(4).unwrap().x.abs() > spec.hardpoint(2).unwrap().x.abs());
+        assert_eq!(spec.hardpoint(crate::weapons::MAX_MISSILES), None);
+        for jet in Jet::ALL {
+            assert_eq!(jet.spec().hardpoints.len() * 2, crate::weapons::MAX_MISSILES as usize);
+        }
+        assert_eq!(F22.hardpoint(0), None, "internal bays");
     }
 
     #[test]

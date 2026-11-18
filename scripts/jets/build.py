@@ -65,6 +65,40 @@ PLANES = {
 }
 
 
+# the cockpit's inside: not in the far LOD
+INTERIOR = {"cockpit", "hud", "canopy_inner", "cockpit_tub"}
+LOD_CELL = 0.45
+
+
+def decimate(pos, nrm, uv, cell):
+    """Vertex clustering: corners in the same grid cell (and facing the same
+    way, so a wing's two skins stay apart) merge into one vertex."""
+    face = np.argmax(np.abs(nrm), axis=1) * 2 + (nrm[np.arange(len(nrm)), np.argmax(np.abs(nrm), axis=1)] > 0)
+    key = np.c_[np.floor(pos / cell).astype(np.int64), face]
+    _, cid = np.unique(key, axis=0, return_inverse=True)
+    cid = cid.reshape(-1)
+    n = cid.max() + 1
+    cpos = np.zeros((n, 3))
+    cnrm = np.zeros((n, 3))
+    np.add.at(cpos, cid, pos)
+    np.add.at(cnrm, cid, nrm)
+    cpos /= np.bincount(cid, minlength=n)[:, None]
+    cnrm /= np.linalg.norm(cnrm, axis=1, keepdims=True) + 1e-9
+    # each cluster keeps the UV of the corner nearest its centre
+    d = np.linalg.norm(pos - cpos[cid], axis=1)
+    order = np.lexsort((d, cid))
+    first = order[np.r_[True, cid[order][1:] != cid[order][:-1]]]
+    cuv = np.zeros((n, 2))
+    cuv[cid[first]] = uv[first]
+    tris = cid.reshape(-1, 3)
+    ok = (tris[:, 0] != tris[:, 1]) & (tris[:, 1] != tris[:, 2]) & (tris[:, 0] != tris[:, 2])
+    tris = tris[ok]
+    # (the same triangle twice: keep one)
+    _, keep = np.unique(np.sort(tris, axis=1), axis=0, return_index=True)
+    tris = tris[np.sort(keep)].reshape(-1)
+    return cpos[tris], cnrm[tris], cuv[tris]
+
+
 def pca(pts):
     c = pts.mean(0)
     w, v = np.linalg.eigh(np.cov((pts - c).T))
@@ -280,6 +314,26 @@ def build(key, cfg):
             prims.append((s, xf(np.concatenate(P)), nf(np.concatenate(N)), np.concatenate(U)))
         node["mesh"] = gl.mesh(role, prims)
         gl.nodes.append(node)
+
+    # far LOD: everything outside (no cockpit interior) merged into one node,
+    # decimated by vertex clustering. The game swaps it in past a distance.
+    lod = {}
+    for role, g in groups.items():
+        if role in INTERIOR:
+            continue
+        for slot_, (P, N, U) in g.items():
+            acc = lod.setdefault(slot_, [[], [], []])
+            acc[0].append(np.concatenate(P))
+            acc[1].append(np.concatenate(N))
+            acc[2].append(np.concatenate(U))
+    prims = []
+    lod_tris = 0
+    for slot_, (P, N, U) in sorted(lod.items()):
+        pos, nrm, uv = decimate(np.concatenate(P), np.concatenate(N), np.concatenate(U), LOD_CELL)
+        lod_tris += len(pos) // 3
+        prims.append((slot_, pos, nrm, uv))
+    gl.nodes.append({"name": "lod1", "mesh": gl.mesh("lod1", prims)})
+    info["lod1_tris"] = lod_tris
 
     # handy points for effects (aircraft space, metres)
     body = np.concatenate([np.concatenate(v[0]) for v in groups["airframe"].values()])

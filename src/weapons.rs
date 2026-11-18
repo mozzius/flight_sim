@@ -47,6 +47,8 @@ const MISSILE_DAMAGE: f32 = crate::net::protocol::MISSILE_DAMAGE;
 const SEEKER_GIMBAL: f32 = 0.87; // ~50 degrees
 
 pub const MAX_MISSILES: u32 = 6;
+/// Seconds between missile launches.
+const MISSILE_COOLDOWN: f32 = 0.55;
 /// A jet only carries a few flares, so wasting them early costs you later.
 pub const MAX_FLARES: u32 = 4;
 /// Seconds between flares while the flare button is held (one per press).
@@ -83,7 +85,59 @@ impl Plugin for WeaponsPlugin {
                 )
                     .chain()
                     .in_set(FlightSystems::Combat),
-            );
+            )
+            .add_systems(Update, (hang_stores, show_stores).chain());
+    }
+}
+
+/// A missile waiting on its station (`JetSpec::hardpoint`): shown while the
+/// jet has more than `slot` missiles, so each launch empties the station it
+/// fires from and reloads fill them back up.
+#[derive(Component)]
+struct StoredMissile {
+    slot: u32,
+}
+
+/// Hangs a jet's missiles on its pylons and wingtip rails.
+fn hang_stores(
+    mut commands: Commands,
+    assets: Res<ProjectileAssets>,
+    new: Query<(Entity, &crate::jets::JetChoice), Added<Weapons>>,
+) {
+    for (aircraft, jet) in &new {
+        let spec = jet.spec();
+        commands.entity(aircraft).with_children(|p| {
+            for slot in 0..MAX_MISSILES {
+                let Some(at) = spec.hardpoint(slot) else { break };
+                p.spawn((
+                    StoredMissile { slot },
+                    bevy::camera::visibility::VisibilityRange::abrupt(0.0, crate::jets::lod_distance()),
+                    Mesh3d(assets.missile_mesh.clone()),
+                    MeshMaterial3d(assets.missile_material.clone()),
+                    // the mesh's length is along Y, its nose at -Y: point it forward.
+                    // A little smaller than the flying missile (~2.9 m, Sidewinder-ish),
+                    // which these airframes carry better.
+                    Transform::from_translation(at)
+                        .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                        .with_scale(Vec3::new(0.75, 0.8, 0.75)),
+                ));
+            }
+        });
+    }
+}
+
+fn show_stores(
+    jets: Query<(&Weapons, &crate::jets::JetChoice)>,
+    mut stores: Query<(&StoredMissile, &ChildOf, &mut Visibility)>,
+) {
+    for (store, parent, mut visibility) in &mut stores {
+        let Ok((weapons, jet)) = jets.get(parent.parent()) else { continue };
+        // (none on the F-22 fallback: it carries them inside)
+        let hung = store.slot < weapons.missiles && !jet.airframe().hardpoints.is_empty();
+        let want = if hung { Visibility::Inherited } else { Visibility::Hidden };
+        if *visibility != want {
+            *visibility = want;
+        }
     }
 }
 
@@ -415,6 +469,7 @@ fn fire_weapons(
         Option<&Targeting>,
         Has<Disabled>,
         Has<crate::game::Player>,
+        Option<&crate::jets::JetChoice>,
     ), Without<crate::net::Remote>>,
     mut missiles: Query<&mut Missile>,
     mode: Res<crate::modes::GameMode>,
@@ -424,7 +479,8 @@ fn fire_weapons(
     let mut rng = rand::rng();
     let player_seeker = crate::difficulty::active(*mode, settings.difficulty).seeker;
     let player_gun_bonus = crate::difficulty::active(*mode, settings.difficulty).gun_bonus;
-    for (entity, transform, state, team, mut weapons, targeting, disabled, player) in &mut shooters {
+    for (entity, transform, state, team, mut weapons, targeting, disabled, player, jet) in &mut shooters {
+        let airframe = jet.map(|j| j.airframe());
         weapons.gun_cooldown -= dt;
         weapons.missile_cooldown -= dt;
         weapons.flare_cooldown -= dt;
@@ -469,7 +525,8 @@ fn fire_weapons(
                 let dir = (fwd + spread).normalize();
                 let velocity = state.velocity + dir * BULLET_SPEED;
                 // stagger spawn positions along the path so bursts don't clump
-                let muzzle = transform.transform_point(Vec3::new(0.9, 0.4, -7.0))
+                let port = airframe.map_or(Vec3::new(0.9, 0.4, -7.0), |a| a.gun_port + Vec3::new(0.0, 0.0, -0.8));
+                let muzzle = transform.transform_point(port)
                     + velocity * dt * rng.random_range(0.0..1.0);
                 spawn_tracer(&mut commands, &assets, muzzle, velocity, entity, *team, false, if player { player_gun_bonus } else { 0.0 });
             }
@@ -483,11 +540,13 @@ fn fire_weapons(
             && weapons.missile_cooldown <= 0.0
         {
             weapons.missiles -= 1;
-            weapons.missile_cooldown = 0.8;
+            weapons.missile_cooldown = MISSILE_COOLDOWN;
+            // off the station it hung on (`StoredMissile`), or alternate bay doors
+            let station = airframe.and_then(|a| a.hardpoint(weapons.missiles));
             weapons.rail = !weapons.rail;
             let side = if weapons.rail { 2.2 } else { -2.2 };
             let target = targeting.filter(|t| t.locked()).and_then(|t| t.target);
-            let pos = transform.transform_point(Vec3::new(side, -1.2, -1.0));
+            let pos = transform.transform_point(station.unwrap_or(Vec3::new(side, -1.2, -1.0)));
             let missile = Missile {
                 velocity: state.velocity - transform.up().as_vec3() * 8.0,
                 target,
