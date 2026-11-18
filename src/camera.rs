@@ -8,7 +8,7 @@
 use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
-    light::AtmosphereEnvironmentMapLight,
+    light::{AtmosphereEnvironmentMapLight, EnvironmentMapLight},
     pbr::AtmosphereSettings,
     post_process::bloom::Bloom,
     prelude::*,
@@ -25,7 +25,7 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         patch_atmosphere(app);
         app.add_systems(Startup, spawn_camera)
-            .add_systems(Update, apply_environment.run_if(resource_changed::<crate::environment::Environment>))
+            .add_systems(Update, (apply_environment.run_if(resource_changed::<crate::environment::Environment>), freeze_sky_light).chain())
             .add_systems(PostUpdate, follow_player.before(TransformSystems::Propagate));
     }
 }
@@ -88,7 +88,6 @@ fn spawn_camera(
                 aerial_view_lut_max_distance: 6.0e4,
                 ..default()
             },
-            AtmosphereEnvironmentMapLight { intensity: look.env_light, ..default() },
         ));
     }
     // web: no MSAA. Its multisampled colour, depth and prepass targets cost a
@@ -117,16 +116,56 @@ fn exposure(look: &crate::environment::Look) -> Exposure {
 
 /// Exposure, fog and sky light follow the round's environment.
 fn apply_environment(
+    mut commands: Commands,
     env: Res<crate::environment::Environment>,
-    mut camera: Query<(&mut Exposure, &mut DistanceFog, Option<&mut AtmosphereEnvironmentMapLight>), With<MainCamera>>,
+    mut camera: Query<(Entity, &mut Exposure, &mut DistanceFog), With<MainCamera>>,
+    probes: Query<Entity, With<SkyLightProbe>>,
 ) {
     let look = env.look();
-    for (mut exp, mut fog, light) in &mut camera {
+    for (entity, mut exp, mut fog) in &mut camera {
         *exp = exposure(&look);
         *fog = look.distance_fog();
-        if let Some(mut light) = light {
-            light.intensity = look.env_light;
+        if crate::platform::atmosphere() {
+            // a new sky: generate its light afresh (see `freeze_sky_light`)
+            commands.entity(entity).remove::<EnvironmentMapLight>();
+            for probe in &probes {
+                commands.entity(probe).despawn();
+            }
+            commands.spawn((
+                SkyLightProbe(0),
+                AtmosphereEnvironmentMapLight { intensity: look.env_light, ..default() },
+            ));
         }
+    }
+}
+
+/// Generates the sky's environment light (frames it has been at it).
+#[derive(Component)]
+struct SkyLightProbe(u32);
+
+/// Frames the generated sky light gets to settle before it's frozen.
+const SKY_LIGHT_SETTLE: u32 = 30;
+
+/// Bevy renders the sky into a cubemap and filters it into the environment
+/// light every frame (measured: ~57 -> ~60 fps in a fight once it stops). The sky doesn't
+/// change during a round (a new one comes with a new environment, and a new
+/// probe), so it's generated on a probe of its own and, once settled, the
+/// result moves onto the camera and the probe goes, which stops both passes.
+fn freeze_sky_light(
+    mut commands: Commands,
+    mut probes: Query<(Entity, &mut SkyLightProbe, Option<&EnvironmentMapLight>)>,
+    camera: Query<Entity, With<MainCamera>>,
+) {
+    for (probe, mut age, light) in &mut probes {
+        age.0 += 1;
+        let Some(light) = light.filter(|_| age.0 >= SKY_LIGHT_SETTLE) else { continue };
+        if std::env::var("FLIGHT_SIM_LOG").is_ok() {
+            info!("sky light frozen after {} frames", age.0);
+        }
+        for cam in &camera {
+            commands.entity(cam).insert(light.clone());
+        }
+        commands.entity(probe).despawn();
     }
 }
 
