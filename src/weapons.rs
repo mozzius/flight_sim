@@ -86,7 +86,44 @@ impl Plugin for WeaponsPlugin {
                     .chain()
                     .in_set(FlightSystems::Combat),
             )
-            .add_systems(Update, (hang_stores, show_stores).chain());
+            .add_systems(Update, (use_sidewinder.run_if(resource_exists::<AssetServer>), hang_stores, show_stores).chain());
+    }
+}
+
+/// Swaps the Sidewinder in for the capsule (on the missiles out already, too)
+/// once it's loaded. Without the assets repo the capsule stays.
+fn use_sidewinder(
+    mut assets: ResMut<ProjectileAssets>,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut drawn: Query<&mut Mesh3d>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let Some(model) = assets.sidewinder.clone() else {
+        *done = true;
+        return;
+    };
+    let state = asset_server.load_state(&model);
+    if state.is_failed() {
+        *done = true;
+        return;
+    }
+    if !asset_server.is_loaded_with_dependencies(&model) {
+        return;
+    }
+    *done = true;
+    // its colours are baked into the mesh: the capsule's grey would darken them
+    if let Some(mut m) = materials.get_mut(&assets.missile_material) {
+        m.base_color = Color::WHITE;
+    }
+    let capsule = std::mem::replace(&mut assets.missile_mesh, model.clone());
+    for mut mesh in &mut drawn {
+        if mesh.0 == capsule {
+            mesh.0 = model.clone();
+        }
     }
 }
 
@@ -115,11 +152,11 @@ fn hang_stores(
                     Mesh3d(assets.missile_mesh.clone()),
                     MeshMaterial3d(assets.missile_material.clone()),
                     // the mesh's length is along Y, its nose at -Y: point it forward.
-                    // A little smaller than the flying missile (~2.9 m, Sidewinder-ish),
-                    // which these airframes carry better.
+                    // A little smaller than the flying missile (~2.9 m, an
+                    // AIM-9's length), which these airframes carry better.
                     Transform::from_translation(at)
                         .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                        .with_scale(Vec3::new(0.75, 0.8, 0.75)),
+                        .with_scale(Vec3::splat(0.8)),
                 ));
             }
         });
@@ -315,12 +352,16 @@ pub struct ProjectileAssets {
     flame_material: Handle<StandardMaterial>,
     flare_mesh: Handle<Mesh>,
     flare_material: Handle<StandardMaterial>,
+    /// The AIM-9M (`models/jets/aim9m.gltf`, from the private assets repo,
+    /// `scripts/jets/sidewinder.py`): replaces the capsule once it's loaded.
+    sidewinder: Option<Handle<Mesh>>,
 }
 
 fn setup_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Option<Res<AssetServer>>,
 ) {
     let glow = |materials: &mut Assets<StandardMaterial>, c: LinearRgba| {
         // unlit: base_color *is* the output, so HDR values here glow
@@ -334,7 +375,11 @@ fn setup_assets(
         // long thin capsule along -Z; long enough to read as a tracer streak
         tracer_mesh: meshes.add(Capsule3d::new(0.12, 9.0).mesh().latitudes(4).longitudes(6)),
         tracer_material: glow(&mut materials, LinearRgba::rgb(25.0, 12.0, 2.5)),
+        // (the same length as the Sidewinder, its nozzle where the motor effects are)
         missile_mesh: meshes.add(Capsule3d::new(0.13, 3.4).mesh().latitudes(4).longitudes(8)),
+        sidewinder: asset_server.map(|s| {
+            s.load(GltfAssetLabel::Primitive { mesh: 0, primitive: 0 }.from_asset("models/jets/aim9m.gltf"))
+        }),
         missile_material: materials.add(StandardMaterial {
             base_color: Color::srgb(0.85, 0.85, 0.82),
             metallic: 0.3,
