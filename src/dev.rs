@@ -424,7 +424,6 @@ fn autopilot_player(
 /// - `engines` / `dry`: afterburner / full dry power only
 /// - `missile`: fires a missile
 /// - `vapour`: a hard pull
-/// - `mach`: held at Mach 0.96 (the shock collar)
 /// - `far`: the player starts 40 km out (float precision far from the origin)
 /// - `damage`: the player is badly damaged from the start
 /// - `burning`: the player is shot down
@@ -519,12 +518,6 @@ fn fx_test_explosion(
     {
         t.translation.y += 5_000.0;
         *lifted = true;
-    }
-    // `mach`: held just under Mach 1, where the shock collar forms
-    if mode == "mach"
-        && let Ok((t, mut state, _)) = player.single_mut()
-    {
-        state.velocity = t.forward() * crate::flight::SPEED_OF_SOUND * 0.96;
     }
     if mode == "damage" {
         for (_, _, mut health) in &mut player {
