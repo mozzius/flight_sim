@@ -62,7 +62,8 @@ fn spawn_camera(
         Camera3d::default(),
         MainCamera,
         Projection::Perspective(PerspectiveProjection {
-            fov: 65f32.to_radians(),
+            // (`FLIGHT_SIM_FOV=<degrees>`: a longer lens for screenshots)
+            fov: std::env::var("FLIGHT_SIM_FOV").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(65.0).to_radians(),
             near: 0.5,
             far: 120_000.0,
             ..default()
