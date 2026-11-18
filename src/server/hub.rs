@@ -1911,6 +1911,8 @@ mod tests {
             flags: 0,
             health: 100.0,
             status: Status::Flying,
+            jet: 0,
+            stick: [0; 3],
         })
     }
 

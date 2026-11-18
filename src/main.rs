@@ -24,6 +24,7 @@ mod friends;
 mod game;
 mod hud;
 mod identity;
+mod jets;
 mod intro;
 mod leaderboard;
 mod pause;
@@ -112,6 +113,6 @@ fn main() {
             dev::DevPlugin,
         ))
         .add_plugins((settings::SettingsPlugin, loading::LoadingPlugin, menu::MenuPlugin, modes::ModesPlugin, net::NetPlugin, friends::FriendsPlugin, signin::SignInPlugin, leaderboard::LeaderboardPlugin))
-        .add_plugins((waypoints::WaypointsPlugin, tutorial::TutorialPlugin, backdrop::BackdropPlugin))
+        .add_plugins((waypoints::WaypointsPlugin, tutorial::TutorialPlugin, backdrop::BackdropPlugin, jets::JetsPlugin))
         .run();
 }

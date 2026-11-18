@@ -1,5 +1,5 @@
 //! Player settings: SOUND and GRAPHICS (the main menu's SETTINGS), the
-//! scenario's DIFFICULTY, ENEMIES and ALLIES, plus whether the tutorial's been finished. Kept in `localStorage` on the web and in
+//! scenario's DIFFICULTY, ENEMIES and ALLIES, the JET and LIVERY, plus whether the tutorial's been finished. Kept in `localStorage` on the web and in
 //! `<data dir>/flight_sim/settings` (`key=value` lines) natively; screenshot
 //! runs keep none. `FLIGHT_SIM_GRAPHICS=auto|low|high` and
 //! `FLIGHT_SIM_DIFFICULTY=easy|normal|hard` pin them for a run without saving.
@@ -20,6 +20,7 @@ pub struct SettingsPlugin;
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         let settings = Settings::load();
+        crate::jets::set_player(settings.jet);
         app.insert_resource(settings).insert_resource(Applied(settings.graphics));
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(switch) = dev_switch() {
@@ -80,6 +81,8 @@ pub struct Settings {
     pub allies: u8,
     /// The tutorial has been finished once (the menu stops highlighting it).
     pub tutorial_done: bool,
+    /// The jet and livery the player flies.
+    pub jet: crate::jets::JetChoice,
 }
 
 impl Default for Settings {
@@ -91,6 +94,7 @@ impl Default for Settings {
             enemies: 0,
             allies: DEFAULT_ALLIES,
             tutorial_done: false,
+            jet: crate::jets::JetChoice::default(),
         }
     }
 }
@@ -126,6 +130,7 @@ const TUTORIAL_KEY: &str = "flight_sim_tutorial";
 const SOUND_KEY: &str = "flight_sim_sound";
 const ENEMIES_KEY: &str = "flight_sim_enemies";
 const ALLIES_KEY: &str = "flight_sim_allies";
+const JET_KEY: &str = "flight_sim_jet";
 
 impl Settings {
     pub fn load() -> Self {
@@ -139,6 +144,7 @@ impl Settings {
             graphics: pick("FLIGHT_SIM_GRAPHICS", GRAPHICS_KEY).and_then(|s| Graphics::parse(&s)).unwrap_or_default(),
             difficulty: pick("FLIGHT_SIM_DIFFICULTY", DIFFICULTY_KEY).and_then(|s| Difficulty::parse(&s)).unwrap_or_default(),
             tutorial_done: store::get(TUTORIAL_KEY).is_some_and(|v| v == "done"),
+            jet: pick("FLIGHT_SIM_JET", JET_KEY).and_then(|s| crate::jets::JetChoice::parse(&s)).unwrap_or_default(),
         }
     }
 }
@@ -170,6 +176,12 @@ pub fn save_sound(level: u8) {
 
 pub fn save_enemies(n: u8) {
     store::set(ENEMIES_KEY, &n.to_string());
+}
+
+/// Saves the player's jet (and makes it the one they spawn in).
+pub fn save_jet(jet: crate::jets::JetChoice) {
+    crate::jets::set_player(jet);
+    store::set(JET_KEY, &jet.key());
 }
 
 pub fn save_allies(n: u8) {

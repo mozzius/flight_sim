@@ -10,6 +10,7 @@ use crate::{
     controls::MouseAim,
     modes::{GameMode, KILL_POINTS, WAVE_POINTS},
     flight::{Aircraft, AircraftCrashed, ControlInput, Disabled, FlightState, FlightSystems},
+    jets::{JetChoice, Stick},
     weapons::{Targeting, Weapons},
     world::Terrain,
 };
@@ -118,19 +119,34 @@ struct RespawnQueue {
     pending: Vec<(f32, Team, bool)>,
 }
 
+/// Every jet in every livery, loaded up front (half-size textures on phones).
 #[derive(Resource)]
 pub struct Models {
-    pub fighter: Handle<WorldAsset>,
+    jets: Vec<(JetChoice, Handle<WorldAsset>)>,
 }
 
-/// The F-22 model is authored ~6x too big and facing +X.
-const MODEL_SCALE: f32 = 0.166;
+impl Models {
+    pub fn scene(&self, choice: JetChoice) -> Handle<WorldAsset> {
+        self.jets.iter().find(|(c, _)| *c == choice).unwrap_or(&self.jets[0]).1.clone()
+    }
+
+    fn all_loaded(&self, asset_server: &AssetServer) -> bool {
+        self.jets.iter().all(|(_, h)| asset_server.is_loaded_with_dependencies(h))
+    }
+}
 
 fn load_models(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let low = crate::platform::low_memory();
     commands.insert_resource(Models {
-        fighter: asset_server
-            .load(GltfAssetLabel::Scene(0).from_asset("models/f22-raptor/scene.gltf")),
+        jets: JetChoice::all()
+            .map(|c| (c, asset_server.load(GltfAssetLabel::Scene(0).from_asset(c.path(low)))))
+            .collect(),
     });
+}
+
+/// A jet's model, as a child of its aircraft (the glTF is authored in aircraft space).
+fn model(models: &Models, choice: JetChoice) -> impl Bundle {
+    (AircraftModel, WorldAssetRoot(models.scene(choice)), Transform::IDENTITY)
 }
 
 /// A speck of a jet held in front of the camera for a few frames once the
@@ -152,7 +168,7 @@ fn warm_jet_shaders(
     }
     let Some(models) = models else { return };
     if let Ok((e, mut w)) = warmer.single_mut() {
-        if asset_server.is_loaded_with_dependencies(&models.fighter) {
+        if models.all_loaded(&asset_server) {
             w.0 += 1;
             if w.0 > 8 {
                 commands.entity(e).despawn();
@@ -168,10 +184,15 @@ fn warm_jet_shaders(
     let warm = commands
         .spawn((
             ShaderWarmer(0),
-            WorldAssetRoot(models.fighter.clone()),
             // far too small to see, but in view, so it's drawn
             Transform::from_xyz(0.0, 0.0, -30.0).with_scale(Vec3::splat(0.0004)),
+            Visibility::default(),
         ))
+        .with_children(|p| {
+            for (_, scene) in &models.jets {
+                p.spawn((WorldAssetRoot(scene.clone()), Transform::IDENTITY));
+            }
+        })
         .id();
     commands.entity(cam).add_child(warm);
 }
@@ -201,6 +222,13 @@ pub fn spawn_aircraft(
     let position = Vec3::new(position.x, position.y.max(ground + 500.0), position.z);
     let transform = Transform::from_translation(position).looking_to(heading, Vec3::Y);
     let speed = 240.0;
+    let jet = if player {
+        crate::jets::player()
+    } else {
+        // (mixed flights: count the AI as they spawn)
+        static AI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        crate::jets::ai_jet(team == Team::Red, AI.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    };
     let mut entity = commands.spawn((
         Name::new(if player { "Player".to_string() } else { format!("{team:?} fighter") }),
         transform,
@@ -216,14 +244,9 @@ pub fn spawn_aircraft(
         Health::new(100.0),
         Weapons::fighter(),
         Targeting::default(),
+        (jet, Stick::default()),
     ));
-    entity.with_child((
-        AircraftModel,
-        WorldAssetRoot(models.fighter.clone()),
-        Transform::from_xyz(0.0, -0.8, 0.0)
-            .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
-            .with_scale(Vec3::splat(MODEL_SCALE)),
-    ));
+    entity.with_child(model(models, jet));
     if player {
         entity.insert(Player);
     } else {
@@ -234,7 +257,7 @@ pub fn spawn_aircraft(
 
 /// Another player's jet (multiplayer): flown by their game, so no physics
 /// or pilot here, just what the effects, HUD and weapons look at.
-pub fn spawn_remote_aircraft(commands: &mut Commands, models: &Models, transform: Transform, velocity: Vec3, remote: crate::net::Remote, name: &str) -> Entity {
+pub fn spawn_remote_aircraft(commands: &mut Commands, models: &Models, transform: Transform, velocity: Vec3, remote: crate::net::Remote, name: &str, jet: JetChoice) -> Entity {
     commands
         .spawn((
             Name::new(format!("{name} (remote)")),
@@ -247,14 +270,9 @@ pub fn spawn_remote_aircraft(commands: &mut Commands, models: &Models, transform
             Weapons::fighter(),
             remote,
             crate::net::RemoteName(name.to_string()),
+            (jet, Stick::default()),
         ))
-        .with_child((
-            AircraftModel,
-            WorldAssetRoot(models.fighter.clone()),
-            Transform::from_xyz(0.0, -0.8, 0.0)
-                .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
-                .with_scale(Vec3::splat(MODEL_SCALE)),
-        ))
+        .with_child(model(models, jet))
         .id()
 }
 

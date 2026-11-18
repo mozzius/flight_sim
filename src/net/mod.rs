@@ -61,6 +61,7 @@ use crate::{
     environment::{Biome, Environment, Picks, TimeOfDay, Weather},
     flight::{ControlInput, Disabled, FlightState},
     game::{Explosion, Health, Models, Player, spawn_remote_aircraft},
+    jets::{JetChoice, Stick},
     loading::{GameState, begin_map, round_seed},
     modes::GameMode,
     weapons::{Bullet, Flare, Missile, ProjectileAssets, Weapons, decoy_missiles, spawn_flare, spawn_missile, spawn_tracer},
@@ -1253,6 +1254,8 @@ struct Sample {
     flags: u8,
     health: f32,
     status: Status,
+    jet: JetChoice,
+    stick: Vec3,
 }
 
 impl From<&PlayerState> for Sample {
@@ -1266,6 +1269,8 @@ impl From<&PlayerState> for Sample {
             flags: s.flags,
             health: s.health,
             status: s.status,
+            jet: JetChoice::from_wire(s.jet),
+            stick: Vec3::from_array(s.stick.map(|v| v as f32 / 127.0)),
         }
     }
 }
@@ -1298,6 +1303,7 @@ fn sample(buffer: &VecDeque<PlayerState>, t: f64) -> Option<Sample> {
                 vel: a.vel.lerp(b.vel, u),
                 throttle: a.throttle + (b.throttle - a.throttle) * u,
                 g: a.g + (b.g - a.g) * u,
+                stick: a.stick.lerp(b.stick, u),
                 ..a
             })
         }
@@ -1333,7 +1339,7 @@ fn interpolate(
     models: Res<Models>,
     assets: Res<ProjectileAssets>,
     me: Query<Entity, With<Player>>,
-    mut remotes: Query<(&mut Transform, &mut FlightState, &mut Weapons, &mut Health, Has<Disabled>), With<Remote>>,
+    mut remotes: Query<(&mut Transform, &mut FlightState, &mut Weapons, &mut Health, Has<Disabled>, &JetChoice, &mut Stick), With<Remote>>,
     mut their_missiles: Query<(&mut Transform, &mut Missile), (With<RemoteMissile>, Without<Remote>)>,
     mut our_missiles: Query<&mut Missile, (With<OwnMissile>, Without<RemoteMissile>)>,
     mut explosions: MessageWriter<Explosion>,
@@ -1362,7 +1368,8 @@ fn interpolate(
                 Status::Flying | Status::Down => match peer.entity {
                     None if s.status == Status::Flying => {
                         let transform = Transform::from_translation(s.pos).with_rotation(s.rot);
-                        let e = spawn_remote_aircraft(&mut commands, &models, transform, s.vel, Remote { id: *id }, &peer.handle);
+                        let e = spawn_remote_aircraft(&mut commands, &models, transform, s.vel, Remote { id: *id }, &peer.handle, s.jet);
+                        info!("multiplayer: {} flies the {} ({})", peer.handle, s.jet.spec().name, s.jet.livery_name());
                         if s.health < MAX_HEALTH {
                             let mut health = Health::new(MAX_HEALTH);
                             health.current = s.health.max(1.0);
@@ -1371,8 +1378,15 @@ fn interpolate(
                         peer.entity = Some(e);
                     }
                     None => {}
+                    // they picked another jet (or paint) between lives: a new one next frame
+                    Some(e) if remotes.get(e).is_ok_and(|r| *r.5 != s.jet) => {
+                        commands.entity(e).try_despawn();
+                        peer.entity = None;
+                    }
                     Some(e) => {
-                        if let Ok((mut t, mut fs, mut weapons, mut health, disabled)) = remotes.get_mut(e) {
+                        if let Ok((mut t, mut fs, mut weapons, mut health, disabled, _, mut stick)) = remotes.get_mut(e) {
+                            stick.target = s.stick;
+                            stick.airbrake_target = s.flags & PlayerState::AIRBRAKE != 0;
                             t.translation = s.pos;
                             t.rotation = s.rot;
                             fs.velocity = s.vel;
@@ -1459,7 +1473,7 @@ fn tag_own_missiles(
 fn send(
     mut net: ResMut<Net>,
     time: Res<Time<Real>>,
-    player: Query<(Entity, &Transform, &FlightState, &ControlInput, &Weapons, Has<Disabled>), With<Player>>,
+    player: Query<(Entity, &Transform, &FlightState, &ControlInput, &Weapons, Has<Disabled>, &JetChoice), With<Player>>,
     spawned: Query<(), Added<Player>>,
     bullets: Query<(&Bullet, &Transform), Added<Bullet>>,
     flares: Query<(&Flare, &Transform), Added<Flare>>,
@@ -1517,7 +1531,7 @@ fn send(
     net.last_msg = now;
 
     let state = match me {
-        Some((_, t, fs, input, weapons, disabled)) => {
+        Some((_, t, fs, input, weapons, disabled, jet)) => {
             net.last_pose = Some((t.translation, t.rotation));
             let mut flags = 0;
             if fs.afterburner_on {
@@ -1539,6 +1553,8 @@ fn send(
                 flags,
                 health: 0.0,
                 status: if disabled { Status::Down } else { Status::Flying },
+                jet: jet.to_wire(),
+                stick: [input.pitch, input.roll, input.yaw].map(|v| (v.clamp(-1.0, 1.0) * 127.0).round() as i8),
             })
         }
         // crashed (and not yet back): the server takes this as a death
@@ -1552,6 +1568,8 @@ fn send(
             flags: 0,
             health: 0.0,
             status: Status::Dead,
+            jet: crate::jets::player().to_wire(),
+            stick: [0; 3],
         }),
         None => None,
     };
@@ -1596,6 +1614,8 @@ mod tests {
             flags: 0,
             health: 100.0,
             status: Status::Flying,
+            jet: 0,
+            stick: [0; 3],
         }
     }
 

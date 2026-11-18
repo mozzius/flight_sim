@@ -29,6 +29,7 @@ use rand::{Rng, RngExt};
 use crate::{
     camera::MainCamera,
     flight::{Aircraft, Disabled, FlightState},
+    jets::{JetChoice, Stick},
     game::{Explosion, Health},
     weapons::{Flare, Missile, MissileFlame, Weapons},
 };
@@ -212,27 +213,24 @@ fn spaced(last: &mut Option<Vec3>, now: Vec3, spacing: f32, out: &mut Vec<Vec3>)
 
 // ---------------------------------------------------------------- aircraft
 
-/// Exhaust nozzle positions in aircraft-local space (metres).
-// measured from the model: nose at z=-12, tail fins reach z=+8.9, nozzle discs ~5.0, exit lip ~6.6-7.0. The flame starts deep inside the nozzle (the plume shader treats the first 2.4 m as the nozzle interior) so it always emerges from within, with no gap from any angle.
-// The 2D nozzle openings (from the glTF's vertices, through the model's
-// transform in `game.rs`) span x 0.50..1.08 and y -0.13..0.68 inside the
-// flaps, so they're centred at x ±0.79, y 0.27.
-const NOZZLES: [Vec3; 2] = [Vec3::new(0.79, 0.27, 4.4), Vec3::new(-0.79, 0.27, 4.4)];
-const WINGTIPS: [Vec3; 2] = [Vec3::new(7.3, 0.0, 2.0), Vec3::new(-7.3, 0.0, 2.0)];
-const GUN_PORT: Vec3 = Vec3::new(0.9, 0.9, -7.5);
-/// Upper wing surface (right wing) as a quad: root LE, tip LE, tip TE, root TE.
-const WING: [Vec3; 4] = [
-    Vec3::new(1.9, 0.55, -3.2),
-    Vec3::new(6.7, 0.2, 1.1),
-    Vec3::new(7.1, 0.2, 2.7),
-    Vec3::new(1.9, 0.55, 4.0),
-];
+/// Per-jet placements (nozzles, wingtips, gun port, wing) are in
+/// [`crate::jets::JetSpec`], measured from each model by `scripts/jets/build.py`.
+/// A plume mesh starts `plume::EXIT_DEPTH` inside its nozzle's exit, so the
+/// flame always emerges from within, with no gap from any angle.
+fn plume_start(nozzle: Vec3) -> Vec3 {
+    nozzle - Vec3::Z * plume::EXIT_DEPTH
+}
+
+/// Where a vectoring nozzle swivels (its front ring), behind the exit.
+const VECTOR_PIVOT: f32 = 1.75;
 
 #[derive(Component)]
 struct Engine {
     seed: f32,
     afterburner: f32,
     haze: Entity,
+    /// The nozzle exit (aircraft space).
+    nozzle: Vec3,
 }
 
 #[derive(Component)]
@@ -255,12 +253,15 @@ fn attach_aircraft_effects(
     mut plumes: ResMut<Assets<PlumeMaterial>>,
     mut hazes: ResMut<Assets<HazeMaterial>>,
     mut ribbons: ResMut<Ribbons>,
-    new: Query<Entity, Added<Aircraft>>,
+    new: Query<(Entity, &JetChoice), Added<Aircraft>>,
 ) {
     let mut rng = rand::rng();
-    let shape = Vec4::new(plume::HALF_LENGTH, plume::RADIUS, 0.5, 0.36);
     let along = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
-    for aircraft in &new {
+    for (aircraft, jet) in &new {
+        let spec = jet.spec();
+        // round nozzles: the jet is as wide as it's tall
+        let shape = Vec4::new(plume::HALF_LENGTH, plume::RADIUS, spec.nozzle_radius, spec.nozzle_radius);
+        let exit_z = spec.nozzles[0].z;
         commands.entity(aircraft).insert(AircraftFx {
             seed: rng.random_range(0.0..100.0),
             ..default()
@@ -276,19 +277,20 @@ fn attach_aircraft_effects(
                     noise: assets.noise.clone(),
                     cloud_occlusion: crate::clouds::OCCLUSION_MAP,
                 })),
-                Transform::from_translation(Vec3::new(0.0, NOZZLES[0].y, 6.8 + plume::HAZE_HALF_LENGTH))
+                Transform::from_translation(Vec3::new(0.0, spec.nozzles[0].y, exit_z + plume::HAZE_HALF_LENGTH))
                     .with_rotation(along),
                 NotShadowCaster,
                 ChildOf(aircraft),
             ))
             .id();
         commands.entity(aircraft).with_children(|p| {
-            for (i, nozzle) in NOZZLES.into_iter().enumerate() {
+            for (i, &nozzle) in spec.nozzles.iter().enumerate() {
                 p.spawn((
                     Engine {
                         seed: rng.random_range(0.0..100.0) + i as f32 * 37.0,
                         afterburner: 0.0,
                         haze,
+                        nozzle,
                     },
                     Mesh3d(assets.plume.clone()),
                     MeshMaterial3d(plumes.add(PlumeMaterial {
@@ -299,7 +301,7 @@ fn attach_aircraft_effects(
                         noise: assets.noise.clone(),
                         cloud_occlusion: crate::clouds::OCCLUSION_MAP,
                     })),
-                    Transform::from_translation(nozzle + Vec3::Z * plume::HALF_LENGTH)
+                    Transform::from_translation(plume_start(nozzle) + Vec3::Z * plume::HALF_LENGTH)
                         .with_rotation(along),
                     NotShadowCaster,
                     NoFrustumCulling,
@@ -315,7 +317,7 @@ fn attach_aircraft_effects(
                     shadow_maps_enabled: false,
                     ..default()
                 },
-                Transform::from_xyz(0.0, 0.3, 10.0),
+                Transform::from_xyz(0.0, 0.3, exit_z + 3.2),
             ));
             p.spawn((
                 MuzzleLight,
@@ -326,16 +328,16 @@ fn attach_aircraft_effects(
                     shadow_maps_enabled: false,
                     ..default()
                 },
-                Transform::from_translation(GUN_PORT + Vec3::new(0.0, 0.3, -1.0)),
+                Transform::from_translation(spec.gun_port + Vec3::new(0.0, 0.3, -1.0)),
             ));
         });
-        for tip in WINGTIPS {
+        for tip in [spec.wingtip, spec.wingtip * Vec3::new(-1.0, 1.0, 1.0)] {
             ribbons.0.push(Trail::new(aircraft, tip, RibbonKind::Vortex));
         }
-        for nozzle in NOZZLES {
+        for nozzle in spec.nozzles {
             ribbons.0.push(Trail::new(
                 aircraft,
-                Vec3::new(nozzle.x, nozzle.y, 8.5),
+                Vec3::new(nozzle.x, nozzle.y, nozzle.z + 1.9),
                 RibbonKind::Contrail,
             ));
         }
@@ -345,8 +347,8 @@ fn attach_aircraft_effects(
 #[allow(clippy::type_complexity)]
 fn update_engines(
     time: Res<Time>,
-    aircraft: Query<(&FlightState, Has<Disabled>)>,
-    mut engines: Query<(&ChildOf, &mut Engine, &MeshMaterial3d<PlumeMaterial>, &mut Visibility)>,
+    aircraft: Query<(&FlightState, Has<Disabled>, &JetChoice, &Stick)>,
+    mut engines: Query<(&ChildOf, &mut Engine, &MeshMaterial3d<PlumeMaterial>, &mut Visibility, &mut Transform)>,
     haze_handles: Query<&MeshMaterial3d<HazeMaterial>>,
     mut plumes: ResMut<Assets<PlumeMaterial>>,
     mut hazes: ResMut<Assets<HazeMaterial>>,
@@ -354,10 +356,18 @@ fn update_engines(
 ) {
     let t = time.elapsed_secs();
     let dt = time.delta_secs();
-    for (parent, mut engine, material, mut visibility) in &mut engines {
-        let Ok((state, disabled)) = aircraft.get(parent.parent()) else {
+    let along = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+    for (parent, mut engine, material, mut visibility, mut transform) in &mut engines {
+        let Ok((state, disabled, jet, stick)) = aircraft.get(parent.parent()) else {
             continue;
         };
+        // a vectoring nozzle swings its plume round the nozzle's front ring
+        if jet.spec().vectoring {
+            let pivot = engine.nozzle - Vec3::Z * VECTOR_PIVOT;
+            let swing = Quat::from_rotation_x(crate::jets::vector_angle(*jet, stick, engine.nozzle.x));
+            let offset = plume_start(engine.nozzle) + Vec3::Z * plume::HALF_LENGTH - pivot;
+            *transform = Transform::from_translation(pivot + swing * offset).with_rotation(swing * along);
+        }
         let target = if state.afterburner_on && !disabled { 1.0 } else { 0.0 };
         // light-off is quick, shutdown a touch slower
         let rate = if target > engine.afterburner { 6.0 } else { 4.0 };
@@ -376,7 +386,7 @@ fn update_engines(
         }
     }
     for (parent, mut light) in &mut lights {
-        let Ok((state, disabled)) = aircraft.get(parent.parent()) else {
+        let Ok((state, disabled, ..)) = aircraft.get(parent.parent()) else {
             continue;
         };
         let on = state.afterburner_on && !disabled;
@@ -407,6 +417,7 @@ fn aircraft_fx(
         &Weapons,
         Has<Disabled>,
         &mut AircraftFx,
+        &JetChoice,
     )>,
     mut muzzle_lights: Query<(&ChildOf, &mut PointLight), With<MuzzleLight>>,
     mut points: Local<Vec<Vec3>>,
@@ -417,8 +428,10 @@ fn aircraft_fx(
     }
     let t = time.elapsed_secs();
     let mut rng = rand::rng();
-    for (entity, gt, state, health, weapons, disabled, mut fx) in &mut aircraft {
+    for (entity, gt, state, health, weapons, disabled, mut fx, jet) in &mut aircraft {
         let pos = gt.translation();
+        let spec = jet.spec();
+        let (wing, gun_port) = (spec.wing, spec.gun_port);
 
         // ---- vapour: wing-surface sheets under G / AoA, and the transonic cone
         if !disabled {
@@ -445,8 +458,8 @@ fn aircraft_fx(
                     let u = rng.random::<f32>().powf(0.8);
                     let spill = rng.random_bool(0.18);
                     let v = if spill { 1.0 } else { 0.08 + rng.random::<f32>() * reach * 0.9 };
-                    let lead = WING[0].lerp(WING[1], u);
-                    let trail = WING[3].lerp(WING[2], u);
+                    let lead = wing[0].lerp(wing[1], u);
+                    let trail = wing[3].lerp(wing[2], u);
                     let mut p = lead.lerp(trail, v);
                     p.y += rng.random_range(0.03..0.18);
                     p.x *= side;
@@ -598,7 +611,7 @@ fn aircraft_fx(
                     size: (2.6 * flash, 2.6 * flash),
                     glow: 5.5,
                     frame: Some(entity),
-                    ..Particle::glow(GUN_PORT + Vec3::new(0.0, 0.0, -0.8))
+                    ..Particle::glow(gun_port + Vec3::new(0.0, 0.0, -0.8))
                 },
                 1.0,
             );
@@ -612,13 +625,13 @@ fn aircraft_fx(
                         glow: 7.5,
                         gravity: 0.0,
                         frame: Some(entity),
-                        ..Particle::spark(GUN_PORT + dir * 0.8, dir * rng.random_range(120.0..220.0))
+                        ..Particle::spark(gun_port + dir * 0.8, dir * rng.random_range(120.0..220.0))
                     },
                     1.0,
                 );
             }
             if rng.random_bool(0.6) {
-                let p = gt.transform_point(GUN_PORT + Vec3::new(0.0, 0.0, 0.5));
+                let p = gt.transform_point(gun_port + Vec3::new(0.0, 0.0, 0.5));
                 particles.add(
                     Particle {
                         vel: state.velocity * 0.75 + rand_dir(&mut rng) * 2.0,

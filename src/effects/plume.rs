@@ -46,6 +46,8 @@ pub const HALF_LENGTH: f32 = 7.0;
 pub const RADIUS: f32 = 1.15;
 pub const HAZE_HALF_LENGTH: f32 = 10.0;
 pub const HAZE_RADIUS: f32 = 2.2;
+/// How far inside the nozzle exit the plume mesh starts (`EXIT` in fx_plume.wesl).
+pub const EXIT_DEPTH: f32 = 2.4;
 
 #[derive(Clone, Copy, ShaderType, Default, Debug)]
 pub struct PlumeParams {

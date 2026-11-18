@@ -96,6 +96,9 @@ pub enum Pick {
     Allies,
     Sound,
     Graphics,
+    /// The player's jet, and its paint.
+    Jet,
+    Livery,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -234,6 +237,8 @@ const COPIED_SECS: f64 = 1.5;
 // Focus orders and rows on the mode menu (up / down go by row). Home is
 // orders / rows 0-5, the multiplayer page 6-8; each page's BACK comes last,
 // then the account corner, then the friends list.
+const ORDER_HANGAR: u8 = 9;
+const ROW_HANGAR: u8 = 9;
 const ORDER_PICKERS: u8 = 12;
 const ROW_PICKERS: u8 = 12;
 const ORDER_START: u8 = 18;
@@ -401,6 +406,23 @@ fn compact_pickers(
 
 
 
+
+/// JET and LIVERY: on every page that starts or joins a round. One copy in
+/// the column, one under the title (`side`) for short landscape screens.
+fn hangar(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, side: bool) {
+    let node = Node {
+        width: px(COLUMN_WIDTH),
+        margin: UiRect::top(px(if side { 10.0 } else { 0.0 })),
+        flex_direction: FlexDirection::Column,
+        align_items: AlignItems::Stretch,
+        row_gap: px(8),
+        ..default()
+    };
+    parent.spawn((Sec::Hangar { side }, PickerColumn, node)).with_children(|panel| {
+        picker(panel, font, "JET", Pick::Jet, ORDER_HANGAR, ROW_HANGAR);
+        picker(panel, font, "LIVERY", Pick::Livery, ORDER_HANGAR + 1, ROW_HANGAR + 1);
+    });
+}
 
 /// A picker row: label on the left, `< VALUE >` on the right.
 fn picker(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, label: &str, pick: Pick, order: u8, row: u8) -> Entity {
@@ -584,6 +606,9 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     rule.spawn((Node { width: px(18), height: px(2), ..default() }, BackgroundColor(GREEN.with_alpha(0.85))));
                     rule.spawn((Node { width: px(72), height: px(1), ..default() }, BackgroundColor(GREEN.with_alpha(0.3))));
                 });
+                // JET and LIVERY move here on short landscape screens (phones),
+                // where the column has no room for them
+                hangar(block, &font, true);
                 if net {
                     block.spawn(Node { height: px(8), ..default() });
                     crate::friends::spawn_list(block, &font, Screen::Modes, ORDER_FRIENDS, ROW_FRIENDS);
@@ -597,6 +622,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                     bevy::text::LetterSpacing::Px(3.0),
                     Node { margin: UiRect::bottom(px(2)), align_self: AlignSelf::Center, ..default() },
                 ));
+                hangar(main, &font, false);
                 main.spawn((Sec::HomePrimary, column(10.0))).with_children(|col| {
                     button(col, &font, "SCENARIOS", Screen::Modes, 0, 0, UiAction::Endless);
                     button(col, &font, "CHALLENGE", Screen::Modes, 1, 1, UiAction::Challenge);
@@ -996,6 +1022,14 @@ fn handle_pressed(
                     crate::settings::apply_graphics(&settings, &mut applied);
                 }
             }
+            UiAction::Pick(Pick::Jet) => {
+                settings.jet = settings.jet.step_jet(step_by);
+                crate::settings::save_jet(settings.jet);
+            }
+            UiAction::Pick(Pick::Livery) => {
+                settings.jet = settings.jet.step_livery(step_by);
+                crate::settings::save_jet(settings.jet);
+            }
             UiAction::Multiplayer => {
                 *panel = Panel::Multi;
                 focus.order = 6;
@@ -1151,6 +1185,8 @@ enum Sec {
     Lobby,
     Queue,
     Back,
+    /// JET and LIVERY (`side`: the copy under the title).
+    Hangar { side: bool },
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -1178,6 +1214,11 @@ fn layout_menu(
     // (the lobby and the queue each replace the pages)
     let away = in_lobby || queued;
     let page = |p: Panel| !away && *panel == p;
+    // short landscape (phones): JET and LIVERY go under the title
+    let side = root.single().is_ok_and(|(_, c, _)| {
+        let size = c.size() * c.inverse_scale_factor();
+        size.x > size.y * 1.1 && size.y < 520.0
+    });
     for (sec, mut node) in &mut sections {
         let show = match *sec {
             Sec::HomePrimary | Sec::HomeSecondary => page(Panel::Closed),
@@ -1193,6 +1234,7 @@ fn layout_menu(
             Sec::Lobby => in_lobby,
             Sec::Queue => queued,
             Sec::Back => !away && *panel != Panel::Closed,
+            Sec::Hangar { side: s } => s == side && (away || page(Panel::Endless) || page(Panel::Create) || page(Panel::Join)),
         };
         let d = if show { Display::Flex } else { Display::None };
         if node.display != d {
@@ -1281,6 +1323,8 @@ fn layout_menu(
             Pick::Allies => Some(settings.allies.to_string()),
             Pick::Sound => Some(settings.sound_name()),
             Pick::Graphics => Some(settings.graphics.name().to_string()),
+            Pick::Jet => Some(settings.jet.spec().name.to_string()),
+            Pick::Livery => Some(settings.jet.livery_name().to_string()),
         };
         let s = format!("< {} >", name.as_deref().unwrap_or("random").to_ascii_uppercase());
         if text.0 != s {

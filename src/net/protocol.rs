@@ -45,8 +45,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the messages change shape (or their meaning: v7 and v8 added
-/// biomes to `Biome::ALL`, which older clients would read as "random").
-pub const PROTOCOL_VERSION: u16 = 8;
+/// biomes to `Biome::ALL`, which older clients would read as "random"; v9 put
+/// the jet and the stick in `PlayerState`).
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// Service-auth audience and method the server checks tokens against.
 pub const AUTH_AUDIENCE: &str = "did:web:flight.mozzius.dev";
@@ -124,6 +125,10 @@ pub struct PlayerState {
     /// Relayed with the server's value (clients' own numbers are ignored).
     pub health: f32,
     pub status: Status,
+    /// The jet and livery (`jets::JetChoice::to_wire`).
+    pub jet: u8,
+    /// Pitch, roll, yaw (-127..127), for the control surfaces.
+    pub stick: [i8; 3],
 }
 
 impl PlayerState {
@@ -437,6 +442,8 @@ mod tests {
             flags: PlayerState::GUN,
             health: 75.0,
             status: Status::Flying,
+            jet: 0x11,
+            stick: [-127, 3, 127],
         };
         let msg = ClientMsg::State(state);
         let bytes = encode(&msg);

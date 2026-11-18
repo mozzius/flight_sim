@@ -622,6 +622,8 @@ mod tests {
             flags: 0,
             health: 100.0,
             status,
+            jet: 0,
+            stick: [0; 3],
         })
     }
 
