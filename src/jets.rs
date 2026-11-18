@@ -17,8 +17,11 @@
 //! slow, the F/A-18's rudders toeing in as its airbrake, the nozzles opening
 //! in afterburner and the Su-37's nozzles vectoring.
 //!
-//! The cockpit (`cockpit`) and canopy (`canopy`) are their own nodes, so a
-//! first-person view can hide or open them later.
+//! The cockpit is kept for a first-person view: `cockpit` (the instrument
+//! panel), `hud` (its glass), `canopy` (frame and outer glass),
+//! `canopy_inner` (the glass seen from inside: hidden in third person) and the
+//! Su-37's `cockpit_tub` are their own nodes, tagged [`Cockpit`]; the pilot's
+//! eye is [`JetSpec::eye`].
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -70,6 +73,9 @@ pub struct JetSpec {
     pub vectoring: bool,
     /// The rudders toe in as the airbrake.
     pub rudder_brake: bool,
+    /// The pilot's eye (read off the canopy and instrument panel).
+    #[allow(dead_code)] // for the first-person view
+    pub eye: Vec3,
     /// Chase camera distance (1 = the old 21 m F-22's): a little closer to
     /// small jets, so they don't shrink to a speck, but not all the way.
     pub chase: f32,
@@ -87,6 +93,7 @@ const SPECS: [JetSpec; 3] = [
         wing: [Vec3::new(1.5, 0.3, -2.0), Vec3::new(4.5, 0.08, 0.9), Vec3::new(4.5, 0.08, 2.0), Vec3::new(1.5, 0.3, 2.6)],
         vectoring: false,
         rudder_brake: false,
+        eye: Vec3::new(0.0, 0.97, -4.57),
         chase: 0.88,
     },
     JetSpec {
@@ -100,6 +107,7 @@ const SPECS: [JetSpec; 3] = [
         wing: [Vec3::new(2.2, 0.68, -2.5), Vec3::new(6.5, 0.3, 1.6), Vec3::new(6.5, 0.3, 3.0), Vec3::new(2.2, 0.68, 3.2)],
         vectoring: false,
         rudder_brake: true,
+        eye: Vec3::new(0.0, 1.41, -5.4),
         chase: 0.98,
     },
     JetSpec {
@@ -113,6 +121,7 @@ const SPECS: [JetSpec; 3] = [
         wing: [Vec3::new(2.4, 1.0, -2.5), Vec3::new(7.2, 0.57, 3.0), Vec3::new(7.2, 0.57, 4.6), Vec3::new(2.4, 1.0, 5.5)],
         vectoring: true,
         rudder_brake: false,
+        eye: Vec3::new(0.0, 1.72, -6.73),
         chase: 1.05,
     },
 ];
@@ -268,6 +277,15 @@ pub struct Part {
     base: Quat,
 }
 
+/// A cockpit node (see the module docs), for a first-person view to show or hide.
+#[derive(Component, Clone, Copy, Debug)]
+#[allow(dead_code)] // read by the first-person view
+pub struct Cockpit {
+    pub aircraft: Entity,
+    /// Only seen from inside (hidden in third person).
+    pub inside_only: bool,
+}
+
 fn part_of(name: &str) -> Option<(PartKind, f32)> {
     let (stem, side) = match name.rsplit_once('_') {
         Some((s, "l")) => (s, -1.0),
@@ -294,9 +312,23 @@ fn tag_parts(
     jets: Query<(), With<JetChoice>>,
 ) {
     for (entity, name, transform) in &named {
-        let Some((kind, side)) = part_of(name.as_str()) else { continue };
+        let name = name.as_str();
+        let cockpit = matches!(name, "cockpit" | "hud" | "canopy" | "canopy_inner" | "cockpit_tub");
+        let part = part_of(name);
+        if !cockpit && part.is_none() {
+            continue;
+        }
         let Some(aircraft) = parents.iter_ancestors(entity).find(|a| jets.contains(*a)) else { continue };
-        commands.entity(entity).insert(Part { kind, side, aircraft, base: transform.rotation });
+        if let Some((kind, side)) = part {
+            commands.entity(entity).insert(Part { kind, side, aircraft, base: transform.rotation });
+        }
+        if cockpit {
+            let inside_only = name == "canopy_inner";
+            commands.entity(entity).insert(Cockpit { aircraft, inside_only });
+            if inside_only {
+                commands.entity(entity).insert(Visibility::Hidden);
+            }
+        }
     }
 }
 

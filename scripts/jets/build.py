@@ -25,9 +25,9 @@ PLANES = {
             "elevatorl512": ("stab_l", "allmoving"), "elevatorr512": ("stab_r", "allmoving"),
             "flapl512": ("flap_l", "hinged"), "flapr512": ("flap_r", "hinged"),
             "rudder512": ("rudder", "hinged"),
-            "vc512": ("cockpit", None), "vchud512": ("cockpit", None),
+            "vc512": ("cockpit", None), "vchud512": ("hud", None),
             "canopy512": ("canopy", None), "canopyGlass512": ("canopy", None),
-            "CanopyInt512": (None, None),
+            "CanopyInt512": ("canopy_inner", None),
         },
         "nozzle": lambda n: "nozzle" if n.startswith("nozzle") else None,
     },
@@ -39,8 +39,8 @@ PLANES = {
             "leftelevator512": ("stab_l", "allmoving"), "rightelevator512": ("stab_r", "allmoving"),
             "leftaileron512": ("aileron_l", "hinged"), "rightaileron512": ("aileron_r", "hinged"),
             "leftrudder512": ("rudder_l", "hinged"), "rightrudder512": ("rudder_r", "hinged"),
-            "vs512": ("cockpit", None), "vchud512": ("cockpit", None),
-            "canopy512": ("canopy", None), "canopyint512": (None, None),
+            "vs512": ("cockpit", None), "vchud512": ("hud", None),
+            "canopy512": ("canopy", None), "canopyint512": ("canopy_inner", None),
         },
         "nozzle": lambda n: ("nozzle_r" if n.startswith("rnozzle") else "nozzle_l") if "nozzle" in n else None,
     },
@@ -53,8 +53,8 @@ PLANES = {
             "flapl512": ("flap_l", "hinged"), "flapr512": ("flap_r", "hinged"),
             "canardl512": ("canard_l", "allmoving"), "canardr512": ("canard_r", "allmoving"),
             "rudderl512": ("rudder_l", "hinged"), "rudderr512": ("rudder_r", "hinged"),
-            "vc512": ("cockpit", None), "vchud512": ("cockpit", None),
-            "canopyGlass512": ("canopy", None),
+            "vc512": ("cockpit", None), "vchud512": ("hud", None),
+            "canopyGlass512": ("canopy", None), "cockpit512": ("cockpit_tub", None),
         },
         "nozzle": lambda n: {"enginevecl512": "nozzle_l", "nozzlel512": "nozzle_l", "enginevecr512": "nozzle_r", "nozzler512": "nozzle_r"}.get(n),
     },
@@ -210,6 +210,8 @@ def build(key, cfg):
     def slot(mname, tex):
         t = (tex or "").lower()
         m = mname.lower()
+        if "glassint" in m or "glassint" in t:
+            return 5
         if "glass" in m or "glass" in t:
             return 2
         if "hud" in m or "hud" in t or m == "13 - default":
@@ -280,6 +282,10 @@ def build(key, cfg):
     info["wingtip_x"] = float(body[:, 0].max())
     tip = body[body[:, 0] > body[:, 0].max() - 0.15]
     info["wingtip"] = tip.mean(0).round(3).tolist()
+    # the pilot's eye: under the canopy's top, a little behind the instrument panel
+    canopy = np.concatenate([np.concatenate(v[0]) for v in groups["canopy"].values()])
+    panel = np.concatenate([np.concatenate(v[0]) for v in groups["cockpit"].values()])
+    info["eye"] = [0.0, round(float(canopy[:, 1].max()) - 0.3 * SCALE, 3), round(float(panel[:, 2].max()) + 0.55 * SCALE, 3)]
     info["nose_z"] = float(body[:, 2].min())
     info["tail_z"] = float(body[:, 2].max())
     info["bbox"] = [body.min(0).round(3).tolist(), body.max(0).round(3).tolist()]
@@ -319,7 +325,7 @@ def build(key, cfg):
 def write_gltf(gl, key, name, sub, suffix, binname, cock):
     t = f"textures/{sub}"
     images = [f"{t}{key}_{name}.jpg", f"{t}{key}_normal.jpg", f"{t}{key}_mr.jpg",
-              "textures/f16_nozzle.jpg", f"{t}{cock}", "textures/hud.png"]
+              "textures/f16_nozzle.jpg", f"{t}{cock}", "textures/hud.png", "textures/glass_inner.png"]
     tx_ = lambda i: {"index": i}
     materials = [
         {"name": "body", "pbrMetallicRoughness": {"baseColorTexture": tx_(0), "metallicRoughnessTexture": tx_(2),
@@ -331,6 +337,9 @@ def write_gltf(gl, key, name, sub, suffix, binname, cock):
         {"name": "cockpit", "pbrMetallicRoughness": {"baseColorTexture": tx_(4), "metallicFactor": 0.0, "roughnessFactor": 0.8}},
         {"name": "hud", "pbrMetallicRoughness": {"baseColorTexture": tx_(5), "metallicFactor": 0.0, "roughnessFactor": 1.0},
          "alphaMode": "BLEND", "extensions": {"KHR_materials_unlit": {}}},
+        # the canopy seen from inside (first person)
+        {"name": "glass_inner", "pbrMetallicRoughness": {"baseColorTexture": tx_(6), "metallicFactor": 0.0, "roughnessFactor": 0.06},
+         "alphaMode": "BLEND", "doubleSided": True},
     ]
     # only the materials (and images) this jet uses: unused images would still load
     used = sorted({p["material"] for m in gl.meshes for p in m["primitives"]})
@@ -377,6 +386,7 @@ os.makedirs(OUT, exist_ok=True)
 os.makedirs(os.path.join(OUT, "textures"), exist_ok=True)
 save_tex(os.path.join(PACK, "f16nozzle.png"), os.path.join(OUT, "textures", "f16_nozzle.jpg"), 256, 85)
 save_tex(os.path.join(PACK, "hud.png"), os.path.join(OUT, "textures", "hud.png"), 256, mode="RGBA")
+save_tex(os.path.join(PACK, "aircraftglassint.png"), os.path.join(OUT, "textures", "glass_inner.png"), 128, mode="RGBA")
 infos = {k: build(k, c) for k, c in PLANES.items()}
 json.dump(infos, open(os.path.join(sys.argv[4] if len(sys.argv) > 4 else OUT, "info.json"), "w"), indent=1)
 print(json.dumps(infos, indent=1))
