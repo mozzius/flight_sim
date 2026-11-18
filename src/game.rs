@@ -262,7 +262,6 @@ pub fn spawn_aircraft(
     let ground = terrain.max_height_along(position, ahead);
     let position = Vec3::new(position.x, position.y.max(ground + 500.0), position.z);
     let transform = Transform::from_translation(position).looking_to(heading, Vec3::Y);
-    let speed = 240.0;
     let jet = if player {
         crate::jets::player()
     } else {
@@ -270,12 +269,13 @@ pub fn spawn_aircraft(
         static AI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         crate::jets::ai_jet(team == Team::Red, AI.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     };
+    let speed = jet.airframe().cruise;
     let mut entity = commands.spawn((
         Name::new(if player { "Player".to_string() } else { format!("{team:?} fighter") }),
         transform,
         Visibility::default(),
         TransformInterpolation,
-        Aircraft::fighter(),
+        jet.aircraft(),
         FlightState::new(heading.normalize() * speed),
         ControlInput {
             throttle: 0.75,
@@ -283,7 +283,7 @@ pub fn spawn_aircraft(
         },
         team,
         Health::new(100.0),
-        Weapons::fighter(),
+        Weapons::for_jet(jet),
         Targeting::default(),
         (jet, Stick::default()),
     ));
@@ -304,11 +304,11 @@ pub fn spawn_remote_aircraft(commands: &mut Commands, models: &Models, transform
             Name::new(format!("{name} (remote)")),
             transform,
             Visibility::default(),
-            Aircraft::fighter(),
+            jet.aircraft(),
             FlightState::new(velocity),
             Team::Red,
             Health::new(crate::net::protocol::MAX_HEALTH),
-            Weapons::fighter(),
+            Weapons::for_jet(jet),
             remote,
             crate::net::RemoteName(name.to_string()),
             (jet, Stick::default()),

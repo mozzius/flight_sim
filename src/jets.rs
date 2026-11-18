@@ -1,12 +1,15 @@
-//! The jets: F-16, F/A-18 and Su-37 from the Modern Fighter Jets pack,
+//! The jets: F-16, F/A-18, Su-37 and A-10 from the Modern Fighter Jets pack,
 //! converted by `scripts/jets/build.py` into `assets/models/jets/` (one
 //! `.gltf` per livery over a shared `.bin`, plus `_low` variants with
 //! half-size textures for phones).
 //!
-//! Every jet flies the same flight model (`Aircraft::fighter`) and has the
-//! same hit radius, so the pick is looks only. What differs is in
-//! [`JetSpec`]: nozzles (plume placement), wingtips, gun port, the wing the
-//! vapour streams over, and the control surfaces.
+//! Every jet flies the same flight model with its own numbers
+//! ([`JetSpec::flight`]: thrust, drag, roll and pitch rates, G and AoA
+//! limits) and has the same hit radius. The fighters differ a little; the
+//! A-10 is slow, with no afterburner, and carries the GAU-8
+//! (`protocol::gun`: the server applies its damage). The rest of
+//! [`JetSpec`] is placement: nozzles (plumes), wingtips, gun port, the wing
+//! the vapour streams over, and the control surfaces.
 //!
 //! Control surfaces are glTF nodes named `stab_l`, `flap_r`, `rudder`, ...:
 //! the converter puts each node's origin on the hinge line with local +X
@@ -32,7 +35,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use bevy::{camera::visibility::VisibilityRange, prelude::*};
 
-use crate::flight::{ControlInput, Disabled, FlightState};
+use crate::flight::{Aircraft, ControlInput, Disabled, FlightState};
 
 pub struct JetsPlugin;
 
@@ -48,10 +51,12 @@ pub enum Jet {
     F16,
     F18,
     Su37,
+    /// Wire id `protocol::JET_A10`.
+    A10,
 }
 
 impl Jet {
-    pub const ALL: [Jet; 3] = [Jet::F16, Jet::F18, Jet::Su37];
+    pub const ALL: [Jet; 4] = [Jet::F16, Jet::F18, Jet::Su37, Jet::A10];
 
     pub fn spec(self) -> &'static JetSpec {
         &SPECS[self as usize]
@@ -87,6 +92,10 @@ pub struct JetSpec {
     /// Chase camera distance (1 = the old 21 m F-22's): a little closer to
     /// small jets, so they don't shrink to a speck, but not all the way.
     pub chase: f32,
+    /// How it flies.
+    pub flight: fn() -> Aircraft,
+    /// Speed it spawns at (m/s).
+    pub cruise: f32,
 }
 
 /// The F-22 (`models/f22-raptor`), flown by every jet when the pack is missing.
@@ -105,7 +114,73 @@ const F22: JetSpec = JetSpec {
     rudder_brake: false,
     eye: Vec3::new(0.0, 1.2, -6.2),
     chase: 1.0,
+    flight: Aircraft::fighter,
+    cruise: 240.0,
 };
+
+// ---- how each jet flies (small differences between the fighters) ----
+
+/// Light and nimble: the quickest roll, good acceleration.
+fn f16() -> Aircraft {
+    Aircraft { mass: 18_500.0, max_rates: Vec3::new(1.5, 0.5, 5.4), agility: 1.1, ..Aircraft::fighter() }
+}
+
+/// Happiest slow and at high AoA (the controls bite earlier, it pulls past
+/// where the others stall), with the slowest top end.
+fn f18() -> Aircraft {
+    Aircraft {
+        cd0: 0.0235,
+        afterburner_thrust: 280_000.0,
+        max_rates: Vec3::new(1.55, 0.55, 4.3),
+        g_limit: 8.5,
+        stall_alpha: 25f32.to_radians(),
+        alpha_limit: 32f32.to_radians(),
+        authority_speed: 135.0,
+        min_speed: 60.0,
+        post_stall: 0.12,
+        ..Aircraft::fighter()
+    }
+}
+
+/// Thrust vectoring: the most pitch, keeps pointing its nose when slow,
+/// and the most thrust for the highest top speed.
+fn su37() -> Aircraft {
+    Aircraft {
+        mass: 21_000.0,
+        cd0: 0.020,
+        dry_thrust: 160_000.0,
+        afterburner_thrust: 315_000.0,
+        max_rates: Vec3::new(1.8, 0.6, 4.5),
+        g_limit: 9.5,
+        stall_alpha: 22f32.to_radians(),
+        alpha_limit: 28f32.to_radians(),
+        authority_speed: 150.0,
+        post_stall: 0.25,
+        ..Aircraft::fighter()
+    }
+}
+
+/// A brick: two turbofans and no afterburner (Mach 0.55 flat out), slow
+/// roll, 5.5 G. A big straight wing makes it stable and forgiving slow.
+fn a10() -> Aircraft {
+    Aircraft {
+        wing_area: 88.0,
+        cl_alpha: 5.0,
+        stall_alpha: 18f32.to_radians(),
+        cd0: 0.038,
+        induced_k: 0.1,
+        dry_thrust: 68_000.0,
+        afterburner_thrust: 68_000.0,
+        afterburner: false,
+        max_rates: Vec3::new(0.9, 0.35, 1.9),
+        g_limit: 5.5,
+        alpha_limit: 20f32.to_radians(),
+        authority_speed: 110.0,
+        min_speed: 50.0,
+        agility: 0.45,
+        ..Aircraft::fighter()
+    }
+}
 
 static FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -118,7 +193,7 @@ pub fn set_fallback() {
     FALLBACK.store(true, Ordering::Relaxed);
 }
 
-const SPECS: [JetSpec; 3] = [
+const SPECS: [JetSpec; 4] = [
     JetSpec {
         key: "f16",
         name: "F-16",
@@ -134,6 +209,8 @@ const SPECS: [JetSpec; 3] = [
         rudder_brake: false,
         eye: Vec3::new(0.0, 0.97, -4.57),
         chase: 0.88,
+        flight: f16,
+        cruise: 240.0,
     },
     JetSpec {
         key: "f18",
@@ -149,6 +226,8 @@ const SPECS: [JetSpec; 3] = [
         rudder_brake: true,
         eye: Vec3::new(0.0, 1.41, -5.4),
         chase: 0.98,
+        flight: f18,
+        cruise: 240.0,
     },
     JetSpec {
         key: "su37",
@@ -164,6 +243,28 @@ const SPECS: [JetSpec; 3] = [
         rudder_brake: false,
         eye: Vec3::new(0.0, 1.72, -6.73),
         chase: 1.05,
+        flight: su37,
+        cruise: 240.0,
+    },
+    JetSpec {
+        key: "a10",
+        name: "A-10",
+        liveries: &["military", "forest"],
+        // the back of the engine pods. Cold turbofans: a pinprick of a
+        // plume (no reheat glow), leaving the heat haze
+        nozzles: &[Vec3::new(1.6, 0.68, 4.4), Vec3::new(-1.6, 0.68, 4.4)],
+        nozzle_size: Vec2::splat(0.03),
+        wingtip: Vec3::new(9.55, 0.03, -0.88),
+        // the GAU-8's muzzle, under the nose
+        gun_port: Vec3::new(-0.1, -0.5, -9.4),
+        hardpoints: &[Vec3::new(4.0, -1.15, -0.45), Vec3::new(5.0, -1.0, -0.35), Vec3::new(6.5, -0.85, -0.25)],
+        wing: [Vec3::new(2.9, 1.0, -3.6), Vec3::new(8.65, 0.36, -2.07), Vec3::new(8.65, 0.36, 0.35), Vec3::new(2.9, 1.0, 0.9)],
+        vectoring: false,
+        rudder_brake: false,
+        eye: Vec3::new(0.0, 1.15, -6.13),
+        chase: 1.08,
+        flight: a10,
+        cruise: 170.0,
     },
 ];
 
@@ -205,6 +306,11 @@ impl JetChoice {
     /// when the pack is missing.
     pub fn airframe(self) -> &'static JetSpec {
         if fallback() { &F22 } else { self.spec() }
+    }
+
+    /// How it flies (the F-22's numbers when the pack is missing: it looks like one).
+    pub fn aircraft(self) -> Aircraft {
+        (self.airframe().flight)()
     }
 
     pub fn livery_name(self) -> &'static str {
@@ -267,11 +373,11 @@ pub fn set_player(choice: JetChoice) {
     PLAYER.store(choice.to_wire(), Ordering::Relaxed);
 }
 
-/// What the AI flies: hostiles are Su-37s, wingmen F-16s and F/A-18s in
-/// military grey (by `n`, so a flight is mixed).
+/// What the AI flies: hostiles are Su-37s with the odd A-10, wingmen F-16s
+/// and F/A-18s in military grey (by `n`, so a flight is mixed).
 pub fn ai_jet(hostile: bool, n: usize) -> JetChoice {
     if hostile {
-        JetChoice::new(Jet::Su37, 0)
+        JetChoice::new(if n % 4 == 3 { Jet::A10 } else { Jet::Su37 }, 0)
     } else if n.is_multiple_of(2) {
         JetChoice::new(Jet::F16, 0)
     } else {
@@ -324,6 +430,8 @@ enum PartKind {
     Canard,
     Rudder,
     Nozzle,
+    /// A turbofan's blades (the A-10): spin.
+    Fan,
 }
 
 /// A moving part of a jet's model.
@@ -358,6 +466,7 @@ fn part_of(name: &str) -> Option<(PartKind, f32)> {
         "canard" => PartKind::Canard,
         "rudder" => PartKind::Rudder,
         "nozzle" => PartKind::Nozzle,
+        "fan" => PartKind::Fan,
         _ => return None,
     };
     Some((kind, side))
@@ -478,7 +587,7 @@ fn deflection(kind: PartKind, side: f32, stick: &Stick, droop: f32, spec: &JetSp
         }
         // the exhaust points up to pull (and up on the side that rolls down)
         PartKind::Nozzle if spec.vectoring => -(pitch + side * roll * 0.5).clamp(-1.0, 1.0) * VECTOR,
-        PartKind::Nozzle => 0.0,
+        PartKind::Nozzle | PartKind::Fan => 0.0,
     }
 }
 
@@ -492,11 +601,21 @@ pub fn vector_angle(choice: JetChoice, stick: &Stick, x: f32) -> f32 {
 }
 
 fn animate_parts(
-    jets: Query<(&JetChoice, &Stick, &FlightState)>,
+    time: Res<Time>,
+    jets: Query<(&JetChoice, &Stick, &FlightState, Has<Disabled>)>,
     mut parts: Query<(&Part, &mut Transform)>,
 ) {
     for (part, mut transform) in &mut parts {
-        let Ok((choice, stick, state)) = jets.get(part.aircraft) else { continue };
+        let Ok((choice, stick, state, disabled)) = jets.get(part.aircraft) else { continue };
+        if part.kind == PartKind::Fan {
+            if !disabled {
+                // a steady spin (a spool-scaled rate would jump as the
+                // throttle moves); opposite ways, so the pair doesn't strobe in step
+                let spin = time.elapsed_secs_wrapped() * 9.0 * part.side;
+                transform.rotation = part.base * Quat::from_rotation_z(spin);
+            }
+            continue;
+        }
         let spec = choice.airframe();
         let angle = deflection(part.kind, part.side, stick, droop(state), spec);
         let rotation = part.base * Quat::from_rotation_x(angle);
@@ -529,6 +648,7 @@ mod tests {
         assert_eq!(JetChoice::from_wire(0x2f), JetChoice::new(Jet::Su37, 0));
         assert_eq!(JetChoice::parse("f18"), Some(JetChoice::new(Jet::F18, 0)));
         assert_eq!(JetChoice::parse("mig"), None);
+        assert_eq!(JetChoice::new(Jet::A10, 1).to_wire() >> 4, crate::net::protocol::JET_A10);
     }
 
     #[test]
@@ -548,8 +668,8 @@ mod tests {
     }
 
     #[test]
-    fn six_liveries_no_blue_angels() {
-        assert_eq!(JetChoice::all().count(), 6);
+    fn eight_liveries_no_blue_angels() {
+        assert_eq!(JetChoice::all().count(), 8);
         assert!(JetChoice::all().all(|c| !c.livery_name().contains("angel")));
     }
 

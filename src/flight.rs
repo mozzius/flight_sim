@@ -74,6 +74,17 @@ pub struct Aircraft {
     pub alpha_limit: f32,
     /// Collision / hit radius (metres).
     pub radius: f32,
+    /// Has an afterburner (the A-10's turbofans don't).
+    pub afterburner: bool,
+    /// Airspeed at which the controls reach full authority (m/s): lower is
+    /// more at home slow.
+    pub authority_speed: f32,
+    /// Below this the stall warning sounds (m/s).
+    pub min_speed: f32,
+    /// How quickly the controls reach the commanded rates (1 = the F-22).
+    pub agility: f32,
+    /// Authority left when there's no airflow (thrust vectoring, big tails).
+    pub post_stall: f32,
 }
 
 impl Aircraft {
@@ -92,6 +103,11 @@ impl Aircraft {
             g_limit: 9.0,
             alpha_limit: 24f32.to_radians(),
             radius: 9.0,
+            afterburner: true,
+            authority_speed: 160.0,
+            min_speed: 70.0,
+            agility: 1.0,
+            post_stall: 0.04,
         }
     }
 
@@ -158,7 +174,7 @@ impl FlightState {
     }
 
     pub fn stalling(&self, aircraft: &Aircraft) -> bool {
-        self.alpha.abs() > aircraft.stall_alpha * 0.92 || self.airspeed < 70.0
+        self.alpha.abs() > aircraft.stall_alpha * 0.92 || self.airspeed < aircraft.min_speed
     }
 }
 
@@ -225,7 +241,7 @@ fn flight_physics(
         // engine: spools toward throttle, afterburner kicks in at full throttle
         let target = if disabled { 0.0 } else { input.throttle.clamp(0.0, 1.0) };
         state.spool += (target - state.spool) * (dt * 1.2).min(1.0);
-        state.afterburner_on = !disabled && input.afterburner && state.spool > 0.95;
+        state.afterburner_on = ac.afterburner && !disabled && input.afterburner && state.spool > 0.95;
         let density_factor = (rho / SEA_LEVEL_DENSITY).powf(0.7);
         let thrust = if state.afterburner_on {
             ac.afterburner_thrust
@@ -243,9 +259,9 @@ fn flight_physics(
 
         // ---- rotation: fly-by-wire rate command ----
         // control surfaces lose authority as dynamic pressure drops
-        let q_ref = 0.5 * SEA_LEVEL_DENSITY * 160.0 * 160.0;
+        let q_ref = 0.5 * SEA_LEVEL_DENSITY * ac.authority_speed * ac.authority_speed;
         let authority = (q / q_ref).clamp(0.0, 1.0);
-        let effective = authority.max(0.04);
+        let effective = authority.max(ac.post_stall);
 
         let (pitch_in, yaw_in, roll_in) = if disabled {
             (0.3, 0.0, 0.6) // a damaged plane spirals down
@@ -269,7 +285,7 @@ fn flight_physics(
             -roll_in.clamp(-1.0, 1.0) * ac.max_rates.z * (0.4 + 0.6 * authority),
         );
         // how fast the controller can change rates (rad/s^2) at full authority
-        let max_accel = Vec3::new(9.0, 3.0, 28.0) * effective;
+        let max_accel = Vec3::new(9.0, 3.0, 28.0) * effective * ac.agility;
         let rate_error = target - state.angular_velocity;
         let mut ang_accel = (rate_error * 11.0).clamp(-max_accel, max_accel);
 
@@ -428,6 +444,75 @@ mod tests {
     fn state(app: &App, e: Entity) -> (Transform, FlightState) {
         let w = app.world();
         (*w.get::<Transform>(e).unwrap(), w.get::<FlightState>(e).unwrap().clone())
+    }
+
+    /// Flies `ac` level (fine aim at the horizon) from `speed` for `seconds`.
+    fn fly_level(ac: Aircraft, speed: f32, seconds: f32, mut each: impl FnMut(f32, &FlightState)) -> FlightState {
+        let mut app = app();
+        let e = app
+            .world_mut()
+            .spawn((Transform::from_xyz(0.0, 1_000.0, 0.0), ac, FlightState::new(Vec3::NEG_Z * speed), ControlInput::default()))
+            .id();
+        let dt = 1.0 / PHYSICS_HZ as f32;
+        for i in 0..(seconds * PHYSICS_HZ as f32) as usize {
+            let (t, s) = state(&app, e);
+            let flat = (t.forward().as_vec3() * Vec3::new(1.0, 0.0, 1.0)).normalize();
+            let (pitch, yaw) = fine_aim(&t, &s, flat);
+            *app.world_mut().get_mut::<ControlInput>(e).unwrap() =
+                ControlInput { pitch, yaw, throttle: 1.0, afterburner: true, ..default() };
+            app.update();
+            each(i as f32 * dt, &state(&app, e).1);
+        }
+        state(&app, e).1
+    }
+
+    /// Peak roll rate (deg/s) and the turn rate after 3 s of full pull
+    /// (deg/s), both from `speed`.
+    fn agility(ac: Aircraft, speed: f32) -> (f32, f32) {
+        let mut app = app();
+        let roll = spawn(&mut app, speed, ControlInput { roll: 1.0, throttle: 1.0, ..default() });
+        let pull = spawn(&mut app, speed, ControlInput { pitch: 1.0, throttle: 1.0, ..default() });
+        for e in [roll, pull] {
+            *app.world_mut().get_mut::<Aircraft>(e).unwrap() = ac.clone();
+        }
+        let mut peak: f32 = 0.0;
+        for _ in 0..(3.0 * PHYSICS_HZ) as usize {
+            app.update();
+            peak = peak.max(state(&app, roll).1.angular_velocity.z.abs());
+        }
+        (peak.to_degrees(), state(&app, pull).1.angular_velocity.x.to_degrees())
+    }
+
+    /// The jets' numbers side by side (`cargo test jets_fly_differently -- --nocapture`).
+    #[test]
+    fn jets_fly_differently() {
+        use crate::jets::Jet;
+        let mut rows = vec![];
+        println!("jet      top m/s (mach)  150->+50 m/s  roll deg/s @200  turn deg/s @200  stall warn m/s");
+        for jet in Jet::ALL {
+            let ac = (jet.spec().flight)();
+            let top = fly_level(ac.clone(), 200.0, 90.0, |_, _| {}).airspeed;
+            let mut accel = f32::NAN;
+            fly_level(ac.clone(), 150.0, 60.0, |t, s| {
+                if accel.is_nan() && s.airspeed >= 200.0 {
+                    accel = t;
+                }
+            });
+            let (roll, turn) = agility(ac.clone(), 200.0);
+            println!("{:8} {top:6.0} ({:.2})   {accel:8.1} s   {roll:10.0}       {turn:10.1}       {:6.0}", jet.spec().name, top / SPEED_OF_SOUND, ac.min_speed);
+            rows.push((jet, top, accel, roll, turn));
+        }
+        let get = |j: Jet| *rows.iter().find(|r| r.0 == j).unwrap();
+        let (f16, f18, su37, a10) = (get(Jet::F16), get(Jet::F18), get(Jet::Su37), get(Jet::A10));
+        // the fighters: the Su-37 is fastest and the F/A-18 slowest; the F-16 rolls quickest
+        assert!(su37.1 > f16.1 && f16.1 > f18.1, "top speeds {} {} {}", su37.1, f16.1, f18.1);
+        assert!(f16.3 > su37.3 && f16.3 > f18.3, "rolls {} {} {}", f16.3, su37.3, f18.3);
+        // ...but not by much
+        assert!(f18.1 / su37.1 > 0.85, "{} vs {}", f18.1, su37.1);
+        // the A-10: Mach 0.55, never makes the +50, rolls slowly
+        assert!(a10.1 / SPEED_OF_SOUND < 0.6 && a10.1 / SPEED_OF_SOUND > 0.5, "A-10 top {}", a10.1);
+        assert!(a10.2.is_nan(), "A-10 accelerates to 200 m/s");
+        assert!(a10.3 < f18.3 * 0.6, "A-10 roll {}", a10.3);
     }
 
     #[test]
