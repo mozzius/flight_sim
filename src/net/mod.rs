@@ -1240,7 +1240,7 @@ fn apply(
 
 fn missile_transform(pos: Vec3, vel: Vec3) -> Transform {
     Transform::from_translation(pos).looking_to(vel.normalize_or(Vec3::NEG_Z), Vec3::Y)
-        * Transform::from_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+        * Transform::from_rotation(crate::weapons::missile_frame())
 }
 
 /// A state between two received ones.

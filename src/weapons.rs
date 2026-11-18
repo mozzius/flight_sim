@@ -134,6 +134,14 @@ struct StoredMissile {
 }
 
 /// Hangs a jet's missiles on its pylons and wingtip rails.
+/// A missile mesh's orientation in its flight frame (forward -Z, up +Y): the
+/// mesh lies along Y with its nose at -Y, and the Sidewinder's launch lug is
+/// on its +Z side, so pitch it nose-forward and roll it lug-up (on the rail,
+/// the fins straddle the pylon in an X). The motor stays at local +Y.
+pub fn missile_frame() -> Quat {
+    Quat::from_rotation_x(std::f32::consts::FRAC_PI_2) * Quat::from_rotation_y(std::f32::consts::PI)
+}
+
 fn hang_stores(
     mut commands: Commands,
     assets: Res<ProjectileAssets>,
@@ -149,11 +157,10 @@ fn hang_stores(
                     bevy::camera::visibility::VisibilityRange::abrupt(0.0, crate::jets::lod_distance()),
                     Mesh3d(assets.missile_mesh.clone()),
                     MeshMaterial3d(assets.missile_material.clone()),
-                    // the mesh's length is along Y, its nose at -Y: point it forward.
-                    // A little smaller than the flying missile (~2.9 m, an
-                    // AIM-9's length), which these airframes carry better.
+                    // nose forward, lug up. A little smaller than the flying
+                    // missile (~2.9 m, an AIM-9's length), which these airframes carry better.
                     Transform::from_translation(at)
-                        .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                        .with_rotation(missile_frame())
                         .with_scale(Vec3::splat(0.8)),
                 ));
             }
@@ -621,7 +628,7 @@ fn fire_weapons(
                 target_accel: Vec3::ZERO,
                 seeker: if player { player_seeker } else { Seeker::NORMAL },
             };
-            let rotation = transform.rotation * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            let rotation = transform.rotation * missile_frame();
             let e = spawn_missile(&mut commands, &assets, missile, Transform::from_translation(pos).with_rotation(rotation));
             commands.entity(e).insert(TransformInterpolation);
         }
@@ -869,10 +876,7 @@ fn guide_missiles(
         }
 
         transform.translation = new_pos;
-        transform.rotation = Transform::IDENTITY
-            .looking_to(missile.velocity, Vec3::Y)
-            .rotation
-            * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        transform.rotation = Transform::IDENTITY.looking_to(missile.velocity, Vec3::Y).rotation * missile_frame();
     }
 }
 

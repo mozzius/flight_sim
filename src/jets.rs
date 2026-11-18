@@ -79,6 +79,8 @@ pub struct JetSpec {
     pub gun_port: Vec3,
     /// Missile stations on the right wing (centre of a hung missile), inboard
     /// to the tip; the left wing mirrors them. Empty: internal bays (the F-22).
+    /// Each sits on its launch rail's midpoint, 0.08 m under the rail: the
+    /// hung (0.8x) Sidewinder's lug against it.
     pub hardpoints: &'static [Vec3],
     /// The right wing's upper surface: root LE, tip LE, tip TE, root TE.
     pub wing: [Vec3; 4],
@@ -203,7 +205,7 @@ const SPECS: [JetSpec; 4] = [
         wingtip: Vec3::new(4.97, 0.03, 2.3),
         gun_port: Vec3::new(-0.75, 0.5, -4.6),
         // under-wing pylons and the wingtip rail
-        hardpoints: &[Vec3::new(3.0, -0.56, 0.25), Vec3::new(4.38, -0.56, 1.25), Vec3::new(5.1, -0.05, 1.5)],
+        hardpoints: &[Vec3::new(2.93, -0.52, 0.32), Vec3::new(4.33, -0.52, 1.29), Vec3::new(5.1, -0.05, 1.5)],
         wing: [Vec3::new(1.5, 0.3, -2.0), Vec3::new(4.5, 0.08, 0.9), Vec3::new(4.5, 0.08, 2.0), Vec3::new(1.5, 0.3, 2.6)],
         vectoring: false,
         rudder_brake: false,
@@ -220,7 +222,7 @@ const SPECS: [JetSpec; 4] = [
         nozzle_size: Vec2::splat(0.42),
         wingtip: Vec3::new(7.24, 0.25, 2.2),
         gun_port: Vec3::new(0.0, 0.75, -10.4),
-        hardpoints: &[Vec3::new(3.75, -0.1, 0.9), Vec3::new(5.12, 0.0, 1.55), Vec3::new(7.32, 0.12, 1.8)],
+        hardpoints: &[Vec3::new(3.7, -0.08, 1.02), Vec3::new(5.22, 0.03, 1.65), Vec3::new(7.24, 0.06, 1.8)],
         wing: [Vec3::new(2.2, 0.68, -2.5), Vec3::new(6.5, 0.3, 1.6), Vec3::new(6.5, 0.3, 3.0), Vec3::new(2.2, 0.68, 3.2)],
         vectoring: false,
         rudder_brake: true,
@@ -237,7 +239,7 @@ const SPECS: [JetSpec; 4] = [
         nozzle_size: Vec2::splat(0.52),
         wingtip: Vec3::new(7.94, 0.44, 4.4),
         gun_port: Vec3::new(1.1, 0.75, -5.8),
-        hardpoints: &[Vec3::new(4.88, 0.0, 2.3), Vec3::new(6.62, 0.0, 3.1), Vec3::new(7.95, 0.3, 4.0)],
+        hardpoints: &[Vec3::new(4.89, 0.02, 2.92), Vec3::new(6.62, 0.02, 3.73), Vec3::new(7.9, 0.24, 4.2)],
         wing: [Vec3::new(2.4, 1.0, -2.5), Vec3::new(7.2, 0.57, 3.0), Vec3::new(7.2, 0.57, 4.6), Vec3::new(2.4, 1.0, 5.5)],
         vectoring: true,
         rudder_brake: false,
@@ -257,7 +259,7 @@ const SPECS: [JetSpec; 4] = [
         wingtip: Vec3::new(9.55, 0.03, -0.88),
         // the GAU-8's muzzle, under the nose
         gun_port: Vec3::new(-0.1, -0.5, -9.4),
-        hardpoints: &[Vec3::new(4.0, -1.15, -0.45), Vec3::new(5.0, -1.0, -0.35), Vec3::new(6.5, -0.85, -0.25)],
+        hardpoints: &[Vec3::new(3.93, -1.03, -1.57), Vec3::new(5.19, -0.86, -1.47), Vec3::new(6.48, -0.7, -1.36)],
         wing: [Vec3::new(2.9, 1.0, -3.6), Vec3::new(8.65, 0.36, -2.07), Vec3::new(8.65, 0.36, 0.35), Vec3::new(2.9, 1.0, 0.9)],
         vectoring: false,
         rudder_brake: false,
