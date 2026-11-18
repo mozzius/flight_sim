@@ -10,17 +10,21 @@ keep drawing missiles as a plain `Mesh3d` + one material. Frame: the missile
 lies along Y, nose at -Y and nozzle at +Y, centred, 3.66 m long (the length
 of the old capsule, so the motor effects at +Y still sit on the nozzle).
 """
-import bpy, json, os, struct, sys
+import bpy, json, math, os, sys
 import numpy as np
 
 name, out = sys.argv[sys.argv.index("--") + 1:]
 LENGTH = 3.66
-# ~3k triangles is a lot for a missile: four hang on every jet
-DECIMATE = 0.4
+# ~3k triangles is a lot for a missile (four hang on every jet): dissolve the
+# nearly flat faces, but never across a material edge. (Collapse decimation
+# loses the thin yellow and brown bands altogether.)
+DISSOLVE_ANGLE = 10.0
 
 o = bpy.data.objects[name]
 mod = o.modifiers.new("decimate", "DECIMATE")
-mod.ratio = DECIMATE
+mod.decimate_type = "DISSOLVE"
+mod.angle_limit = math.radians(DISSOLVE_ANGLE)
+mod.delimit = {"MATERIAL", "SEAM", "SHARP"}
 dg = bpy.context.evaluated_depsgraph_get()
 me = o.evaluated_get(dg).to_mesh()
 me.calc_loop_triangles()
