@@ -17,6 +17,11 @@
 //! slow, the F/A-18's rudders toeing in as its airbrake, the nozzles opening
 //! in afterburner and the Su-37's nozzles vectoring.
 //!
+//! The converted pack lives in a private repo (the licence doesn't allow
+//! publishing it on its own): `scripts/fetch-assets.sh` clones it into
+//! `assets/models/jets/`. Without it (a public clone) every jet loads as the
+//! old F-22 ([`fallback`], [`JetChoice::airframe`]) and the menu hides JET / LIVERY.
+//!
 //! The cockpit is kept for a first-person view: `cockpit` (the instrument
 //! panel), `hud` (its glass), `canopy` (frame and outer glass),
 //! `canopy_inner` (the glass seen from inside: hidden in third person) and the
@@ -62,8 +67,8 @@ pub struct JetSpec {
     pub liveries: &'static [&'static str],
     /// Nozzle exit centres.
     pub nozzles: &'static [Vec3],
-    /// Inner radius of a nozzle exit (the plume's width).
-    pub nozzle_radius: f32,
+    /// Half width and half height of a nozzle exit (the plume's size).
+    pub nozzle_size: Vec2,
     /// The right wingtip (the left mirrors it).
     pub wingtip: Vec3,
     pub gun_port: Vec3,
@@ -81,13 +86,41 @@ pub struct JetSpec {
     pub chase: f32,
 }
 
+/// The F-22 (`models/f22-raptor`), flown by every jet when the pack is missing.
+const F22: JetSpec = JetSpec {
+    key: "f22",
+    name: "F-22",
+    liveries: &["default"],
+    nozzles: &[Vec3::new(0.79, 0.27, 6.8), Vec3::new(-0.79, 0.27, 6.8)],
+    // a 2D nozzle: wide and flat
+    nozzle_size: Vec2::new(0.5, 0.36),
+    wingtip: Vec3::new(7.3, 0.0, 2.0),
+    gun_port: Vec3::new(0.9, 0.9, -7.5),
+    wing: [Vec3::new(1.9, 0.55, -3.2), Vec3::new(6.7, 0.2, 1.1), Vec3::new(7.1, 0.2, 2.7), Vec3::new(1.9, 0.55, 4.0)],
+    vectoring: false,
+    rudder_brake: false,
+    eye: Vec3::new(0.0, 1.2, -6.2),
+    chase: 1.0,
+};
+
+static FALLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The jets folder is missing (a public clone): everything flies the F-22.
+pub fn fallback() -> bool {
+    FALLBACK.load(Ordering::Relaxed)
+}
+
+pub fn set_fallback() {
+    FALLBACK.store(true, Ordering::Relaxed);
+}
+
 const SPECS: [JetSpec; 3] = [
     JetSpec {
         key: "f16",
         name: "F-16",
         liveries: &["military", "arctic", "thunderbirds"],
         nozzles: &[Vec3::new(0.0, 0.11, 6.56)],
-        nozzle_radius: 0.5,
+        nozzle_size: Vec2::splat(0.5),
         wingtip: Vec3::new(4.97, 0.03, 2.3),
         gun_port: Vec3::new(-0.75, 0.5, -4.6),
         wing: [Vec3::new(1.5, 0.3, -2.0), Vec3::new(4.5, 0.08, 0.9), Vec3::new(4.5, 0.08, 2.0), Vec3::new(1.5, 0.3, 2.6)],
@@ -101,7 +134,7 @@ const SPECS: [JetSpec; 3] = [
         name: "F/A-18",
         liveries: &["military", "tiger"],
         nozzles: &[Vec3::new(0.55, 0.11, 7.47), Vec3::new(-0.56, 0.11, 7.47)],
-        nozzle_radius: 0.42,
+        nozzle_size: Vec2::splat(0.42),
         wingtip: Vec3::new(7.24, 0.25, 2.2),
         gun_port: Vec3::new(0.0, 0.75, -10.4),
         wing: [Vec3::new(2.2, 0.68, -2.5), Vec3::new(6.5, 0.3, 1.6), Vec3::new(6.5, 0.3, 3.0), Vec3::new(2.2, 0.68, 3.2)],
@@ -115,7 +148,7 @@ const SPECS: [JetSpec; 3] = [
         name: "Su-37",
         liveries: &["military"],
         nozzles: &[Vec3::new(1.29, 0.11, 9.02), Vec3::new(-1.29, 0.11, 9.02)],
-        nozzle_radius: 0.52,
+        nozzle_size: Vec2::splat(0.52),
         wingtip: Vec3::new(7.94, 0.44, 4.4),
         gun_port: Vec3::new(1.1, 0.75, -5.8),
         wing: [Vec3::new(2.4, 1.0, -2.5), Vec3::new(7.2, 0.57, 3.0), Vec3::new(7.2, 0.57, 4.6), Vec3::new(2.4, 1.0, 5.5)],
@@ -146,6 +179,12 @@ impl JetChoice {
 
     pub fn spec(self) -> &'static JetSpec {
         self.jet.spec()
+    }
+
+    /// What the model and effects follow: the jet's spec, or the F-22's
+    /// when the pack is missing.
+    pub fn airframe(self) -> &'static JetSpec {
+        if fallback() { &F22 } else { self.spec() }
     }
 
     pub fn livery_name(self) -> &'static str {
@@ -376,7 +415,7 @@ fn deflection(kind: PartKind, side: f32, stick: &Stick, droop: f32, spec: &JetSp
 
 /// The Su-37's nozzle vector angle for the nozzle at `x` (the plumes follow it).
 pub fn vector_angle(choice: JetChoice, stick: &Stick, x: f32) -> f32 {
-    let spec = choice.spec();
+    let spec = choice.airframe();
     if !spec.vectoring {
         return 0.0;
     }
@@ -389,7 +428,7 @@ fn animate_parts(
 ) {
     for (part, mut transform) in &mut parts {
         let Ok((choice, stick, state)) = jets.get(part.aircraft) else { continue };
-        let spec = choice.spec();
+        let spec = choice.airframe();
         let angle = deflection(part.kind, part.side, stick, droop(state), spec);
         let rotation = part.base * Quat::from_rotation_x(angle);
         if part.kind == PartKind::Nozzle {

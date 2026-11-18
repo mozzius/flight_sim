@@ -1,0 +1,11 @@
+Model Information:
+* title:	Fighter F22 Raptor
+* source:	https://sketchfab.com/3d-models/fighter-f22-raptor-42ffa75b3e104930a17395dddf0be3df
+* author:	AndresHM99 (https://sketchfab.com/AndresHM99)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Fighter F22 Raptor" (https://sketchfab.com/3d-models/fighter-f22-raptor-42ffa75b3e104930a17395dddf0be3df) by AndresHM99 (https://sketchfab.com/AndresHM99) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

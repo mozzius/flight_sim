@@ -150,7 +150,7 @@ fn follow_player(
         *boom = None;
         return;
     };
-    let scale = jet.map_or(1.0, |j| j.spec().chase);
+    let scale = jet.map_or(1.0, |j| j.airframe().chase);
     let dt = time.delta_secs();
 
     if intro.playing() {

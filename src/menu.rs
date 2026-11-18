@@ -1234,7 +1234,7 @@ fn layout_menu(
             Sec::Lobby => in_lobby,
             Sec::Queue => queued,
             Sec::Back => !away && *panel != Panel::Closed,
-            Sec::Hangar { side: s } => s == side && (away || page(Panel::Endless) || page(Panel::Create) || page(Panel::Join)),
+            Sec::Hangar { side: s } => !crate::jets::fallback() && s == side && (away || page(Panel::Endless) || page(Panel::Create) || page(Panel::Join)),
         };
         let d = if show { Display::Flex } else { Display::None };
         if node.display != d {

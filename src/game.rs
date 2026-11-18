@@ -25,7 +25,7 @@ impl Plugin for GamePlugin {
             .add_message::<AircraftDestroyed>()
             .add_message::<PlayerKill>()
             .add_systems(Startup, load_models)
-            .add_systems(Update, warm_jet_shaders)
+            .add_systems(Update, (fall_back_to_f22.run_if(resource_exists::<Models>), warm_jet_shaders).chain())
             .add_systems(OnEnter(crate::loading::GameState::Playing), initial_spawn)
             .add_systems(OnExit(crate::loading::GameState::Playing), (end_round, crate::terrain_gen::clear_map))
             .add_systems(
@@ -119,18 +119,26 @@ struct RespawnQueue {
     pending: Vec<(f32, Team, bool)>,
 }
 
-/// Every jet in every livery, loaded up front (half-size textures on phones).
+/// Every jet in every livery, loaded up front (half-size textures on phones),
+/// plus the F-22 for when the jets are missing (`jets::fallback`).
 #[derive(Resource)]
 pub struct Models {
     jets: Vec<(JetChoice, Handle<WorldAsset>)>,
+    f22: Handle<WorldAsset>,
 }
 
 impl Models {
     pub fn scene(&self, choice: JetChoice) -> Handle<WorldAsset> {
+        if crate::jets::fallback() {
+            return self.f22.clone();
+        }
         self.jets.iter().find(|(c, _)| *c == choice).unwrap_or(&self.jets[0]).1.clone()
     }
 
     fn all_loaded(&self, asset_server: &AssetServer) -> bool {
+        if crate::jets::fallback() {
+            return asset_server.is_loaded_with_dependencies(&self.f22);
+        }
         self.jets.iter().all(|(_, h)| asset_server.is_loaded_with_dependencies(h))
     }
 }
@@ -141,12 +149,42 @@ fn load_models(mut commands: Commands, asset_server: Res<AssetServer>) {
         jets: JetChoice::all()
             .map(|c| (c, asset_server.load(GltfAssetLabel::Scene(0).from_asset(c.path(low)))))
             .collect(),
+        f22: asset_server.load(GltfAssetLabel::Scene(0).from_asset("models/f22-raptor/scene.gltf")),
     });
 }
 
-/// A jet's model, as a child of its aircraft (the glTF is authored in aircraft space).
+/// No jets folder (a public clone, without the private assets repo): fly the
+/// F-22, swapping any jet already spawned.
+fn fall_back_to_f22(
+    models: Res<Models>,
+    asset_server: Res<AssetServer>,
+    mut spawned: Query<(&mut WorldAssetRoot, &mut Transform), With<AircraftModel>>,
+) {
+    if crate::jets::fallback() || !asset_server.load_state(&models.jets[0].1).is_failed() {
+        return;
+    }
+    warn!("no jets in assets/models/jets (run scripts/fetch-assets.sh): flying the F-22");
+    crate::jets::set_fallback();
+    for (mut root, mut transform) in &mut spawned {
+        root.0 = models.f22.clone();
+        *transform = model_transform();
+    }
+}
+
+/// The jets' glTFs are authored in aircraft space; the F-22 ~6x too big and facing +X.
+fn model_transform() -> Transform {
+    if crate::jets::fallback() {
+        Transform::from_xyz(0.0, -0.8, 0.0)
+            .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
+            .with_scale(Vec3::splat(0.166))
+    } else {
+        Transform::IDENTITY
+    }
+}
+
+/// A jet's model, as a child of its aircraft.
 fn model(models: &Models, choice: JetChoice) -> impl Bundle {
-    (AircraftModel, WorldAssetRoot(models.scene(choice)), Transform::IDENTITY)
+    (AircraftModel, WorldAssetRoot(models.scene(choice)), model_transform())
 }
 
 /// A speck of a jet held in front of the camera for a few frames once the
@@ -189,7 +227,10 @@ fn warm_jet_shaders(
             Visibility::default(),
         ))
         .with_children(|p| {
-            for (_, scene) in &models.jets {
+            if crate::jets::fallback() {
+                p.spawn((WorldAssetRoot(models.f22.clone()), Transform::IDENTITY));
+            }
+            for (_, scene) in models.jets.iter().filter(|_| !crate::jets::fallback()) {
                 p.spawn((WorldAssetRoot(scene.clone()), Transform::IDENTITY));
             }
         })

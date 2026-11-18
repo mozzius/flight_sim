@@ -17,6 +17,17 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # the jets (private: the pack's licence doesn't allow publishing them on their own)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mozzius/flight_sim-assets
+          token: ${{ secrets.ASSETS_TOKEN }}
+          path: assets/models/jets
+      - name: check the jets
+        shell: bash
+        run: |
+          test -f assets/models/jets/f16.bin || { echo "::error::no jets (is the ASSETS_TOKEN secret set?)"; exit 1; }
+          rm -rf assets/models/jets/.git
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -62,6 +73,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # the jets (private: the pack's licence doesn't allow publishing them on their own)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mozzius/flight_sim-assets
+          token: ${{ secrets.ASSETS_TOKEN }}
+          path: assets/models/jets
+      - name: check the jets
+        shell: bash
+        run: |
+          test -f assets/models/jets/f16.bin || { echo "::error::no jets (is the ASSETS_TOKEN secret set?)"; exit 1; }
+          rm -rf assets/models/jets/.git
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: build
@@ -82,6 +104,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # the jets (private: the pack's licence doesn't allow publishing them on their own)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mozzius/flight_sim-assets
+          token: ${{ secrets.ASSETS_TOKEN }}
+          path: assets/models/jets
+      - name: check the jets
+        shell: bash
+        run: |
+          test -f assets/models/jets/f16.bin || { echo "::error::no jets (is the ASSETS_TOKEN secret set?)"; exit 1; }
+          rm -rf assets/models/jets/.git
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: system deps

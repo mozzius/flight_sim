@@ -19,3 +19,6 @@ target/
 .claude/
 /dist
 /flight_sim.db*
+
+# the jets come from the private assets repo (scripts/fetch-assets.sh); without them the game flies the F-22
+/assets/models/jets/

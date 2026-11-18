@@ -1,6 +1,10 @@
 """Builds assets/models/jets/: one .bin per jet, one .gltf per livery, shared textures.
 
-usage: python3 -E build.py <fbx dir> <pack Models dir> <out dir>
+usage: python3 -E build.py <fbx dir> <pack Models dir> <out dir> [<info dir>]
+
+The output belongs in the private assets repo (the pack's licence doesn't allow
+publishing it on its own): write it into the assets/models/jets clone that
+scripts/fetch-assets.sh makes, without deleting the folder, and push from there.
 
 Control surfaces get their own node, re-pivoted so the node origin sits on the
 hinge line and local +X is the hinge axis, oriented so a positive rotation

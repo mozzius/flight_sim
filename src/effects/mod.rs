@@ -258,9 +258,8 @@ fn attach_aircraft_effects(
     let mut rng = rand::rng();
     let along = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
     for (aircraft, jet) in &new {
-        let spec = jet.spec();
-        // round nozzles: the jet is as wide as it's tall
-        let shape = Vec4::new(plume::HALF_LENGTH, plume::RADIUS, spec.nozzle_radius, spec.nozzle_radius);
+        let spec = jet.airframe();
+        let shape = Vec4::new(plume::HALF_LENGTH, plume::RADIUS, spec.nozzle_size.x, spec.nozzle_size.y);
         let exit_z = spec.nozzles[0].z;
         commands.entity(aircraft).insert(AircraftFx {
             seed: rng.random_range(0.0..100.0),
@@ -362,7 +361,7 @@ fn update_engines(
             continue;
         };
         // a vectoring nozzle swings its plume round the nozzle's front ring
-        if jet.spec().vectoring {
+        if jet.airframe().vectoring {
             let pivot = engine.nozzle - Vec3::Z * VECTOR_PIVOT;
             let swing = Quat::from_rotation_x(crate::jets::vector_angle(*jet, stick, engine.nozzle.x));
             let offset = plume_start(engine.nozzle) + Vec3::Z * plume::HALF_LENGTH - pivot;
@@ -430,7 +429,7 @@ fn aircraft_fx(
     let mut rng = rand::rng();
     for (entity, gt, state, health, weapons, disabled, mut fx, jet) in &mut aircraft {
         let pos = gt.translation();
-        let spec = jet.spec();
+        let spec = jet.airframe();
         let (wing, gun_port) = (spec.wing, spec.gun_port);
 
         // ---- vapour: wing-surface sheets under G / AoA, and the transonic cone
