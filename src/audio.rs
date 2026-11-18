@@ -60,6 +60,8 @@ struct Sounds {
     afterburner: Handle<AudioSource>,
     wind: Handle<AudioSource>,
     gun: Handle<AudioSource>,
+    /// The A-10's GAU-8.
+    cannon: Handle<AudioSource>,
     missile_motor: Handle<AudioSource>,
     launch: Handle<AudioSource>,
     explosion: Handle<AudioSource>,
@@ -246,6 +248,23 @@ fn synth_gun() -> Vec<f32> {
         })
         .collect();
     finish(s, 0.85, None)
+}
+
+/// 30 mm GAU-8: ~65 rounds/s, so each round is heard: a deep, tearing "BRRRT".
+fn synth_cannon() -> Vec<f32> {
+    let mut rng = Rng(0x0a10_b555);
+    let mut lp = LowPass::new(1_300.0);
+    let rate = 65.0;
+    let s = (0..samples(0.4))
+        .map(|i| {
+            let t = t_of(i);
+            let phase = (t * rate).fract() / rate;
+            let crack = (-phase * 500.0).exp() * rng.next();
+            let thump = (-phase * 120.0).exp() * (phase * TAU * 75.0).sin();
+            lp.run(crack * 0.8 + thump * 1.3)
+        })
+        .collect();
+    finish(s, 0.9, None)
 }
 
 /// Missile motor: hissing roar.
@@ -461,6 +480,7 @@ fn synthesise(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
         afterburner: add(synth_afterburner()),
         wind: add(synth_wind()),
         gun: add(synth_gun()),
+        cannon: add(synth_cannon()),
         missile_motor: add(synth_missile_motor()),
         launch: add(synth_launch()),
         explosion: add(synth_explosion(false)),
@@ -503,6 +523,7 @@ enum PlayerLoop {
     Afterburner,
     Wind,
     Gun,
+    Cannon,
     Growl,
     Lock,
     Warning,
@@ -532,6 +553,7 @@ fn setup_player_loops(mut commands: Commands, sounds: Res<Sounds>) {
         (PlayerLoop::Afterburner, &sounds.afterburner),
         (PlayerLoop::Wind, &sounds.wind),
         (PlayerLoop::Gun, &sounds.gun),
+        (PlayerLoop::Cannon, &sounds.cannon),
         (PlayerLoop::Growl, &sounds.growl),
         (PlayerLoop::Lock, &sounds.lock),
         (PlayerLoop::Warning, &sounds.warning),
@@ -600,10 +622,11 @@ fn player_loops(
                         let buffet = (state.g_load.abs() / 9.0) * 0.25;
                         (v * v * 0.35 + buffet, 0.7 + 0.5 * v)
                     }
-                    PlayerLoop::Gun => (
-                        if weapons.trigger_gun && weapons.gun_ammo > 0 && !disabled { 0.55 } else { 0.0 },
-                        1.0,
-                    ),
+                    PlayerLoop::Gun | PlayerLoop::Cannon => {
+                        let cannon = weapons.gun == crate::net::protocol::GAU8;
+                        let firing = weapons.trigger_gun && weapons.gun_ammo > 0 && !disabled;
+                        (if firing && cannon == (*kind == PlayerLoop::Cannon) { 0.6 } else { 0.0 }, 1.0)
+                    }
                     PlayerLoop::Growl => (
                         if lock_state(targeting) == LockState::Acquiring && weapons.missiles > 0 { 0.12 } else { 0.0 },
                         1.0,
@@ -622,7 +645,7 @@ fn player_loops(
         };
         // tones snap on/off; engine sounds glide
         let rate = match kind {
-            PlayerLoop::Gun | PlayerLoop::Lock | PlayerLoop::Growl | PlayerLoop::Warning => 40.0,
+            PlayerLoop::Gun | PlayerLoop::Cannon | PlayerLoop::Lock | PlayerLoop::Growl | PlayerLoop::Warning => 40.0,
             _ => 4.0,
         };
         let target = if muted.0 { 0.0 } else { target * settings.volume() };
@@ -632,12 +655,14 @@ fn player_loops(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn attach_aircraft_loops(
     mut commands: Commands,
     sounds: Res<Sounds>,
-    new: Query<Entity, (Added<Aircraft>, Without<Player>)>,
+    new: Query<(Entity, &Weapons), (Added<Aircraft>, Without<Player>)>,
 ) {
-    for aircraft in &new {
+    for (aircraft, weapons) in &new {
+        let gun = if weapons.gun == crate::net::protocol::GAU8 { &sounds.cannon } else { &sounds.gun };
         commands.entity(aircraft).with_children(|p| {
             p.spawn((
                 RemoteLoop::Engine,
@@ -650,7 +675,7 @@ fn attach_aircraft_loops(
             ));
             p.spawn((
                 RemoteLoop::Gun,
-                AudioPlayer(sounds.gun.clone()),
+                AudioPlayer(gun.clone()),
                 PlaybackSettings {
                     spatial_scale: Some(SpatialScale::new(1.0 / 200.0)),
                     ..looping(0.0, true)

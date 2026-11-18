@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever the messages change shape (or their meaning: v7 and v8 added
 /// biomes to `Biome::ALL`, which older clients would read as "random"; v9 put
 /// the jet and the stick in `PlayerState`).
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 
 /// Service-auth audience and method the server checks tokens against.
 pub const AUTH_AUDIENCE: &str = "did:web:flight.mozzius.dev";
@@ -67,6 +67,30 @@ pub const GUN_DAMAGE: f32 = 5.0;
 pub const MISSILE_DAMAGE: f32 = 95.0;
 /// Tracers per second (each stands for a few rounds).
 pub const GUN_RATE: f32 = 25.0;
+
+/// A jet's gun. The server applies the shooter's (by the jet in their state).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gun {
+    /// Per tracer hit.
+    pub damage: f32,
+    /// Tracers per second.
+    pub rate: f32,
+    /// Seconds of trigger before the first round.
+    pub spin_up: f32,
+}
+
+/// The fighters' 20 mm rotary cannon.
+pub const VULCAN: Gun = Gun { damage: GUN_DAMAGE, rate: GUN_RATE, spin_up: 0.0 };
+/// The A-10's 30 mm GAU-8: more than twice the damage a hit at half the
+/// rate (about a third more per second), after a spin-up. On a jet that slow.
+pub const GAU8: Gun = Gun { damage: 13.0, rate: 13.0, spin_up: 0.35 };
+/// The A-10's jet id (`PlayerState.jet >> 4`).
+pub const JET_A10: u8 = 3;
+
+/// The gun of a jet, by its wire byte (`PlayerState.jet`).
+pub fn gun(jet: u8) -> Gun {
+    if jet >> 4 == JET_A10 { GAU8 } else { VULCAN }
+}
 /// Farthest a gun hit is believed (bullets live 2.2 s at ~1 km/s).
 pub const GUN_MAX_RANGE: f32 = 3_000.0;
 /// How far from its last reported position a missile may claim a hit (latency slack).

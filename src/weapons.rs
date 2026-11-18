@@ -10,14 +10,12 @@ use crate::{
     controls::PlayerActions,
     flight::{Aircraft, Disabled, FlightState, FlightSystems, GRAVITY},
     game::{Explosion, Health, Player, Team},
+    net::protocol::Gun,
     world::Terrain,
 };
 
 pub const BULLET_SPEED: f32 = 1_030.0;
 const BULLET_LIFE: f32 = 2.2;
-const BULLET_DAMAGE: f32 = crate::net::protocol::GUN_DAMAGE;
-// tracer entities per second (each stands for a few rounds)
-const GUN_RATE: f32 = crate::net::protocol::GUN_RATE;
 
 const MISSILE_THRUST: f32 = 300.0; // m/s^2, boost phase
 const MISSILE_BURN: f32 = 3.0;
@@ -201,6 +199,10 @@ pub struct Weapons {
     flare_cooldown: f32,
     /// Alternate missile rails.
     rail: bool,
+    /// The jet's gun (the A-10's GAU-8 or everyone else's Vulcan).
+    pub gun: Gun,
+    /// How long the trigger's been held toward the gun's spin-up.
+    gun_spin: f32,
     // intents, set by the pilot every tick
     pub trigger_gun: bool,
     pub fire_missile: bool,
@@ -221,10 +223,17 @@ impl Weapons {
             missile_cooldown: 0.0,
             flare_cooldown: 0.0,
             rail: false,
+            gun: crate::net::protocol::VULCAN,
+            gun_spin: 0.0,
             trigger_gun: false,
             fire_missile: false,
             drop_flares: false,
         }
+    }
+
+    /// A jet's loadout: the same but for its gun.
+    pub fn for_jet(jet: crate::jets::JetChoice) -> Self {
+        Weapons { gun: crate::net::protocol::gun(jet.to_wire()), ..Self::fighter() }
     }
 
     /// Back to a full load of flares (a cleared challenge wave).
@@ -271,6 +280,8 @@ pub struct Bullet {
     visual: bool,
     /// Extra hit radius: the player's bullets are a little forgiving (by difficulty).
     bonus: f32,
+    /// What a hit does (the shooter's gun).
+    damage: f32,
 }
 
 #[derive(Component)]
@@ -558,9 +569,14 @@ fn fire_weapons(
         let fwd = transform.forward().as_vec3();
 
         // ---- gun ----
-        if weapons.trigger_gun && weapons.gun_ammo > 0 {
+        let gun = weapons.gun;
+        if weapons.trigger_gun && weapons.gun_ammo > 0 && weapons.gun_spin < gun.spin_up {
+            // the barrels spin up before the first round
+            weapons.gun_spin += dt;
+            weapons.gun_cooldown = weapons.gun_cooldown.max(0.0);
+        } else if weapons.trigger_gun && weapons.gun_ammo > 0 {
             while weapons.gun_cooldown <= 0.0 && weapons.gun_ammo > 0 {
-                weapons.gun_cooldown += 1.0 / GUN_RATE;
+                weapons.gun_cooldown += 1.0 / gun.rate;
                 weapons.gun_ammo -= 1;
                 let spread = Vec3::new(
                     rng.random_range(-1.0..1.0),
@@ -573,10 +589,12 @@ fn fire_weapons(
                 let port = airframe.map_or(Vec3::new(0.9, 0.4, -7.0), |a| a.gun_port + Vec3::new(0.0, 0.0, -0.8));
                 let muzzle = transform.transform_point(port)
                     + velocity * dt * rng.random_range(0.0..1.0);
-                spawn_tracer(&mut commands, &assets, muzzle, velocity, entity, *team, false, if player { player_gun_bonus } else { 0.0 });
+                spawn_tracer(&mut commands, &assets, muzzle, velocity, entity, *team, false, if player { player_gun_bonus } else { 0.0 }, gun);
             }
         } else {
             weapons.gun_cooldown = weapons.gun_cooldown.max(0.0);
+            // (and spin down)
+            weapons.gun_spin = (weapons.gun_spin - dt).max(0.0);
         }
 
         // ---- missile ----
@@ -640,6 +658,8 @@ fn per_flare_odds(pair: f64) -> f64 {
     (1.0 - (1.0 - pair.clamp(0.0, 1.0)).sqrt()).clamp(0.0, 1.0)
 }
 
+/// A tracer from `gun` (the GAU-8's are fatter).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_tracer(
     commands: &mut Commands,
     assets: &ProjectileAssets,
@@ -649,14 +669,17 @@ pub fn spawn_tracer(
     team: Team,
     visual: bool,
     bonus: f32,
+    gun: Gun,
 ) -> Entity {
+    let heavy = gun.damage > crate::net::protocol::GUN_DAMAGE;
     commands
         .spawn((
-            Bullet { velocity, life: BULLET_LIFE, owner, team, visual, bonus },
+            Bullet { velocity, life: BULLET_LIFE, owner, team, visual, bonus, damage: gun.damage },
             Mesh3d(assets.tracer_mesh.clone()),
             MeshMaterial3d(assets.tracer_material.clone()),
-            Transform::from_translation(pos).looking_to(velocity, Vec3::Y)
-                * Transform::from_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            (Transform::from_translation(pos).looking_to(velocity, Vec3::Y)
+                * Transform::from_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)))
+            .with_scale(if heavy { Vec3::new(2.0, 1.25, 2.0) } else { Vec3::ONE }),
             TransformInterpolation,
         ))
         .id()
@@ -726,11 +749,11 @@ fn move_bullets(
                     net_hits.write(crate::net::NetHit {
                         target,
                         weapon: crate::net::protocol::Weapon::Gun,
-                        damage: BULLET_DAMAGE,
+                        damage: bullet.damage,
                     });
                     hits.write(HitConfirmed { attacker: bullet.owner });
                 } else {
-                    health.current -= BULLET_DAMAGE;
+                    health.current -= bullet.damage;
                     health.last_attacker = Some(bullet.owner);
                     hits.write(HitConfirmed { attacker: bullet.owner });
                 }

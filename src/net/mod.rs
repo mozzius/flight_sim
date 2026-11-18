@@ -1426,7 +1426,9 @@ fn interpolate(
                     decoy_missiles(target, f, our_missiles.iter_mut().map(|m| m.into_inner()));
                 }
             } else {
-                spawn_tracer(&mut commands, &assets, pos, vel, owner, crate::game::Team::Red, true, 0.0);
+                // (their gun: the A-10's tracers are fatter)
+                let gun = peer.entity.and_then(|e| remotes.get(e).ok()).map_or(protocol::VULCAN, |r| protocol::gun(r.5.to_wire()));
+                spawn_tracer(&mut commands, &assets, pos, vel, owner, crate::game::Team::Red, true, 0.0, gun);
             }
         }
 

@@ -545,15 +545,17 @@ impl Room {
                     return;
                 }
                 let s = self.players.get_mut(&shooter).unwrap();
+                // the shooter's gun (the A-10's hits harder, less often)
+                let gun = gun(s.state.as_ref().map_or(0, |(st, _)| st.jet));
                 // no more hits than the gun can fire
                 let dt = now.duration_since(s.tokens_at).as_secs_f32();
                 s.tokens_at = now;
-                s.gun_tokens = (s.gun_tokens + dt * GUN_RATE * 1.2).min(GUN_RATE);
+                s.gun_tokens = (s.gun_tokens + dt * gun.rate * 1.2).min(gun.rate);
                 if s.gun_tokens < 1.0 {
                     return;
                 }
                 s.gun_tokens -= 1.0;
-                GUN_DAMAGE
+                gun.damage
             }
             Weapon::Missile(mid) => {
                 let s = self.players.get_mut(&shooter).unwrap();
@@ -676,6 +678,28 @@ mod tests {
         assert!(out.is_empty());
         let out = s.handle(2, ClientMsg::Respawn, now + Duration::from_secs(5));
         assert_eq!(out[0].msg, ServerMsg::Respawned(2));
+    }
+
+    #[test]
+    fn the_a10s_cannon_hits_harder_and_slower() {
+        let (mut s, now) = duel([0.0; 3], [500.0, 0.0, 0.0]);
+        // player 1 flies the A-10
+        if let ClientMsg::State(mut st) = state([0.0; 3], Status::Flying) {
+            st.jet = JET_A10 << 4;
+            s.handle(1, ClientMsg::State(st), now);
+        }
+        let health = |out: &[Out]| out.iter().find_map(|o| match o.msg {
+            ServerMsg::Damage { health, .. } => Some(health),
+            _ => None,
+        });
+        let out = s.handle(1, ClientMsg::Hit { target: 2, weapon: Weapon::Gun, damage: 5.0 }, now);
+        assert_eq!(health(&out), Some(MAX_HEALTH - GAU8.damage));
+        // its token bucket holds only GAU8.rate hits
+        let landed = (0..200)
+            .filter(|_| !s.handle(1, ClientMsg::Hit { target: 2, weapon: Weapon::Gun, damage: 5.0 }, now).is_empty())
+            .count();
+        assert!(landed < GAU8.rate as usize, "{landed}");
+        assert!(GAU8.damage * GAU8.rate > VULCAN.damage * VULCAN.rate, "more per second");
     }
 
     #[test]
