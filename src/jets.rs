@@ -168,14 +168,13 @@ const SPECS: [JetSpec; 3] = [
 ];
 
 impl JetSpec {
-    /// Where missile `slot` hangs: pairs on the outermost stations (the
-    /// inboard pylons stay empty when there are more stations than
-    /// missiles), from inboard out to the tips, left then right. A jet fires
-    /// its highest slot first (tips first, alternating sides) and reloads
-    /// from the inboard end. None past the stations, and for internal bays.
+    /// Where missile `slot` hangs: pairs from the pylons closest to the body
+    /// outward (the stations past the last pair, wingtip rails included,
+    /// stay empty), left then right. A jet fires its highest slot first
+    /// (outermost first, alternating sides) and reloads from the inboard
+    /// end. None past the stations, and for internal bays.
     pub fn hardpoint(&self, slot: u32) -> Option<Vec3> {
-        let empty = self.hardpoints.len().saturating_sub(crate::weapons::MAX_MISSILES as usize / 2);
-        let p = *self.hardpoints.get(empty + slot as usize / 2)?;
+        let p = *self.hardpoints.get(slot as usize / 2)?;
         Some(if slot.is_multiple_of(2) { p * Vec3::new(-1.0, 1.0, 1.0) } else { p })
     }
 }
@@ -539,13 +538,11 @@ mod tests {
         let (l, r) = (spec.hardpoint(0).unwrap(), spec.hardpoint(1).unwrap());
         assert!(l.x < 0.0 && r.x > 0.0 && l.x == -r.x);
         assert!(spec.hardpoint(2).unwrap().x.abs() > spec.hardpoint(0).unwrap().x.abs());
-        assert_eq!(spec.hardpoint(crate::weapons::MAX_MISSILES), None);
         for jet in Jet::ALL {
             let spec = jet.spec();
             assert!(spec.hardpoints.len() * 2 >= crate::weapons::MAX_MISSILES as usize);
-            // the wingtip rails are always loaded
-            let tip = spec.hardpoints.last().unwrap();
-            assert_eq!(spec.hardpoint(crate::weapons::MAX_MISSILES - 1), Some(*tip));
+            // the pylons closest to the body are loaded first
+            assert_eq!(spec.hardpoint(1), Some(spec.hardpoints[0]));
         }
         assert_eq!(F22.hardpoint(0), None, "internal bays");
     }
