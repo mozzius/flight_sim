@@ -465,11 +465,11 @@ impl Layout {
         let (left_x, right_x) = (Val::Px(w - x1), Val::Px(w - x1));
 
         let ammo_left = clear.buttons_right + 14.0;
-        // "F/A-18   GUN 600   MSL 4 [===  ]   FLR 4/4", smaller on a narrow phone so it fits before the throttle
-        let ammo_font = ((clear.throttle_left - 12.0 - ammo_left) / text_width(43, 1.0)).clamp(11.0, 15.0 * k.max(0.85));
+        // "GUN 600   MSL 4 [===  ]   FLR 4/4", smaller on a narrow phone so it fits before the throttle
+        let ammo_font = ((clear.throttle_left - 12.0 - ammo_left) / text_width(34, 1.0)).clamp(11.0, 15.0 * k.max(0.85));
         let health_bottom = safe.w + 10.0;
         let weapons_bottom = health_bottom + line(ammo_font) + 2.0;
-        let ammo_w = text_width(43, ammo_font);
+        let ammo_w = text_width(34, ammo_font);
         let panel_font = 14.0 * k.max(0.85);
         let panel_right = w - clear.throttle_left + 12.0;
         // "1.7 km   +314 km/h closing" (no [TAB] on touch)
@@ -753,7 +753,7 @@ fn update_center_symbols(
 
 #[allow(clippy::type_complexity)]
 fn update_readouts(
-    player: Query<(&Transform, &FlightState, &Weapons, &Health, &ControlInput, Option<&crate::jets::JetChoice>), With<Player>>,
+    player: Query<(&Transform, &FlightState, &Weapons, &Health, &ControlInput), With<Player>>,
     mut readouts: Query<(&Readout, &mut Text, &mut TextColor)>,
 ) {
     let player = player.single().ok();
@@ -769,7 +769,7 @@ fn update_readouts(
             (Readout::Altitude, Some((t, s, ..))) => {
                 format!("{:>5.0} m\n{:>+4.0} m/s", t.translation.y, s.velocity.y)
             }
-            (Readout::Throttle, Some((_, s, _, _, input, _))) => {
+            (Readout::Throttle, Some((_, s, _, _, input))) => {
                 let extra = if s.afterburner_on {
                     " AB"
                 } else if input.airbrake {
@@ -779,7 +779,7 @@ fn update_readouts(
                 };
                 format!("THR {:>3.0}%{extra}", s.spool * 100.0)
             }
-            (Readout::Weapons, Some((_, _, w, _, _, jet))) => {
+            (Readout::Weapons, Some((_, _, w, ..))) => {
                 // reload progress for the next missile as a little bar
                 let reload = if w.missiles < crate::weapons::MAX_MISSILES {
                     let filled = (w.missile_reload * 5.0).floor() as usize;
@@ -787,10 +787,8 @@ fn update_readouts(
                 } else {
                     String::new()
                 };
-                // which jet, then its loadout
-                let jet = jet.map_or("", |j| j.airframe().name);
                 format!(
-                    "{jet}   GUN {:>3}   MSL {}{reload}   FLR {}/{}",
+                    "GUN {:>3}   MSL {}{reload}   FLR {}/{}",
                     w.gun_ammo, w.missiles, w.flares, crate::weapons::MAX_FLARES
                 )
             }
@@ -1004,7 +1002,7 @@ fn gun_cue(
 fn target_panel(
     touch: Res<crate::touch::TouchInput>,
     player: Query<(&Transform, &FlightState, &Targeting, &Team), With<Player>>,
-    aircraft: Query<(&Transform, &FlightState, &Team), (With<Aircraft>, Without<Disabled>)>,
+    aircraft: Query<(&Transform, &FlightState, &Team, Option<&crate::jets::JetChoice>), (With<Aircraft>, Without<Disabled>)>,
     mut panel: Query<&mut Text, With<TargetPanel>>,
 ) {
     let Ok(mut text) = panel.single_mut() else {
@@ -1014,8 +1012,8 @@ fn target_panel(
         .single()
         .ok()
         .and_then(|(t, s, tg, team)| {
-            let (tt, ts, _) = aircraft.get(tg.target?).ok()?;
-            let hostiles: Vec<_> = aircraft.iter().filter(|(_, _, tm)| *tm != team).collect();
+            let (tt, ts, _, jet) = aircraft.get(tg.target?).ok()?;
+            let hostiles: Vec<_> = aircraft.iter().filter(|(_, _, tm, _)| *tm != team).collect();
             let to = tt.translation - t.translation;
             let closure = (s.velocity - ts.velocity).dot(to.normalize_or_zero());
             let lock = if tg.locked() {
@@ -1025,8 +1023,10 @@ fn target_panel(
             } else {
                 "NO LOCK".to_string()
             };
+            // what it is, by the lock state ("SU-37   LOCKED")
+            let jet = jet.map_or(String::new(), |j| format!("{}   ", j.airframe().name.to_ascii_uppercase()));
             Some(format!(
-                "TGT  {} hostiles{}\n{:.1} km   {:>+5.0} km/h closing\n{:>5.0} m alt   {:>4.0} km/h\n{lock}",
+                "TGT  {} hostiles{}\n{:.1} km   {:>+5.0} km/h closing\n{:>5.0} m alt   {:>4.0} km/h\n{jet}{lock}",
                 hostiles.len(),
                 // (the keyboard's key; on touch the TGT button says it)
                 if touch.active { "" } else { "  [TAB]" },
