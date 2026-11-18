@@ -62,6 +62,26 @@ PLANES = {
         },
         "nozzle": lambda n: {"enginevecl512": "nozzle_l", "nozzlel512": "nozzle_l", "enginevecr512": "nozzle_r", "nozzler512": "nozzle_r"}.get(n),
     },
+    # high-bypass turbofans in pods over the tail: no nozzles, but fans that spin
+    "a10": {
+        "fbx": "A10.FBX",
+        "liveries": {"military": "a10-defuse-usmilitary.png", "forest": "a10-defuse-forest.png"},
+        # (its "normal" map is a grey height map: turned into normals)
+        "normal": "A10_NRM.png", "normal_is_height": True, "spec": None, "cockpit": "a10_cockpit.png",
+        "roles": {
+            # one piece across the tail: pitch only (a centreline "stab")
+            "elevators512": ("stab", "hinged"),
+            "leftaileron512": ("aileron_l", "hinged"), "rightaileron512": ("aileron_r", "hinged"),
+            "leftrudder512": ("rudder_l", "hinged"), "rightrudder512": ("rudder_r", "hinged"),
+            "bladesl512": ("fan_l", "fan"), "bladesr512": ("fan_r", "fan"),
+            # the gear's half-retracted look (the A-10's wheels stay proud of the pods): kept
+            "vc512": ("cockpit", None), "vchud512": ("hud", None),
+            "canopy512": ("canopy", None), "canopyint512": ("canopy_inner", None),
+        },
+        "nozzle": lambda n: None,
+        # no nozzles to centre on: the fuselage's centreline
+        "origin_y": 0.55,
+    },
 }
 
 
@@ -232,14 +252,31 @@ def save_tex(src, dst, size, quality=88, mode="RGB"):
         im.save(dst, quality=quality, optimize=True)
 
 
+def height_to_normal(src, dst, size, strength=1.0):
+    """A tangent-space normal map from a grey height map (central differences)."""
+    im = Image.open(src).convert("L")
+    if im.size[0] > size:
+        im = im.resize((size, size * im.size[1] // im.size[0]), Image.LANCZOS)
+    h = np.asarray(im).astype(np.float32) / 255
+    dx = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) * 0.5 * strength * size / 64
+    dy = (np.roll(h, -1, 0) - np.roll(h, 1, 0)) * 0.5 * strength * size / 64
+    n = np.stack([-dx, dy, np.ones_like(h)], -1)
+    n /= np.linalg.norm(n, axis=-1, keepdims=True)
+    Image.fromarray(((n * 0.5 + 0.5) * 255).astype(np.uint8)).save(dst, quality=92, optimize=True)
+
+
 def build(key, cfg):
     ps = parts(os.path.join(FBX, cfg["fbx"]))
     allp = np.concatenate([p.pos for p in ps])
     lo, hi = allp.min(0), allp.max(0)
     L = hi[2] - lo[2]
     noz = [p for p in ps if cfg["nozzle"](p.name)]
-    nozc = np.concatenate([p.pos for p in noz])
-    origin = np.array([0.0, (nozc[:, 1].min() + nozc[:, 1].max()) / 2 - 0.1, (lo[2] + hi[2]) / 2 + 0.07 * L])
+    if noz:
+        nozc = np.concatenate([p.pos for p in noz])
+        oy = (nozc[:, 1].min() + nozc[:, 1].max()) / 2 - 0.1
+    else:
+        oy = cfg["origin_y"]
+    origin = np.array([0.0, oy, (lo[2] + hi[2]) / 2 + 0.07 * L])
 
     def tx(v):
         return (v - origin) * SCALE
@@ -298,6 +335,14 @@ def build(key, cfg):
             nf = lambda n: n @ R
             info["surfaces"][role] = {"pivot": p.round(3).tolist(), "axis": axis.round(3).tolist(),
                                       "span": float(np.ptp(((pts - p) @ R)[:, 0]))}
+        elif kind == "fan":
+            # node at the fan's hub, spinning about local Z
+            c = (pts.min(0) + pts.max(0)) / 2
+            node["translation"] = c.tolist()
+            xf = lambda v: v - c
+            nf = lambda n: n
+            info["fans"] = info.get("fans", {})
+            info["fans"][role] = {"hub": c.round(3).tolist(), "radius": round(float(np.ptp(pts[:, 0]) / 2), 3)}
         elif kind == "nozzle":
             # node at the petal ring's centre, at the front of the nozzle
             c = np.array([(pts[:, 0].min() + pts[:, 0].max()) / 2, (pts[:, 1].min() + pts[:, 1].max()) / 2, pts[:, 2].min()])
@@ -366,9 +411,16 @@ def build(key, cfg):
     for sub, div in (("", 1), ("low/", 2)):
         tdir = os.path.join(OUT, "textures", sub)
         os.makedirs(tdir, exist_ok=True)
-        save_tex(os.path.join(PACK, cfg["normal"]), os.path.join(tdir, f"{key}_normal.jpg"), TEX // div, 92)
-        spec = Image.open(os.path.join(PACK, cfg["spec"])).convert("L").resize((512 // div, 512 // div), Image.LANCZOS)
-        s = np.asarray(spec).astype(np.float32) / 255
+        if cfg.get("normal_is_height"):
+            height_to_normal(os.path.join(PACK, cfg["normal"]), os.path.join(tdir, f"{key}_normal.jpg"), TEX // div)
+        else:
+            save_tex(os.path.join(PACK, cfg["normal"]), os.path.join(tdir, f"{key}_normal.jpg"), TEX // div, 92)
+        if cfg["spec"]:
+            spec = Image.open(os.path.join(PACK, cfg["spec"])).convert("L").resize((512 // div, 512 // div), Image.LANCZOS)
+            s = np.asarray(spec).astype(np.float32) / 255
+        else:
+            # no spec map: evenly matt paint
+            s = np.full((64 // div, 64 // div), 0.3, np.float32)
         mr = np.stack([np.full_like(s, 1.0), 0.78 - 0.38 * s, 0.15 * s], -1)
         Image.fromarray((mr * 255).astype(np.uint8)).save(os.path.join(tdir, f"{key}_mr.jpg"), quality=90)
         save_tex(os.path.join(PACK, cfg["cockpit"]), os.path.join(tdir, cock), 512 // div, 85)
