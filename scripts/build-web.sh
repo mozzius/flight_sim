@@ -17,7 +17,7 @@ if command -v wasm-opt >/dev/null; then
 fi
 cp -R assets dist/assets
 # the jets folder is a clone of the private assets repo: never publish its history
-rm -rf dist/assets/models/jets/.git
+rm -rf dist/assets/models/jets/.git dist/assets/models/jets/README.md
 cp web/vercel.json web/manifest.json web/auth.js web/oauth-client-metadata.json web/oauth-native-client-metadata.json dist/
 cp -R web/.well-known dist/.well-known
 # the web OAuth client is per host: its client_id and redirect URI must match where it is served
