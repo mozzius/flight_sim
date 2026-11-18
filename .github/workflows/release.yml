@@ -20,7 +20,7 @@ jobs:
       # the jets (private: the pack's licence doesn't allow publishing them on their own)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: mozzius/flight_sim-assets
+          repository: mozzius/flight_sim_assets
           token: ${{ secrets.ASSETS_TOKEN }}
           path: assets/models/jets
       - name: check the jets
@@ -76,7 +76,7 @@ jobs:
       # the jets (private: the pack's licence doesn't allow publishing them on their own)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: mozzius/flight_sim-assets
+          repository: mozzius/flight_sim_assets
           token: ${{ secrets.ASSETS_TOKEN }}
           path: assets/models/jets
       - name: check the jets
@@ -107,7 +107,7 @@ jobs:
       # the jets (private: the pack's licence doesn't allow publishing them on their own)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: mozzius/flight_sim-assets
+          repository: mozzius/flight_sim_assets
           token: ${{ secrets.ASSETS_TOKEN }}
           path: assets/models/jets
       - name: check the jets

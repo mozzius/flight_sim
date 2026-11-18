@@ -9,7 +9,7 @@
 # delete the folder: it's a git clone), then commit and push from inside it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-repo="${ASSETS_REPO:-git@github.com:mozzius/flight_sim-assets.git}"
+repo="${ASSETS_REPO:-git@github.com:mozzius/flight_sim_assets.git}"
 dir=assets/models/jets
 if [ -d "$dir/.git" ]; then
   git -C "$dir" pull --ff-only
