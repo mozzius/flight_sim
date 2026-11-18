@@ -380,17 +380,26 @@ pub fn simulate(
     time: Res<Time>,
     mut particles: ResMut<Particles>,
     frames: Query<(), With<GlobalTransform>>,
+    camera: Query<&GlobalTransform, With<MainCamera>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
+    let cam = camera.single().map(|c| c.translation()).ok();
     let list = &mut particles.list;
-    let rush = smoke_rush(list.len());
+    let rush = smoke_rush(list.len()) - 1.0;
     let mut i = 0;
     while i < list.len() {
         let p = &mut list[i];
-        p.age += if p.life > RUSH_MIN_LIFE { dt * rush } else { dt };
+        // the hurry falls mostly on smoke far from the camera: rushed
+        // nearby, a missile's trail visibly vanished faster than it flew
+        p.age += if p.life > RUSH_MIN_LIFE && rush > 0.0 {
+            let far = cam.map_or(1.0, |c| smoothstep01((c.distance(p.pos) - RUSH_NEAR) / (RUSH_FAR - RUSH_NEAR)));
+            dt * (1.0 + rush * (0.15 + 1.35 * far))
+        } else {
+            dt
+        };
         let dead = p.age >= p.life || p.frame.is_some_and(|f| !frames.contains(f));
         if dead {
             list.swap_remove(i);
@@ -422,6 +431,10 @@ const RUSH_FROM: f32 = MAX_PARTICLES as f32 * 0.45;
 const RUSH_FULL: f32 = MAX_PARTICLES as f32 * 0.6;
 /// Only particles that live longer than this (s) are hurried along.
 const RUSH_MIN_LIFE: f32 = 2.0;
+/// Within `RUSH_NEAR` (m) of the camera smoke is barely hurried; past
+/// `RUSH_FAR` it takes most of it.
+const RUSH_NEAR: f32 = 400.0;
+const RUSH_FAR: f32 = 2_500.0;
 
 /// How much faster long-lived particles age with `n` alive: 1 up to
 /// `RUSH_FROM`, 9x at `RUSH_FULL`, and on up from there.
