@@ -99,6 +99,10 @@ pub struct Particle {
     pub near: f32,
     /// Simulate in this entity's local space (vapour, muzzle flashes).
     pub frame: Option<Entity>,
+    /// Vapour only: how much of the direct sun it is shaded from, 0..1 (it
+    /// keeps the sky light, so shaded vapour goes cool grey like the shaded
+    /// side of a cloud rather than a dim, sun-tinted brown).
+    pub shade: f32,
     pub tile: f32,
     pub seed: f32,
 }
@@ -132,6 +136,7 @@ impl Particle {
             soft: 1.0,
             near: 0.0,
             frame: None,
+            shade: 0.0,
             tile: rng.random_range(0..textures::ATLAS_TILES * textures::ATLAS_TILES) as f32,
             seed: rng.random_range(0.0..1.0),
         }
@@ -527,7 +532,8 @@ pub fn build_mesh(
             opacity: [opacity; 4],
             // the tile index carries the softness in its fraction
             a: [heat, dissolve, p.tile + p.soft.clamp(0.0, 1.0) * 0.49, p.seed],
-            b: [p.kind as u32 as f32, size, p.glow, angle],
+            // vapour never glows: the slot carries its shade instead
+            b: [p.kind as u32 as f32, size, if p.kind == Kind::Vapour { p.shade } else { p.glow }, angle],
         });
     }
     for q in particles.quads.drain(..) {

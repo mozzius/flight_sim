@@ -98,7 +98,7 @@ fn hg(cos_theta: f32, g: f32) -> f32 {
 
 /// Sun + sky lighting of a smoke surface with normal `n`.
 /// `thick` is how deep into the puff this texel is, `density` its opacity.
-fn light_smoke(albedo: vec3<f32>, n: vec3<f32>, to_cam: vec3<f32>, thick: f32, density: f32) -> vec3<f32> {
+fn light_smoke(albedo: vec3<f32>, n: vec3<f32>, to_cam: vec3<f32>, thick: f32, density: f32, sun_vis: f32) -> vec3<f32> {
     let l = fx.sun_dir.xyz;
     let ndl = dot(n, l);
     // wrapped diffuse: smoke scatters light round into the terminator
@@ -108,7 +108,7 @@ fn light_smoke(albedo: vec3<f32>, n: vec3<f32>, to_cam: vec3<f32>, thick: f32, d
     let self_shadow = mix(1.0, 0.45, thick * away);
     // silver lining: thin edges glow when looking toward the sun
     let forward = hg(dot(-to_cam, l), 0.55) * (1.0 - density * 0.85) * 3.0;
-    let sun = fx.sun.rgb * fx.sun.w * view.exposure;
+    let sun = fx.sun.rgb * fx.sun.w * view.exposure * sun_vis;
     let sky = fx.ambient.rgb * fx.ambient.w * view.exposure * (0.55 + 0.45 * n.y);
     return albedo / PI * (sun * (diffuse * self_shadow + forward) + sky);
 }
@@ -169,6 +169,7 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
     var density: f32;
     var n: vec3<f32>;
     var thick: f32;
+    var sun_vis = 1.0;
     if kind == 4 {
         // vapour: a wide gaussian (zero at the quad's edge) eaten by two
         // octaves of drifting noise with soft thresholds, so there is no
@@ -187,6 +188,8 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
         // cloud around it from any side, with a hint of the blob's roundness
         n = normalize(fx.sun_dir.xyz * 0.6 + to_cam * 0.4 + (x_axis * p.x - y_axis * p.y) * 0.25 + up * (n2.b - 0.5) * 0.3);
         thick = g * 0.5;
+        // vapour carries its shade from the sun in the glow slot
+        sun_vis = 1.0 - glow;
     } else if kind == 3 {
         // tube: a lit cylinder impostor, its edge eaten by noise along the trail
         let across = in.uv.x * 2.0 - 1.0;
@@ -220,7 +223,7 @@ fn fragment(in: VOut) -> @location(0) vec4<f32> {
     if alpha < 0.002 {
         discard;
     }
-    let lit = light_smoke(albedo, n, to_cam, thick, density);
+    let lit = light_smoke(albedo, n, to_cam, thick, density, sun_vis);
 
     // fire: hottest in the thick core of the puff, flickering with the noise
     var emission = vec3(0.0);

@@ -47,10 +47,9 @@ const CLING: f64 = 0.45;
 /// Thick clumps of wisps left right at the exit point.
 const CLUMPS: usize = 3;
 const CLUMP_WISPS: usize = 6;
-/// Least light on wisps shed inside a cloud (see `sunlight`).
+/// Least light on wisps shed inside a cloud (see [`cloud_light`]): the fog
+/// all round is lit by light scattered through the cloud.
 const IN_CLOUD_LIGHT: f32 = 0.85;
-/// ...and on those shed in the open after leaving it.
-const OUT_LIGHT: f32 = 0.55;
 /// Inside, a thinner stream (rate and opacity): you're in fog already, and
 /// seconds of wisps clinging to the airframe pile up into a ball round it.
 const IN_CLOUD_RATE: f32 = 0.35;
@@ -88,9 +87,10 @@ fn wisp(rng: &mut impl rand::Rng, pos: Vec3, jet_vel: Vec3, c: f32, scale: f32, 
         spin: rng.random_range(-0.15..0.15),
         // smeared along its motion while it's still being dragged
         stretch: 0.12,
-        // a touch above 1: thin vapour lit by the sun and sky, like the cloud
-        // it came from (more than this glows at sunset)
-        albedo: Vec3::new(0.88, 0.91, 0.98) * light * rng.random_range(0.97..1.03),
+        // white like the cloud it came from; how lit it is goes in `shade`,
+        // which dims only the sun so shaded wisps stay the cloud's cool grey
+        albedo: Vec3::new(0.93, 0.95, 1.0) * rng.random_range(0.97..1.03),
+        shade: 1.0 - light,
         opacity: 0.6 * c.powf(0.8),
         fade_in: 0.2,
         dissolve: 0.0,
@@ -118,15 +118,19 @@ fn streamer(rng: &mut impl rand::Rng, pos: Vec3, jet_vel: Vec3, c: f32, scale: f
     }
 }
 
-/// How much sun reaches `p` through the cloud toward the sun (by
-/// [`CloudField`]), as a light scale: the wisps don't get the clouds' own
-/// shadows, so torn from the shaded side of a bank they'd glow against it
-/// (worst at sunset, when the sun comes in low through the whole layer).
-fn sunlight(field: &CloudField, p: Vec3, sun: Vec3) -> f32 {
+/// How brightly the cloud round `p` is lit, 0..1, so the wisps torn off it
+/// match it: like the cloud shader, light scattered on through the cloud
+/// toward the sun (softly shadowed, so a sunlit bank is white right through)
+/// plus a sky ambient graded from the base up. Off the shaded base of an
+/// overcast layer that's dark grey; off the top of a cumulus, white.
+fn cloud_light(field: &CloudField, p: Vec3, sun: Vec3) -> f32 {
     const STEP: f32 = 150.0;
     let depth: f32 = (1..=15).map(|i| field.density_at(p + sun * (i as f32 * STEP))).sum::<f32>() * STEP;
-    let transmittance = (-depth * 0.04).exp();
-    0.28 + 0.72 * transmittance
+    let scattered = (-depth * 0.012).exp();
+    let (bottom, top) = field.layer();
+    let h = ((p.y - bottom) / (top - bottom).max(1.0)).clamp(0.0, 1.0);
+    let sky = 0.3 + 0.3 * (h / 0.8).min(1.0).powi(2) * (3.0 - 2.0 * (h / 0.8).min(1.0));
+    scattered + (1.0 - scattered) * sky
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -204,13 +208,10 @@ pub fn cloud_wake(
             continue;
         }
         let rot = gt.rotation();
-        // inside, the fog all round is lit by light scattered through the
-        // cloud: wisps darkened by the sun's path read as a murky blob
-        // (out in the open on the shaded side it can be darker, but not so
-        // dark it turns murky next to the stream shed inside)
-        let light = sunlight(&field, pos, sun).max(if in_cloud { IN_CLOUD_LIGHT } else { OUT_LIGHT });
+        let light = cloud_light(&field, pos, sun);
+        let light = if in_cloud { light.max(IN_CLOUD_LIGHT) } else { light };
         if just_left && log && player {
-            info!("cloud wake: sunlight {light:.2} (sun {sun:.2})");
+            info!("cloud wake: light {light:.2} (sun {sun:.2})");
         }
         if just_left {
             // the cloud's edge, torn away in a few thick clumps
