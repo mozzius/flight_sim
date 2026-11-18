@@ -157,7 +157,7 @@ fn spawn_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                 });
                 // (multiplayer only: shown in a room)
                 crate::friends::spawn_list(panel, &font, crate::menu::Screen::Pause, 100, 1);
-                panel.spawn((DesktopOnly, text("Esc / Start: resume      Q: quit", 16.0, DIM)));
+                panel.spawn((DesktopOnly, text("Esc / Start: resume      Q: menu", 16.0, DIM)));
             });
         });
 }
@@ -168,7 +168,7 @@ fn toggle_pause(
     gamepads: Query<&Gamepad>,
     mut paused: ResMut<Paused>,
     mut time: ResMut<Time<Virtual>>,
-    mut exit: MessageWriter<AppExit>,
+    mut next: ResMut<NextState<crate::loading::GameState>>,
 ) {
     let pressed = keys.just_pressed(KeyCode::Escape)
         || gamepads.iter().any(|g| g.just_pressed(GamepadButton::Start));
@@ -181,7 +181,7 @@ fn toggle_pause(
             paused.0 = !paused.0;
         }
         if paused.0 && keys.just_pressed(KeyCode::KeyQ) {
-            exit.write(AppExit::Success);
+            next.set(crate::loading::GameState::Menu);
         }
         return;
     }
@@ -198,7 +198,7 @@ fn toggle_pause(
         }
     }
     if paused.0 && keys.just_pressed(KeyCode::KeyQ) {
-        exit.write(AppExit::Success);
+        next.set(crate::loading::GameState::Menu);
     }
 }
 

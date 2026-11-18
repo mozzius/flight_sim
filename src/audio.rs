@@ -47,7 +47,9 @@ impl Plugin for AudioFxPlugin {
                     one_shots,
                     play_delayed,
                     feedback_sounds,
-                ),
+                    pause_sounds,
+                )
+                    .chain(),
             );
     }
 }
@@ -880,6 +882,23 @@ fn feedback_sounds(
     if let Some(d) = kills.iter().filter_map(|k| Some(listener?.distance(k.position?))).reduce(f32::min) {
         let volume = (500.0 / d.max(1.0)).clamp(0.45, 1.0);
         play(if d > 2_500.0 { &sounds.explosion_far } else { &sounds.explosion }, volume);
+    }
+}
+
+/// The pause menu stops every sound where it is (the menu's own backdrop is
+/// silenced by volume instead), and picks them up again on resume.
+fn pause_sounds(
+    paused: Option<Res<crate::pause::Paused>>,
+    state: Res<State<crate::loading::GameState>>,
+    sinks: Query<&AudioSink>,
+) {
+    let stop = paused.is_some_and(|p| p.0) && *state.get() == crate::loading::GameState::Playing;
+    for sink in &sinks {
+        if stop && !sink.is_paused() {
+            sink.pause();
+        } else if !stop && sink.is_paused() {
+            sink.play();
+        }
     }
 }
 
