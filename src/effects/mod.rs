@@ -27,6 +27,7 @@ use bevy::{
 use rand::{Rng, RngExt};
 
 use crate::{
+    loading::GameState,
     camera::MainCamera,
     flight::{Aircraft, Disabled, FlightState},
     jets::{JetChoice, Stick},
@@ -52,6 +53,11 @@ impl Plugin for EffectsPlugin {
         .init_resource::<Bursts>()
         .init_resource::<Ribbons>()
         .add_systems(Startup, (particles::setup, setup_assets).chain())
+        // a fresh sky for every scene: the menu's backdrop dogfight left
+        // thousands of smoke puffs that filled the budget into the round
+        .add_systems(OnEnter(GameState::Menu), clear_effects)
+        .add_systems(OnEnter(GameState::Loading), clear_effects)
+        .add_systems(OnEnter(GameState::Playing), clear_effects)
         .add_systems(
             Update,
             (
@@ -1311,6 +1317,18 @@ fn update_bursts(
         }
         true
     });
+}
+
+/// Drops every particle, ribbon, debris piece and smoke column.
+/// (The first state is entered before `Particles` is set up at startup.)
+fn clear_effects(particles: Option<ResMut<Particles>>, mut bursts: ResMut<Bursts>, mut ribbons: ResMut<Ribbons>) {
+    if let Some(mut particles) = particles {
+        particles.list.clear();
+        particles.quads.clear();
+    }
+    bursts.debris.clear();
+    bursts.columns.clear();
+    ribbons.0.clear();
 }
 
 // ---------------------------------------------------------------- ribbon trails
