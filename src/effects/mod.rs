@@ -432,7 +432,7 @@ fn aircraft_fx(
         let spec = jet.airframe();
         let (wing, gun_port) = (spec.wing, spec.gun_port);
 
-        // ---- vapour: wing-surface sheets under G / AoA, and the transonic cone
+        // ---- vapour: wing-surface sheets under G / AoA
         if !disabled {
             let humidity = 1.0 - 0.6 * smoothstep(2_000.0, 9_000.0, pos.y);
             let g = smoothstep(4.0, 8.0, state.g_load.abs());
@@ -448,7 +448,7 @@ fn aircraft_fx(
                 // light pulls show a narrow band near the suction peak; hard
                 // ones cover the wing back to the trailing edge
                 let reach = 0.35 + 0.65 * s;
-                let mut n = s * 1100.0 * dt;
+                let mut n = s * 1500.0 * dt;
                 while n > 0.0 {
                     if n < 1.0 && rng.random::<f32>() > n {
                         break;
@@ -460,23 +460,29 @@ fn aircraft_fx(
                     let lead = wing[0].lerp(wing[1], u);
                     let trail = wing[3].lerp(wing[2], u);
                     let mut p = lead.lerp(trail, v);
-                    p.y += rng.random_range(0.03..0.18);
+                    p.y += rng.random_range(0.08..0.3);
                     p.x *= side;
                     // the wing slides under it: chordwise streaks, faster and
                     // longer off the trailing edge, where the sheet tears up
                     let (speed, life) = if spill {
-                        (rng.random_range(30.0..50.0), rng.random_range(0.04..0.08))
+                        (rng.random_range(30.0..45.0), rng.random_range(0.1..0.18))
                     } else {
-                        (rng.random_range(18.0..34.0), rng.random_range(0.07..0.14))
+                        (rng.random_range(14.0..26.0), rng.random_range(0.12..0.22))
                     };
                     particles.add(
                         Particle {
                             vel: Vec3::new(side * rng.random_range(0.0..1.5), 0.3, speed),
                             life,
-                            size: (rng.random_range(0.5..0.8), rng.random_range(0.9..1.5)),
-                            stretch: 0.05,
+                            // big, faint and smeared along the chord, so
+                            // they overlap into one sheet rather than dots
+                            size: if spill {
+                                (rng.random_range(0.6..0.9), rng.random_range(1.4..2.2))
+                            } else {
+                                (rng.random_range(0.9..1.3), rng.random_range(1.4..2.0))
+                            },
+                            stretch: if spill { 0.2 } else { 0.12 },
                             albedo: Vec3::splat(rng.random_range(1.0..1.1)),
-                            opacity: if spill { 0.2 } else { 0.36 } * (0.35 + 0.65 * s),
+                            opacity: if spill { 0.12 } else { 0.21 } * (0.35 + 0.65 * s),
                             soft: 0.1,
                             drag: 0.0,
                             wind: 0.0,
@@ -488,46 +494,58 @@ fn aircraft_fx(
                         0.6,
                     );
                 }
-            }
-            // shock collar around Mach 1
-            let cone = smoothstep(0.9, 0.97, state.mach)
-                * (1.0 - smoothstep(1.03, 1.15, state.mach))
-                * humidity;
-            // a thin bell-shaped shell round the airframe at the wing's widest
-            // point: it fades in from the front and ends in a hard edge at the
-            // shock, flaring aft toward the wingtips, and flickers as the
-            // shock wanders
-            let flicker = plume::turbulence(t * 0.6, fx.seed + 11.0);
-            let c = (cone * (0.6 + 0.4 * (flicker - 0.8) / 0.4)).clamp(0.0, 1.0);
-            let mut n = c * 700.0 * dt;
-            while n > 0.0 {
-                if n < 1.0 && rng.random::<f32>() > n {
-                    break;
+                // LEX vortex: the strake beside the cockpit sheds a tight,
+                // twisting core that condenses at high AoA and streams back
+                // over the wing root, swelling as it bursts behind the wing
+                let lex = (smoothstep(9.0, 20.0, state.alpha.to_degrees().abs()).max(g * 0.6)
+                    * humidity
+                    * smoothstep(60.0, 120.0, state.airspeed)
+                    * (0.7 + 0.3 * (plume::turbulence(t * 1.1, fx.seed + side * 5.3) - 0.8) / 0.4))
+                    .clamp(0.0, 1.0);
+                let root = wing[0];
+                let start = Vec3::new(root.x * 0.45, root.y + 0.12, root.z + (spec.eye.z - root.z) * 0.55);
+                let end = Vec3::new(root.x * 1.2, root.y + 0.7, wing[3].z + 3.0);
+                let axis = (end - start).normalize();
+                let across = axis.cross(Vec3::Y).normalize();
+                let over = across.cross(axis);
+                let mut n = lex * 900.0 * dt;
+                while n > 0.0 {
+                    if n < 1.0 && rng.random::<f32>() > n {
+                        break;
+                    }
+                    n -= 1.0;
+                    // denser toward the front, where the core is tight
+                    let u = rng.random::<f32>().powf(1.3);
+                    // the core only condenses back to where the vortex reaches
+                    // at this AoA
+                    if u > 0.35 + 0.65 * lex {
+                        continue;
+                    }
+                    let r = 0.08 + 0.55 * u * u + if u > 0.75 { (u - 0.75) * 2.5 } else { 0.0 };
+                    let a = rng.random_range(0.0..std::f32::consts::TAU);
+                    let mut p = start.lerp(end, u) + (across * a.cos() + over * a.sin()) * r * rng.random::<f32>().sqrt();
+                    p.x *= side;
+                    let mut dir = axis;
+                    dir.x *= side;
+                    particles.add(
+                        Particle {
+                            vel: dir * rng.random_range(20.0..32.0),
+                            life: rng.random_range(0.1..0.18),
+                            size: (0.25 + 0.6 * u, 0.5 + 1.2 * u),
+                            stretch: 0.14,
+                            albedo: Vec3::splat(rng.random_range(1.0..1.1)),
+                            opacity: 0.26 * (0.4 + 0.6 * lex) * (1.0 - 0.5 * u),
+                            soft: 0.1,
+                            drag: 0.0,
+                            wind: 0.0,
+                            fade_in: 0.02,
+                            dissolve: 0.3,
+                            frame: Some(entity),
+                            ..Particle::vapour(p)
+                        },
+                        0.6,
+                    );
                 }
-                n -= 1.0;
-                let a = rng.random_range(0.0..std::f32::consts::TAU);
-                let r = 1.6 + 4.4 * rng.random::<f32>().sqrt();
-                let edge = 1.4 + r * 0.4;
-                let z = edge - 3.0 * rng.random::<f32>().powi(2);
-                let p = Vec3::new(a.cos() * r * 1.2, a.sin() * r * 0.7 + 0.4, z);
-                particles.add(
-                    Particle {
-                        vel: Vec3::new(a.cos() * 2.0, a.sin() * 1.2, rng.random_range(18.0..32.0)),
-                        life: rng.random_range(0.07..0.13),
-                        size: (rng.random_range(2.2..3.0), rng.random_range(3.0..4.2)),
-                        stretch: 0.04,
-                        albedo: Vec3::splat(rng.random_range(1.0..1.1)),
-                        opacity: 0.22 * (0.4 + 0.6 * c),
-                        soft: 0.3,
-                        drag: 0.0,
-                        wind: 0.0,
-                        fade_in: 0.02,
-                        dissolve: 0.3,
-                        frame: Some(entity),
-                        ..Particle::vapour(p)
-                    },
-                    0.6,
-                );
             }
         }
 
