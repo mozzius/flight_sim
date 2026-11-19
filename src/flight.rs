@@ -27,7 +27,7 @@ impl Plugin for FlightPlugin {
             .add_message::<AircraftCrashed>()
             .add_systems(
                 FixedUpdate,
-                (flight_physics, ground_collision)
+                (flight_physics, ground_collision, midair_collision)
                     .chain()
                     .in_set(FlightSystems::Physics),
             );
@@ -316,6 +316,48 @@ fn flight_physics(
     }
 }
 
+/// Centre-to-centre distance (as a share of the two hit radii) at which two
+/// jets touch: the hit radius is generous for bullets, airframes are smaller.
+const MIDAIR_CONTACT: f32 = 0.42;
+
+/// Jets that fly into each other both blow up. Closing at 500 m/s they move
+/// several metres a tick, so it's the closest approach over the tick that
+/// counts, not just where they end up. Each game decides its own jets'
+/// crashes (a remote player's game sees the same collision with ours).
+fn midair_collision(
+    time: Res<Time>,
+    query: Query<(Entity, &Transform, &FlightState, &Aircraft, Has<crate::net::Remote>), Without<Disabled>>,
+    mut crashed: MessageWriter<AircraftCrashed>,
+) {
+    let dt = time.delta_secs();
+    let jets: Vec<_> = query.iter().collect();
+    for (i, a) in jets.iter().enumerate() {
+        for b in &jets[i + 1..] {
+            if a.4 && b.4 {
+                continue;
+            }
+            let reach = (a.3.radius + b.3.radius) * MIDAIR_CONTACT;
+            let now = a.1.translation - b.1.translation;
+            let rel = a.2.velocity - b.2.velocity;
+            if now.length() > reach + rel.length() * dt {
+                continue;
+            }
+            // closest approach of the relative path over the last tick
+            let before = now - rel * dt;
+            let seg = now - before;
+            let t = if seg.length_squared() > 1e-6 { (-before.dot(seg) / seg.length_squared()).clamp(0.0, 1.0) } else { 1.0 };
+            if (before + seg * t).length() > reach {
+                continue;
+            }
+            for (entity, transform, _, _, remote) in [a, b] {
+                if !remote {
+                    crashed.write(AircraftCrashed { entity: *entity, position: transform.translation });
+                }
+            }
+        }
+    }
+}
+
 fn ground_collision(
     terrain: Res<Terrain>,
     // (other players' games decide their own crashes)
@@ -439,6 +481,34 @@ mod tests {
         for _ in 0..(seconds * PHYSICS_HZ as f32) as usize {
             app.update();
         }
+    }
+
+    /// Two jets 2 km apart, head-on at 250 m/s each, `offset` m apart sideways.
+    fn crashes_head_on(offset: f32) -> usize {
+        let mut app = app();
+        let a = spawn(&mut app, 250.0, ControlInput::default());
+        let b = spawn(&mut app, 250.0, ControlInput::default());
+        app.world_mut().entity_mut(a).insert(Transform::from_xyz(offset, 3_000.0, 1_000.0));
+        app.world_mut()
+            .entity_mut(b)
+            .insert((Transform::from_xyz(0.0, 3_000.0, -1_000.0).looking_to(Vec3::Z, Vec3::Y), FlightState::new(Vec3::Z * 250.0)));
+        // (nothing despawns them here: count the first tick that reports any)
+        for _ in 0..(5.0 * PHYSICS_HZ) as usize {
+            app.update();
+            let crashed = app.world().resource::<Messages<AircraftCrashed>>().iter_current_update_messages().count();
+            if crashed > 0 {
+                return crashed;
+            }
+        }
+        0
+    }
+
+    #[test]
+    fn jets_that_fly_into_each_other_both_crash() {
+        // 500 m/s closing: ~8 m a tick, so it has to be the swept test
+        assert_eq!(crashes_head_on(0.0), 2);
+        assert_eq!(crashes_head_on(4.0), 2, "a wing clipping a wing");
+        assert_eq!(crashes_head_on(30.0), 0, "a near miss");
     }
 
     fn state(app: &App, e: Entity) -> (Transform, FlightState) {
