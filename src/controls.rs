@@ -234,17 +234,18 @@ fn manage_cursor(
     };
     let regained_focus = focus_events.read().any(|e| e.focused);
     // free the mouse while the RESPAWN button is up so it can be clicked
-    let want = *mode == ControlMode::MouseAim
-        && !paused.0
+    let flying = !paused.0
         && !prompt.ready()
         && window.focused
         && !touch.active
         && !crate::tutorial::complete_screen()
         && *state.get() == crate::loading::GameState::Playing;
+    let want = flying && *mode == ControlMode::MouseAim;
+    // (direct control doesn't use the mouse to fly: just keep the cursor out of the way)
     let (grab, visible) = if want {
         (CursorGrabMode::Locked, false)
     } else {
-        (CursorGrabMode::None, true)
+        (CursorGrabMode::None, !flying)
     };
     if cursor.grab_mode != grab || cursor.visible != visible {
         cursor.grab_mode = grab;
@@ -316,6 +317,7 @@ fn update_mouse_aim(
     mut aim: ResMut<MouseAim>,
     mut touch: ResMut<crate::touch::TouchInput>,
     intro: Res<crate::intro::Intro>,
+    view: Res<crate::camera::View>,
     player: Query<&Transform, With<Player>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
 ) {
@@ -352,15 +354,19 @@ fn update_mouse_aim(
     if pixels == Vec2::ZERO {
         return;
     }
-    // rotate the aim direction around world up (yaw) and the camera's right (pitch)
+    // rotate the aim direction around the view's up (yaw) and right (pitch):
+    // the world's up behind the jet (the chase camera keeps the horizon
+    // level), the jet's own from the seat (the view rolls with it)
+    let seat = *view == crate::camera::View::Cockpit;
+    let up = if seat { transform.up().as_vec3() } else { Vec3::Y };
     let sensitivity = 0.0025;
     let delta = pixels * sensitivity;
-    let yaw = Quat::from_rotation_y(-delta.x);
-    let right = aim.dir.cross(Vec3::Y).normalize_or(Vec3::X);
+    let yaw = Quat::from_axis_angle(up, -delta.x);
+    let right = aim.dir.cross(up).normalize_or(transform.right().as_vec3());
     let pitch = Quat::from_axis_angle(right, -delta.y);
     let new_dir = (yaw * pitch * aim.dir).normalize();
-    // don't let the aim flip over the poles
-    let new_dir = if new_dir.y.abs() < 0.98 {
+    // don't let the aim flip over the poles (of the view's up)
+    let new_dir = if new_dir.dot(up).abs() < 0.98 {
         new_dir
     } else {
         (yaw * aim.dir).normalize()

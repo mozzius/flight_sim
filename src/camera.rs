@@ -190,7 +190,7 @@ impl View {
 /// Field of view (degrees) and near plane (m) for each view: wider in the
 /// seat, and a near plane close enough not to clip the instrument panel.
 const CHASE_LENS: (f32, f32) = (65.0, 0.5);
-const COCKPIT_LENS: (f32, f32) = (75.0, 0.05);
+const COCKPIT_LENS: (f32, f32) = (68.0, 0.05);
 /// How far (rad) the seat view turns off the nose toward the mouse aim:
 /// either side, down, up.
 const COCKPIT_AIM_LIMIT: Vec3 = Vec3::new(0.45, -0.1, 0.55);

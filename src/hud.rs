@@ -48,10 +48,12 @@ impl Plugin for HUDPlugin {
         }
         app
             // the HUD is plane-related only; score etc. live in the pause menu
+            .init_resource::<HudGlass>()
             .add_systems(Startup, setup)
             .add_systems(
                 PostUpdate,
                 (
+                    find_glass,
                     arrange,
                     spawn_markers,
                     update_markers,
@@ -379,6 +381,8 @@ struct Layout {
 }
 
 const AUTO: Val = Val::Auto;
+/// Degrees either side of the boresight the cockpit HUD's readouts sit.
+const HUD_SPREAD: f32 = 5.5;
 
 /// A line of text at `font` px, in px (roughly).
 fn line(font: f32) -> f32 {
@@ -400,6 +404,25 @@ impl Layout {
         health: Spot::new(Val::Px(24.0), AUTO, AUTO, Val::Px(24.0), 18.0),
         panel: Spot::new(AUTO, Val::Px(24.0), AUTO, Val::Px(24.0), 17.0),
     };
+
+    /// In the cockpit view: the flight readouts on the HUD, at fixed angles
+    /// off the boresight (`centre`, `degree` px per degree, on a `size`
+    /// screen) as the real one draws them; weapons, health and the target
+    /// panel stay in the corners, where the jet's displays would be.
+    fn cockpit(centre: Vec2, degree: f32, size: Vec2) -> Layout {
+        let big = (degree * 1.7).clamp(12.0, 22.0);
+        let small = big * 0.8;
+        let top = centre.y + degree * 1.0;
+        let g_top = top + 2.0 * line(big) + 4.0;
+        let (left_edge, right_edge) = (centre.x - degree * HUD_SPREAD, centre.x + degree * HUD_SPREAD);
+        Layout {
+            speed: Spot::new(AUTO, px(size.x - left_edge), px(top), AUTO, big),
+            g: Spot::new(AUTO, px(size.x - left_edge), px(g_top), AUTO, small),
+            altitude: Spot::new(px(right_edge), AUTO, px(top), AUTO, big),
+            throttle: Spot::new(px(right_edge), AUTO, px(g_top), AUTO, small),
+            ..Layout::DESKTOP
+        }
+    }
 
     /// `None`: the target panel.
     fn spot(&self, readout: Option<Readout>) -> Spot {
@@ -491,17 +514,53 @@ impl Layout {
     }
 }
 
+/// In the cockpit view, the HUD's frame on screen: where the boresight (the
+/// nose's line from the pilot's eye) lands, pixels per degree off it, and the
+/// screen's size (logical px).
+#[derive(Resource, Default, PartialEq)]
+struct HudGlass(Option<(Vec2, f32, Vec2)>);
+
+/// A real HUD draws its symbols at fixed angles off the nose, focused at
+/// infinity: project the boresight and a point a degree off it.
+fn find_glass(
+    view: Res<crate::camera::View>,
+    intro: Res<crate::intro::Intro>,
+    camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+    player: Query<(&GlobalTransform, Option<&crate::jets::JetChoice>), With<Player>>,
+    mut out: ResMut<HudGlass>,
+) {
+    let found = (|| {
+        if *view != crate::camera::View::Cockpit || intro.playing() {
+            return None;
+        }
+        let (cam, cam_t) = camera.single().ok()?;
+        let (jet, choice) = player.single().ok()?;
+        let eye = jet.transform_point(choice.map_or(crate::jets::F22_EYE, |j| j.airframe().eye));
+        let fwd = jet.forward().as_vec3();
+        let centre = cam.world_to_viewport(cam_t, eye + fwd * 1_000.0).ok()?;
+        let off = Quat::from_axis_angle(jet.up().as_vec3(), 1f32.to_radians()) * fwd;
+        let degree = cam.world_to_viewport(cam_t, eye + off * 1_000.0).ok()?.distance(centre);
+        Some((centre, degree, cam.logical_viewport_size()?))
+    })();
+    let found = HudGlass(found);
+    if *out != found {
+        *out = found;
+    }
+}
+
 /// Moves the readouts and the target panel clear of the touch controls while
 /// they're up (and back for the desktop).
 #[allow(clippy::type_complexity)]
 fn arrange(
     touch: Res<crate::touch::TouchInput>,
+    glass: Res<HudGlass>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut texts: Query<(Option<&Readout>, &mut Node, &mut TextFont), Or<(With<Readout>, With<TargetPanel>)>>,
 ) {
     let size = crate::touch::screen_size(windows.single().ok());
-    let layout = match size {
-        Some(size) if touch.active => {
+    let layout = match (size, glass.0) {
+        (_, Some((centre, degree, screen))) => Layout::cockpit(centre, degree, screen),
+        (Some(size), _) if touch.active => {
             Layout::touch(size, crate::platform::safe_area(), &crate::touch::clearance(size))
         }
         _ => Layout::DESKTOP,
