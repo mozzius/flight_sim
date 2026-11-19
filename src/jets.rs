@@ -237,7 +237,7 @@ const SPECS: [JetSpec; 4] = [
         wing: [Vec3::new(2.2, 0.68, -2.5), Vec3::new(6.5, 0.3, 1.6), Vec3::new(6.5, 0.3, 3.0), Vec3::new(2.2, 0.68, 3.2)],
         vectoring: false,
         rudder_brake: true,
-        eye: Vec3::new(0.0, 1.41, -5.4),
+        eye: Vec3::new(0.0, 1.56, -5.4),
         chase: 0.98,
         lex: true,
         vapour: 1.0,
@@ -256,7 +256,7 @@ const SPECS: [JetSpec; 4] = [
         wing: [Vec3::new(2.4, 1.0, -2.5), Vec3::new(7.2, 0.57, 3.0), Vec3::new(7.2, 0.57, 4.6), Vec3::new(2.4, 1.0, 5.5)],
         vectoring: true,
         rudder_brake: false,
-        eye: Vec3::new(0.0, 1.72, -6.73),
+        eye: Vec3::new(0.0, 1.66, -6.73),
         chase: 1.05,
         lex: true,
         vapour: 1.0,
@@ -379,6 +379,11 @@ impl JetChoice {
         let n = self.spec().liveries.len() as i32;
         Self::new(self.jet, (self.livery as i32 + step).rem_euclid(n) as u8)
     }
+}
+
+/// A jet's name from its wire byte (the leaderboard's); empty if unknown.
+pub fn wire_name(b: u8) -> &'static str {
+    Jet::ALL.get((b >> 4) as usize).map_or("", |j| j.spec().name)
 }
 
 /// The player's pick (mirrors `Settings::jet`, for spawning without the resource).
