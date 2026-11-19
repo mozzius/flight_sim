@@ -92,6 +92,7 @@ impl InputDevice {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn track_input_device(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -100,11 +101,17 @@ fn track_input_device(
     gamepads: Query<&Gamepad>,
     mut touch: ResMut<crate::touch::TouchInput>,
     mut device: ResMut<InputDevice>,
+    mut mode: ResMut<ControlMode>,
+    mut aim: ResMut<MouseAim>,
     mut pinned: Local<Option<Option<InputDevice>>>,
+    mut before_pad: Local<Option<ControlMode>>,
 ) {
     if let Some(pin) = *pinned.get_or_insert_with(InputDevice::pinned) {
         if pin == InputDevice::Touch && !touch.active {
             touch.active = true;
+        }
+        if pin == InputDevice::Gamepad && *mode != ControlMode::Direct {
+            *mode = ControlMode::Direct;
         }
         return;
     }
@@ -121,16 +128,32 @@ fn track_input_device(
         InputDevice::Gamepad
     } else if keys.get_just_pressed().next().is_some() {
         InputDevice::Keyboard
-    } else if *device != InputDevice::Touch
-        && (mouse.get_just_pressed().next().is_some() || motion.delta.length() > 4.0)
-    {
+    } else if mouse.get_just_pressed().next().is_some() && *device != InputDevice::Touch {
         // (browsers report finger drags and taps as the mouse too: only a key
         // takes us off touch)
+        InputDevice::Keyboard
+    } else if motion.delta.length() > 4.0 && *device == InputDevice::Keyboard {
+        // (a nudged mouse doesn't take the gamepad away: a click or a key does)
         InputDevice::Keyboard
     } else {
         *device
     };
     if *device != next {
+        // the gamepad flies direct, with the mouse out of it entirely; back on
+        // the keyboard, whichever mode it was in before
+        if next == InputDevice::Gamepad {
+            *before_pad = Some(*mode);
+            if *mode != ControlMode::Direct {
+                *mode = ControlMode::Direct;
+                aim.reset = true;
+            }
+        } else if *device == InputDevice::Gamepad
+            && let Some(m) = before_pad.take()
+            && *mode != m
+        {
+            *mode = m;
+            aim.reset = true;
+        }
         *device = next;
     }
 }
@@ -191,7 +214,6 @@ fn first_gamepad<'a>(gamepads: &'a Query<&Gamepad>) -> Option<&'a Gamepad> {
 
 fn toggle_mode(
     keys: Res<ButtonInput<KeyCode>>,
-    gamepads: Query<&Gamepad>,
     paused: Res<crate::pause::Paused>,
     mut mode: ResMut<ControlMode>,
     mut aim: ResMut<MouseAim>,
@@ -199,10 +221,7 @@ fn toggle_mode(
     if paused.0 {
         return;
     }
-    let pad_toggle = gamepads
-        .iter()
-        .any(|g| g.just_pressed(GamepadButton::Select));
-    if keys.just_pressed(KeyCode::KeyM) || pad_toggle {
+    if keys.just_pressed(KeyCode::KeyM) {
         *mode = match *mode {
             ControlMode::MouseAim => ControlMode::Direct,
             ControlMode::Direct => ControlMode::MouseAim,

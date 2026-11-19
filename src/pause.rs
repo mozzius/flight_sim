@@ -68,7 +68,6 @@ const GAMEPAD: &[(&str, &str)] = &[
     ("Y / D-pad up", "target nearest the crosshair"),
     ("Right stick", "look around"),
     ("Right stick click", "cockpit view"),
-    ("Select", "switch control mode"),
     ("Start", "pause"),
 ];
 
