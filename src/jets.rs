@@ -104,6 +104,9 @@ pub struct JetSpec {
     pub cruise: f32,
 }
 
+/// The F-22's eye, for a player whose jet type isn't known yet.
+pub const F22_EYE: Vec3 = Vec3::new(0.0, 1.2, -6.2);
+
 /// The F-22 (`models/f22-raptor`), flown by every jet when the pack is missing.
 const F22: JetSpec = JetSpec {
     key: "f22",
@@ -118,7 +121,7 @@ const F22: JetSpec = JetSpec {
     wing: [Vec3::new(1.9, 0.55, -3.2), Vec3::new(6.7, 0.2, 1.1), Vec3::new(7.1, 0.2, 2.7), Vec3::new(1.9, 0.55, 4.0)],
     vectoring: false,
     rudder_brake: false,
-    eye: Vec3::new(0.0, 1.2, -6.2),
+    eye: F22_EYE,
     chase: 1.0,
     lex: true,
     vapour: 1.0,
@@ -462,7 +465,6 @@ pub struct Part {
 
 /// A cockpit node (see the module docs), for a first-person view to show or hide.
 #[derive(Component, Clone, Copy, Debug)]
-#[allow(dead_code)] // read by the first-person view
 pub struct Cockpit {
     pub aircraft: Entity,
     /// Only seen from inside (hidden in third person).

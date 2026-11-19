@@ -1,4 +1,4 @@
-//! Chase camera.
+//! Chase camera, or the pilot's seat ([`View`]: V or the right stick's click).
 //!
 //! - Direct mode: sits behind and above the plane and rolls with it, with a
 //!   little lag so manoeuvres read. The right stick (or C) looks around.
@@ -24,7 +24,9 @@ pub struct CameraPlugin;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         patch_atmosphere(app);
-        app.add_systems(Startup, spawn_camera)
+        app.insert_resource(View::from_env())
+            .add_systems(Startup, spawn_camera)
+            .add_systems(Update, (toggle_view.run_if(in_state(crate::loading::GameState::Playing)), apply_view).chain())
             .add_systems(Update, (apply_environment.run_if(resource_changed::<crate::environment::Environment>), freeze_sky_light).chain())
             .add_systems(PostUpdate, follow_player.before(TransformSystems::Propagate));
     }
@@ -169,24 +171,99 @@ fn freeze_sky_light(
     }
 }
 
-/// The player's jet, and which one it is (the chase distance depends on it).
-type PlayerJet = (&'static Transform, Option<&'static crate::jets::JetChoice>);
+/// Where the camera sits.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum View {
+    #[default]
+    Chase,
+    /// In the seat, at the jet's [`crate::jets::JetSpec::eye`].
+    Cockpit,
+}
 
+impl View {
+    /// `FLIGHT_SIM_VIEW=cockpit` starts in the seat (dev).
+    fn from_env() -> Self {
+        if std::env::var("FLIGHT_SIM_VIEW").is_ok_and(|v| v == "cockpit") { View::Cockpit } else { View::Chase }
+    }
+}
+
+/// Field of view (degrees) and near plane (m) for each view: wider in the
+/// seat, and a near plane close enough not to clip the instrument panel.
+const CHASE_LENS: (f32, f32) = (65.0, 0.5);
+const COCKPIT_LENS: (f32, f32) = (75.0, 0.05);
+/// How far (rad) the seat view turns off the nose toward the mouse aim:
+/// either side, down, up.
+const COCKPIT_AIM_LIMIT: Vec3 = Vec3::new(0.45, -0.1, 0.55);
+/// How far the pilot's head sinks per g (m): about 10 cm at 9 g.
+const HEAD_SAG: f32 = 0.012;
+/// Head shake (m) in full buffet near the stall.
+const BUFFET_SHAKE: f32 = 0.006;
+
+fn toggle_view(keys: Res<ButtonInput<KeyCode>>, gamepads: Query<&Gamepad>, mut view: ResMut<View>) {
+    let pad = gamepads.iter().any(|g| g.just_pressed(GamepadButton::RightThumb));
+    if keys.just_pressed(KeyCode::KeyV) || pad {
+        *view = match *view {
+            View::Chase => View::Cockpit,
+            View::Cockpit => View::Chase,
+        };
+    }
+}
+
+/// The lens for the view, and the inside of the player's canopy glass (only
+/// drawn from the seat: from outside it would double the glass).
+fn apply_view(
+    view: Res<View>,
+    intro: Res<crate::intro::Intro>,
+    mut camera: Query<&mut Projection, With<MainCamera>>,
+    player: Query<Entity, With<Player>>,
+    mut glass: Query<(&crate::jets::Cockpit, &mut Visibility)>,
+) {
+    let seat = *view == View::Cockpit && !intro.playing();
+    let (fov, near) = if seat { COCKPIT_LENS } else { CHASE_LENS };
+    let fov = std::env::var("FLIGHT_SIM_FOV").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(fov).to_radians();
+    for mut projection in &mut camera {
+        if let Projection::Perspective(p) = projection.as_mut()
+            && (p.fov != fov || p.near != near)
+        {
+            p.fov = fov;
+            p.near = near;
+        }
+    }
+    let me = player.single().ok();
+    for (part, mut vis) in &mut glass {
+        if !part.inside_only {
+            continue;
+        }
+        let want = if seat && Some(part.aircraft) == me { Visibility::Inherited } else { Visibility::Hidden };
+        vis.set_if_neq(want);
+    }
+}
+
+/// The player's jet, and which one it is (the chase distance depends on it).
+type PlayerJet = (
+    &'static Transform,
+    Option<&'static crate::jets::JetChoice>,
+    Option<&'static crate::flight::FlightState>,
+);
+
+#[allow(clippy::too_many_arguments)]
 fn follow_player(
     time: Res<Time>,
     mode: Res<ControlMode>,
     aim: Res<MouseAim>,
     look: Res<LookAround>,
     intro: Res<crate::intro::Intro>,
+    view: Res<View>,
     player: Query<PlayerJet, (With<Player>, Without<MainCamera>)>,
     mut camera: Query<&mut Transform, With<MainCamera>>,
     mut boom: Local<Option<Quat>>,
+    mut head: Local<Vec3>,
 ) {
     // terrain_gen's debug camera owns the camera when it's enabled
     if std::env::var("TERRAIN_DEBUG_CAM").is_ok() {
         return;
     }
-    let (Ok((plane, jet)), Ok(mut cam)) = (player.single(), camera.single_mut()) else {
+    let (Ok((plane, jet, state)), Ok(mut cam)) = (player.single(), camera.single_mut()) else {
         *boom = None;
         return;
     };
@@ -197,6 +274,39 @@ fn follow_player(
         intro_shot(&intro, plane, scale, &mut cam);
         // hand over to the chase camera already settled on its target
         *boom = Some(Transform::IDENTITY.looking_to(plane.forward().as_vec3(), Vec3::Y).rotation);
+        return;
+    }
+
+    if *view == View::Cockpit {
+        // the pilot's eye, looking where the mouse aims (mouse aim) or along
+        // the nose with the look-around (direct); the horizon rolls with the jet
+        let eye = jet.map_or(crate::jets::F22_EYE, |j| j.airframe().eye);
+        // the head sinks under g (and lifts a little under negative g), eased
+        // so it lags like a neck; near the stall the airframe buffets
+        let (g, alpha) = state.map_or((1.0, 0.0), |s| (s.g_load, s.alpha.to_degrees()));
+        let sag = Vec3::new(0.0, -(g - 1.0).clamp(-3.0, 9.0) * HEAD_SAG, 0.0);
+        *head = head.lerp(sag, 1.0 - (-6.0 * dt).exp());
+        let buffet = ((alpha - 14.0) / 12.0).clamp(0.0, 1.0);
+        let t = time.elapsed_secs_wrapped();
+        let shake = Vec3::new((t * 53.0).sin() + (t * 31.0).sin() * 0.6, (t * 47.0).sin() + (t * 23.0).cos() * 0.6, 0.0)
+            * (BUFFET_SHAKE * buffet);
+        cam.translation = plane.transform_point(eye + *head + shake);
+        cam.rotation = match *mode {
+            ControlMode::MouseAim => {
+                // toward the aim, as a pilot looks into the turn, but only so far
+                // off the nose (and hardly down: past that it's the instrument
+                // panel and the seat while the jet catches up)
+                let local = plane.rotation.inverse() * aim.dir.normalize_or(plane.forward().as_vec3());
+                let yaw = (-local.x).atan2(-local.z).clamp(-COCKPIT_AIM_LIMIT.x, COCKPIT_AIM_LIMIT.x);
+                let pitch = local.y.clamp(-1.0, 1.0).asin().clamp(COCKPIT_AIM_LIMIT.y, COCKPIT_AIM_LIMIT.z);
+                plane.rotation * Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)
+            }
+            ControlMode::Direct => {
+                plane.rotation * Quat::from_rotation_y(look.0.x) * Quat::from_rotation_x(look.0.y.min(0.6))
+            }
+        };
+        // back out of the seat onto a boom already behind the jet
+        *boom = None;
         return;
     }
 

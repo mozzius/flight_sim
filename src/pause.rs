@@ -51,6 +51,7 @@ const KEYBOARD: &[(&str, &str)] = &[
     ("Tab / Shift+Tab", "next / previous target"),
     ("R / middle click", "target nearest the crosshair"),
     ("C", "look back"),
+    ("V", "cockpit view"),
     ("M", "switch mouse-aim / direct control"),
     ("N", "mute"),
     ("Esc", "pause"),
@@ -66,6 +67,7 @@ const GAMEPAD: &[(&str, &str)] = &[
     ("D-pad left / right", "previous / next target"),
     ("Y / D-pad up", "target nearest the crosshair"),
     ("Right stick", "look around"),
+    ("Right stick click", "cockpit view"),
     ("Select", "switch control mode"),
     ("Start", "pause"),
 ];
