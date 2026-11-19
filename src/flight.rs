@@ -320,13 +320,15 @@ fn flight_physics(
 /// jets touch: the hit radius is generous for bullets, airframes are smaller.
 const MIDAIR_CONTACT: f32 = 0.42;
 
+type MidairJet = (Entity, &'static Transform, &'static FlightState, &'static Aircraft, Has<crate::net::Remote>);
+
 /// Jets that fly into each other both blow up. Closing at 500 m/s they move
 /// several metres a tick, so it's the closest approach over the tick that
 /// counts, not just where they end up. Each game decides its own jets'
 /// crashes (a remote player's game sees the same collision with ours).
 fn midair_collision(
     time: Res<Time>,
-    query: Query<(Entity, &Transform, &FlightState, &Aircraft, Has<crate::net::Remote>), Without<Disabled>>,
+    query: Query<MidairJet, Without<Disabled>>,
     mut crashed: MessageWriter<AircraftCrashed>,
 ) {
     let dt = time.delta_secs();
