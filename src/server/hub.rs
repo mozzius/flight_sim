@@ -1407,12 +1407,12 @@ mod tests {
         hub.handle(1, ClientMsg::ChallengeStart { seed: 11 }, now);
         hub.handle(2, ClientMsg::ChallengeStart { seed: 22 }, now);
         let later = now + Duration::from_secs(70);
-        let step = hub.handle(1, ClientMsg::SubmitScore(Run { seed: 11, score: 550, wave: 2, kills: 3, secs: 60.0 }), later);
+        let step = hub.handle(1, ClientMsg::SubmitScore(Run { seed: 11, score: 550, wave: 2, kills: 3, secs: 60.0, jet: 0 }), later);
         assert_eq!(sent_to(&step.out, 1), vec![&ServerMsg::Standing(Some(Standing { rank: 1, score: 550, wave: 2 }))]);
-        let step = hub.handle(2, ClientMsg::SubmitScore(Run { seed: 22, score: 1150, wave: 3, kills: 4, secs: 62.0 }), later);
+        let step = hub.handle(2, ClientMsg::SubmitScore(Run { seed: 22, score: 1150, wave: 3, kills: 4, secs: 62.0, jet: 0 }), later);
         assert_eq!(sent_to(&step.out, 2), vec![&ServerMsg::Standing(Some(Standing { rank: 1, score: 1150, wave: 3 }))]);
         // carol never started a run: hers is ignored
-        let step = hub.handle(3, ClientMsg::SubmitScore(Run { seed: 33, score: 100, wave: 1, kills: 1, secs: 30.0 }), later);
+        let step = hub.handle(3, ClientMsg::SubmitScore(Run { seed: 33, score: 100, wave: 1, kills: 1, secs: 30.0, jet: 0 }), later);
         assert_eq!(sent_to(&step.out, 3), vec![&ServerMsg::Standing(None)]);
 
         let step = hub.handle(1, ClientMsg::Leaderboard(BoardKind::Global), later);

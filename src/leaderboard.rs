@@ -7,7 +7,7 @@
 //! to BEST (`modes`). The server side is `src/server/leaderboard.rs`.
 //!
 //! The LEADERBOARD screen (from the score screen, or the menu's
-//! LEADERBOARD, shown signed in) has GLOBAL / FRIENDS tabs: `#  @handle  score  W<wave>` rows, ours
+//! LEADERBOARD, shown signed in) has GLOBAL / FRIENDS tabs: `#  @handle  score  W<wave> jet` rows, ours
 //! highlighted (and added under the top 20 if we're further down), a dash
 //! when there's nothing. Signed out, the score screen's button says SIGN IN
 //! (and the menu's hides: the account corner says it already).
@@ -127,7 +127,8 @@ fn submit_run(
         score.points = KILL_POINTS * kills + WAVE_POINTS * (wave - 1) * wave / 2;
     }
     let secs = (time.elapsed_secs_f64() - start) as f32;
-    net.submit_score(Run { seed, score: score.points, wave: score.wave, kills: score.kills, secs });
+    let jet = crate::jets::player().to_wire();
+    net.submit_score(Run { seed, score: score.points, wave: score.wave, kills: score.kills, secs, jet });
 }
 
 /// The leaderboard's buttons (taken out before the menu sees them: `menu` runs this
@@ -307,8 +308,8 @@ fn short_handle(handle: &str) -> String {
 }
 
 /// One board line: `#  @handle  score  W<wave>`.
-fn row_text(rank: u32, handle: &str, score: u32, wave: u32) -> String {
-    format!("{rank:>3}  @{:<w$}  {score:>8}  W{wave}", short_handle(handle), w = HANDLE_COLS)
+fn row_text(rank: u32, handle: &str, score: u32, wave: u32, jet: &str) -> String {
+    format!("{rank:>3}  @{:<w$}  {score:>8}  W{wave:<3} {jet}", short_handle(handle), w = HANDLE_COLS)
 }
 
 fn layout_board(
@@ -345,12 +346,14 @@ fn layout_board(
     let Some((list, you)) = net.board(board.kind) else { return };
     let my_did = me.as_ref().map(|u| u.did.as_str());
     let mut lines: Vec<(String, bool)> =
-        list.iter().map(|r| (row_text(r.rank, &r.handle, r.score, r.wave), Some(r.did.as_str()) == my_did)).collect();
+        list.iter()
+            .map(|r| (row_text(r.rank, &r.handle, r.score, r.wave, crate::jets::wire_name(r.jet)), Some(r.did.as_str()) == my_did))
+            .collect();
     if let (Some(you), Some(me)) = (you, &me)
         && !lines.iter().any(|l| l.1)
     {
         lines.push(("...".into(), false));
-        lines.push((row_text(you.rank, &me.handle, you.score, you.wave), true));
+        lines.push((row_text(you.rank, &me.handle, you.score, you.wave, ""), true));
     }
     commands.entity(rows).with_children(|parent| {
         if lines.is_empty() {
@@ -373,10 +376,10 @@ mod tests {
 
     #[test]
     fn rows_line_up() {
-        let a = row_text(1, "alice.bsky.social", 12_350, 9);
-        let b = row_text(20, "a-very-long-handle-indeed.example.com", 550, 2);
-        assert!(a.starts_with("  1  @alice.bsky.social ") && a.ends_with(" 12350  W9"), "{a:?}");
-        assert_eq!(a.chars().count(), b.chars().count());
+        let a = row_text(1, "alice.bsky.social", 12_350, 9, "F-16");
+        let b = row_text(20, "a-very-long-handle-indeed.example.com", 550, 2, "F/A-18");
+        assert!(a.starts_with("  1  @alice.bsky.social ") && a.ends_with(" 12350  W9   F-16"), "{a:?}");
+        assert_eq!(a.chars().count() + 2, b.chars().count(), "the jet's the last column");
         assert!(b.contains("…"));
     }
 }

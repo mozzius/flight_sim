@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever the messages change shape (or their meaning: v7 and v8 added
 /// biomes to `Biome::ALL`, which older clients would read as "random"; v9 put
 /// the jet and the stick in `PlayerState`).
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 
 /// Service-auth audience and method the server checks tokens against.
 pub const AUTH_AUDIENCE: &str = "did:web:flight.mozzius.dev";
@@ -378,6 +378,8 @@ pub struct Run {
     pub kills: u32,
     /// Game seconds from the start to going down.
     pub secs: f32,
+    /// The jet flown (its wire byte, as `PlayerState.jet`).
+    pub jet: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -387,7 +389,12 @@ pub struct BoardRow {
     pub handle: String,
     pub score: u32,
     pub wave: u32,
+    /// The jet of that run (wire byte; [`NO_JET`] for runs from before v11).
+    pub jet: u8,
 }
+
+/// `BoardRow::jet` for a run that didn't say.
+pub const NO_JET: u8 = 0xff;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Standing {
@@ -527,12 +534,12 @@ mod tests {
             assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
         }
         assert_eq!(decode::<ServerMsg>(&[0xff, 0xff, 0xff]), None);
-        let run = Run { seed: 7, score: 1150, wave: 3, kills: 4, secs: 61.5 };
+        let run = Run { seed: 7, score: 1150, wave: 3, kills: 4, secs: 61.5, jet: 0x10 };
         for msg in [ClientMsg::ChallengeStart { seed: 7 }, ClientMsg::SubmitScore(run), ClientMsg::Leaderboard(BoardKind::Friends)] {
             assert_eq!(decode::<ClientMsg>(&encode(&msg)), Some(msg));
         }
         let standing = Standing { rank: 3, score: 1150, wave: 3 };
-        let row = BoardRow { rank: 1, did: "did:plc:b".into(), handle: "b.test".into(), score: 9000, wave: 7 };
+        let row = BoardRow { rank: 1, did: "did:plc:b".into(), handle: "b.test".into(), score: 9000, wave: 7, jet: 0x20 };
         for msg in [
             ServerMsg::Standing(Some(standing)),
             ServerMsg::Standing(None),
@@ -543,7 +550,7 @@ mod tests {
     }
 
     fn run(score: u32, wave: u32, kills: u32, secs: f32) -> Run {
-        Run { seed: 1, score, wave, kills, secs }
+        Run { seed: 1, score, wave, kills, secs, jet: 0 }
     }
 
     #[test]

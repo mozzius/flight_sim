@@ -44,6 +44,7 @@ impl Plugin for MenuPlugin {
         let open = crate::environment::setting("FLIGHT_SIM_MODE").is_some_and(|m| m.eq_ignore_ascii_case("menu-endless"));
         let panel = match crate::environment::setting("FLIGHT_SIM_MODE").map(|m| m.to_ascii_lowercase()).as_deref() {
             _ if open => Panel::Endless,
+            Some("menu-challenge") => Panel::Challenge,
             Some("menu-multiplayer") => Panel::Multi,
             Some("menu-create") => Panel::Create,
             Some("menu-join") => Panel::Join,
@@ -186,6 +187,8 @@ enum Panel {
     Closed,
     /// The endless pickers.
     Endless,
+    /// JET and LIVERY, then START.
+    Challenge,
     /// QUICK PLAY / HOST GAME / JOIN GAME (or SIGN IN).
     Multi,
     /// The pickers, for a new hosted room.
@@ -935,6 +938,7 @@ fn go_back(panel: &mut Panel, focus: &mut Focus) {
     let (to, order) = match *panel {
         Panel::Closed => return,
         Panel::Endless => (Panel::Closed, 0),
+        Panel::Challenge => (Panel::Closed, 1),
         Panel::Multi => (Panel::Closed, 2),
         Panel::Settings => (Panel::Closed, 5),
         Panel::Create => (Panel::Multi, 7),
@@ -1060,10 +1064,15 @@ fn handle_pressed(
             UiAction::Delete => {
                 code.0.pop();
             }
-            UiAction::Challenge | UiAction::Retry => {
+            UiAction::Challenge => {
+                *panel = Panel::Challenge;
+                focus.order = ORDER_START;
+            }
+            UiAction::Retry => begin_round(&mut commands, &mut next, GameMode::Challenge, Picks::from_settings()),
+            UiAction::Start if *panel == Panel::Create => net.create(picks.0),
+            UiAction::Start if *panel == Panel::Challenge => {
                 begin_round(&mut commands, &mut next, GameMode::Challenge, Picks::from_settings());
             }
-            UiAction::Start if *panel == Panel::Create => net.create(picks.0),
             UiAction::Start => begin_round(&mut commands, &mut next, GameMode::Endless, picks.0),
             UiAction::Pick(Pick::Location) => picks.0.biome = cycle(&Biome::ALL, picks.0.biome, step_by),
             UiAction::Pick(Pick::Weather) => picks.0.weather = cycle(&Weather::ALL, picks.0.weather, step_by),
@@ -1225,7 +1234,8 @@ fn layout_menu(
             Sec::Leaderboard => signed_in,
             Sec::Multi => page(Panel::Multi),
             Sec::SignedIn(s) => s == signed_in,
-            Sec::Endless | Sec::Start => page(Panel::Endless) || page(Panel::Create),
+            Sec::Endless => page(Panel::Endless) || page(Panel::Create),
+            Sec::Start => page(Panel::Endless) || page(Panel::Create) || page(Panel::Challenge),
             Sec::EndlessOnly => *panel == Panel::Endless,
             Sec::Join => page(Panel::Join),
             Sec::Settings => page(Panel::Settings),
@@ -1234,7 +1244,11 @@ fn layout_menu(
             Sec::Lobby => in_lobby,
             Sec::Queue => queued,
             Sec::Back => !away && *panel != Panel::Closed,
-            Sec::Hangar { side: s } => !crate::jets::fallback() && s == side && (away || page(Panel::Endless) || page(Panel::Create) || page(Panel::Join)),
+            Sec::Hangar { side: s } => {
+                !crate::jets::fallback()
+                    && s == side
+                    && (away || page(Panel::Endless) || page(Panel::Challenge) || page(Panel::Create) || page(Panel::Join))
+            }
         };
         let d = if show { Display::Flex } else { Display::None };
         if node.display != d {
@@ -1256,6 +1270,7 @@ fn layout_menu(
             _ if away => "",
             Panel::Closed => "",
             Panel::Endless => "SCENARIOS",
+            Panel::Challenge => "CHALLENGE",
             Panel::Multi => "MULTIPLAYER",
             Panel::Create => "HOST GAME",
             Panel::Join => "JOIN GAME",

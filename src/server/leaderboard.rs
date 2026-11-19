@@ -145,6 +145,8 @@ const PG_SCHEMA: &[&str] = &[
         at BIGINT NOT NULL
     )",
     "CREATE INDEX IF NOT EXISTS best_by_score ON best (score DESC, at ASC)",
+    // v11: the jet of each run (255: from before)
+    "ALTER TABLE best ADD COLUMN IF NOT EXISTS jet BIGINT NOT NULL DEFAULT 255",
     "CREATE TABLE IF NOT EXISTS runs (
         id BIGSERIAL PRIMARY KEY,
         did TEXT NOT NULL,
@@ -155,6 +157,7 @@ const PG_SCHEMA: &[&str] = &[
         seed BIGINT NOT NULL,
         at BIGINT NOT NULL
     )",
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS jet BIGINT NOT NULL DEFAULT 255",
 ];
 
 /// Every replica takes this advisory lock to set up the tables (and import).
@@ -187,6 +190,10 @@ impl Db {
     fn sqlite_init(db: Connection) -> rusqlite::Result<Self> {
         db.busy_timeout(Duration::from_secs(2))?;
         db.execute_batch(SQLITE_SCHEMA)?;
+        // v11: the jet of each run ("duplicate column" once it's there)
+        for table in ["best", "runs"] {
+            let _ = db.execute(&format!("ALTER TABLE {table} ADD COLUMN jet INTEGER NOT NULL DEFAULT {NO_JET}"), []);
+        }
         Ok(Self::Sqlite(Arc::new(Mutex::new(db))))
     }
 
@@ -386,18 +393,18 @@ impl Db {
                 let mut db = Self::lite(db);
                 let tx = db.transaction().map_err(e)?;
                 tx.execute(
-                    "INSERT INTO runs (did, score, wave, kills, secs, seed, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![did, run.score, run.wave, run.kills, run.secs as f64, run.seed, at],
+                    "INSERT INTO runs (did, score, wave, kills, secs, seed, at, jet) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![did, run.score, run.wave, run.kills, run.secs as f64, run.seed, at, run.jet],
                 )
                 .map_err(e)?;
                 let old: Option<u32> = tx.query_row("SELECT score FROM best WHERE did = ?1", [did], |r| r.get(0)).optional().map_err(e)?;
                 let best = old.is_none_or(|old| run.score > old);
                 if best {
                     tx.execute(
-                        "INSERT INTO best (did, score, wave, kills, secs, seed, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                        "INSERT INTO best (did, score, wave, kills, secs, seed, at, jet) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                          ON CONFLICT (did) DO UPDATE SET score = excluded.score, wave = excluded.wave, kills = excluded.kills,
-                            secs = excluded.secs, seed = excluded.seed, at = excluded.at",
-                        params![did, run.score, run.wave, run.kills, run.secs as f64, run.seed, at],
+                            secs = excluded.secs, seed = excluded.seed, at = excluded.at, jet = excluded.jet",
+                        params![did, run.score, run.wave, run.kills, run.secs as f64, run.seed, at, run.jet],
                     )
                     .map_err(e)?;
                 }
@@ -407,7 +414,7 @@ impl Db {
             Db::Postgres(pool) => {
                 let mut tx = pool.begin().await.map_err(e)?;
                 let vals = (run.score as i64, run.wave as i64, run.kills as i64, run.secs as f64, run.seed as i64, at);
-                sqlx::query("INSERT INTO runs (did, score, wave, kills, secs, seed, at) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+                sqlx::query("INSERT INTO runs (did, score, wave, kills, secs, seed, at, jet) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
                     .bind(did)
                     .bind(vals.0)
                     .bind(vals.1)
@@ -415,14 +422,15 @@ impl Db {
                     .bind(vals.3)
                     .bind(vals.4)
                     .bind(vals.5)
+                    .bind(run.jet as i64)
                     .execute(&mut *tx)
                     .await
                     .map_err(e)?;
                 // (a row back: inserted, or it beat the old best; atomic across replicas)
                 let best = sqlx::query(
-                    "INSERT INTO best (did, score, wave, kills, secs, seed, at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    "INSERT INTO best (did, score, wave, kills, secs, seed, at, jet) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                      ON CONFLICT (did) DO UPDATE SET score = excluded.score, wave = excluded.wave, kills = excluded.kills,
-                        secs = excluded.secs, seed = excluded.seed, at = excluded.at
+                        secs = excluded.secs, seed = excluded.seed, at = excluded.at, jet = excluded.jet
                      WHERE best.score < excluded.score
                      RETURNING did",
                 )
@@ -433,6 +441,7 @@ impl Db {
                 .bind(vals.3)
                 .bind(vals.4)
                 .bind(vals.5)
+                .bind(run.jet as i64)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(e)?
@@ -474,23 +483,30 @@ impl Db {
         }
     }
 
-    fn rows(found: Vec<(String, String, i64, i64)>) -> Vec<BoardRow> {
+    fn rows(found: Vec<(String, String, i64, i64, i64)>) -> Vec<BoardRow> {
         found
             .into_iter()
             .enumerate()
-            .map(|(i, (did, handle, score, wave))| BoardRow { rank: i as u32 + 1, did, handle, score: score as u32, wave: wave as u32 })
+            .map(|(i, (did, handle, score, wave, jet))| BoardRow {
+                rank: i as u32 + 1,
+                did,
+                handle,
+                score: score as u32,
+                wave: wave as u32,
+                jet: u8::try_from(jet).unwrap_or(NO_JET),
+            })
             .collect()
     }
 
     /// The global top `n`.
     pub async fn top(&self, n: usize) -> Result<Vec<BoardRow>, DbErr> {
-        const SQL: &str = "SELECT b.did, COALESCE(p.handle, b.did), b.score, b.wave FROM best b LEFT JOIN players p ON p.did = b.did
+        const SQL: &str = "SELECT b.did, COALESCE(p.handle, b.did), b.score, b.wave, b.jet FROM best b LEFT JOIN players p ON p.did = b.did
              ORDER BY b.score DESC, b.at ASC LIMIT ";
         let found = match self {
             Db::Sqlite(db) => {
                 let db = Self::lite(db);
                 let mut q = db.prepare(&format!("{SQL}?1")).map_err(e)?;
-                q.query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map_err(e)?.collect::<Result<_, _>>().map_err(e)?
+                q.query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map_err(e)?.collect::<Result<_, _>>().map_err(e)?
             }
             Db::Postgres(pool) => sqlx::query_as(&format!("{SQL}$1")).bind(n as i64).fetch_all(pool).await.map_err(e)?,
         };
@@ -516,14 +532,14 @@ impl Db {
         if dids.is_empty() {
             return Ok((vec![], None));
         }
-        const SQL: &str = "SELECT b.did, COALESCE(p.handle, b.did), b.score, b.wave FROM best b LEFT JOIN players p ON p.did = b.did WHERE b.did";
+        const SQL: &str = "SELECT b.did, COALESCE(p.handle, b.did), b.score, b.wave, b.jet FROM best b LEFT JOIN players p ON p.did = b.did WHERE b.did";
         const ORDER: &str = "ORDER BY b.score DESC, b.at ASC";
         let found = match self {
             Db::Sqlite(db) => {
                 let db = Self::lite(db);
                 let marks = vec!["?"; dids.len()].join(",");
                 let mut q = db.prepare(&format!("{SQL} IN ({marks}) {ORDER}")).map_err(e)?;
-                q.query_map(params_from_iter(dids.iter()), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                q.query_map(params_from_iter(dids.iter()), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
                     .map_err(e)?
                     .collect::<Result<_, _>>()
                     .map_err(e)?
@@ -719,7 +735,7 @@ pub mod tests {
     }
 
     fn run(seed: u32, score: u32, wave: u32, kills: u32, secs: f32) -> Run {
-        Run { seed, score, wave, kills, secs }
+        Run { seed, score, wave, kills, secs, jet: 0x10 }
     }
 
     /// The same checks on any database (SQLite here, Postgres below).
