@@ -218,7 +218,7 @@ const SPECS: [JetSpec; 4] = [
         wing: [Vec3::new(1.5, 0.3, -2.0), Vec3::new(4.5, 0.08, 0.9), Vec3::new(4.5, 0.08, 2.0), Vec3::new(1.5, 0.3, 2.6)],
         vectoring: false,
         rudder_brake: false,
-        eye: Vec3::new(0.0, 0.97, -4.57),
+        eye: Vec3::new(0.0, 0.87, -4.57),
         chase: 0.88,
         lex: true,
         vapour: 1.0,
